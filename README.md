@@ -1,3 +1,11 @@
+---
+title: ChargeGuard API
+emoji: 🛡️
+colorFrom: purple
+colorTo: gray
+sdk: docker
+app_port: 7860
+---
 # ChargeGuard – نظام متقدم لمنع Card Testing في WooCommerce
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
