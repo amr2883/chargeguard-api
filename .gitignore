@@ -1,0 +1,11 @@
+# Large binaries and dependencies
+cloudflared.exe
+grafana/
+prometheus/
+prometheus.yml
+node_modules/
+.env
+*.log
+*.map
+.DS_Store
+prisma/dev.db
