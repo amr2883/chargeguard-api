@@ -1,0 +1,740 @@
+﻿const logger = require('../lib/logger');
+const express = require('express');
+const router = express.Router();
+const { calculateRiskScore } = require('../lib/riskScoring');
+const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
+const db = require('../lib/db');
+const { normalizeBin } = require('../lib/binIntelligence');
+const { buildGraphFromOrder } = require('../lib/identityGraph');
+const prometheus = require('../lib/prometheus');
+
+const apiKeyAuth = (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey !== process.env.API_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+  next();
+};
+/**
+ * @swagger
+ * /risk/evaluate:
+ *   post:
+ *     summary: Evaluate an order for fraud risk
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             $ref: '#/components/schemas/EvaluateRequest'
+ *     responses:
+ *       200:
+ *         description: Risk assessment result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/EvaluateResponse'
+ *       400:
+ *         description: Missing required fields
+ *       403:
+ *         description: Blocked (blacklist or velocity)
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/evaluate', apiKeyAuth, async (req, res) => {
+  try {
+    // استخراج البيانات
+    const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
+    const merchantId = bodyMerchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+        // Idempotency: التحقق من الطلبات المكررة خلال آخر 5 دقائق
+    const idempotencyWindow = 5 * 60 * 1000; // 5 دقائق
+    const existingOrder = await db.order.findUnique({
+      where: { orderId },
+      select: { decision: true, riskScore: true, connectedRisk: true, signalsSnapshot: true, createdAt: true }
+    });
+    if (existingOrder && (Date.now() - new Date(existingOrder.createdAt).getTime()) < idempotencyWindow) {
+      // إعادة الرد المخزن
+      const oldSnapshot = existingOrder.signalsSnapshot ? JSON.parse(existingOrder.signalsSnapshot) : {};
+      prometheus.recordIdempotencyHit();
+      return res.json({
+        orderId,
+        score: existingOrder.riskScore,
+        decision: existingOrder.decision,
+        flags: oldSnapshot.flags || [],
+        connectedRisk: existingOrder.connectedRisk || 0,
+        cached: true
+      });
+    }
+
+    logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
+
+    // 0. فحص القائمة السوداء
+    const blacklistCheck = await db.blacklistEntry.findFirst({
+      where: {
+        merchantId,
+        OR: [
+          { type: 'EMAIL', value: email },
+          { type: 'IP', value: ipAddress },
+          { type: 'DEVICE_FINGERPRINT', value: deviceFingerprint }
+        ],
+        AND: [
+          { OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } }
+          ] }
+        ]
+      }
+    });
+    if (blacklistCheck) {
+      prometheus.recordBlacklistHit(blacklistCheck.type);
+      return res.status(403).json({
+        error: 'Request blocked: entity is blacklisted',
+        reason: blacklistCheck.reason || 'Blacklisted',
+        decision: 'block'
+      });
+    }
+
+
+    // 1. فحص السرعة (Velocity Check)
+    const velocityCheck = checkVelocity({ ip: ipAddress, deviceFingerprint });
+    if (velocityCheck.blocked) {
+      return res.status(403).json({
+        error: 'Request blocked due to suspicious activity',
+        reason: velocityCheck.reason,
+        decision: 'block'
+      });
+    }
+
+    // 1. بناء كائن order
+    const order = {
+      id: orderId,
+      email: email,
+      ipAddress: ipAddress,
+      deviceFingerprint: deviceFingerprint,
+      deviceId: deviceFingerprint,
+      amount: amount,
+      billingAddress: billingCountry ? JSON.stringify({ country: billingCountry }) : null,
+      shippingAddress: shippingCountry ? JSON.stringify({ country: shippingCountry }) : null,
+      customerLoginId: req.body.customerLoginId || null,
+      createdAt: new Date().toISOString(),
+      eciCode: null,
+      avsResponse: null,
+      cvv2Response: null,
+      payment_details: bin ? { credit_card_bin: bin } : null,
+      fingerprintVersion: 'v3',
+      fingerprintConfig: null,
+      fingerprintHardware: null,
+      isNewCustomer: isNewCustomer || false,
+    };
+
+    // 2. تجهيز البيانات المساعدة
+    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    // جلب الطلبات السابقة من قاعدة البيانات
+    // جلب آخر 200 طلب فقط لحساب المتوسطات (أفضل أداء)
+    const recentOrders = await db.order.findMany({
+      where: { merchantId, createdAt: { gte: last7days } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+
+    const formattedOrders = recentOrders.map(o => ({
+      id: o.orderId,
+      email: o.email,
+      ipAddress: o.ipAddress,
+      deviceFingerprint: o.deviceFingerprint,
+      deviceId: o.deviceFingerprint,
+      amount: o.amount,
+      createdAt: o.createdAt,
+      riskLevel: o.riskLevel,
+    }));
+
+    // حساب الـ velocity counts باستخدام استعلامات منفصلة (أسرع)
+    const last1h = new Date(Date.now() - 60 * 60 * 1000);
+    const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+
+    const deviceVelocityCount = deviceFingerprint ? await db.order.count({
+      where: { merchantId, deviceFingerprint, createdAt: { gte: last1h } }
+    }) : 0;
+
+    const ipVelocityCount = ipAddress ? await db.order.count({
+      where: { merchantId, ipAddress, createdAt: { gte: last24h } }
+    }) : 0;
+
+    const emailVelocityCount = email ? await db.order.count({
+      where: { merchantId, email, createdAt: { gte: last6h } }
+    }) : 0;
+
+    // إضافة هذه القيم إلى computedSignals (يمكن تمريرها إلى riskScoring لاحقاً)
+    // لكننا سنستخدمها مباشرة في signalsSnapshot
+
+    // جلب النزاعات السابقة (آخر 90 يوم)
+    const disputes = await db.disputeOutcome.findMany({
+      where: {
+        merchantId,
+        resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+        OR: [
+          { order: { email: email } },
+          { order: { deviceFingerprint: deviceFingerprint } },
+          { order: { ipAddress: ipAddress } }
+        ]
+      },
+      include: { order: true },
+      take: 200
+    });
+    const blacklist = [];
+
+    // 3. بناء الرسم البياني للهوية أولاً
+    const orderForGraph = {
+      deviceFingerprint: deviceFingerprint,
+      deviceId: deviceFingerprint,
+      email: email,
+      ipAddress: ipAddress,
+      shippingAddress: shippingCountry ? JSON.stringify({ country: shippingCountry }) : null,
+      fingerprintVersion: 'v3',
+    };
+
+    try {
+      await buildGraphFromOrder(orderForGraph, merchantId);
+    } catch (err) {
+      logger.error({ module: 'risk', action: 'buildGraphFromOrder', error: err.message }, 'Graph build error');
+    }
+        const evaluateStart = Date.now();
+
+    // 4. استدعاء محرك التقييم (مع تمرير velocityCounts)
+    const riskResult = await calculateRiskScore(
+      order,
+      formattedOrders,
+      disputes,
+      blacklist,
+      merchantId,
+      false,
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount }  // velocity counts
+    );
+
+    // 5. بناء الاستجابة
+    const response = {
+      orderId: orderId,
+      score: riskResult.score,
+      decision: riskResult.decision.includes('Approve') ? 'approve' :
+                riskResult.decision.includes('Review') ? 'review' : 'block',
+      flags: riskResult.flags,
+      connectedRisk: 0,
+    };
+
+     // استخدام connectedRisk مباشرة من نتيجة Identity Graph
+  response.connectedRisk = riskResult.graphRisk || 0;
+    // تسجيل المحاولة الفاشلة في طبقة السرعة
+    if (response.decision === 'block') {
+      recordFailedAttempt({ ip: ipAddress, deviceFingerprint });
+    }
+
+    // 6. حفظ الطلب في قاعدة البيانات
+    if (orderId) {
+        const computed = riskResult.computedSignals || {};
+      // استخدام القيم المحسوبة مسبقاً من externalVelocity (الموجودة في النطاق)
+      const deviceVelocityCountFinal = deviceVelocityCount;   // من أعلى الدالة
+      const ipVelocityCountFinal = ipVelocityCount;           // من أعلى الدالة
+      const emailVelocityCountFinal = emailVelocityCount;     // من أعلى الدالة
+      const isNewCustomerComputed = computed.isNewCustomer || false;
+      const amountAnomaly = (computed.orderMultiple || 0) >= 3;
+
+      const shippingMismatchFlag = riskResult.flags.find(f => f.text.includes('Shipping country differs from billing'));
+      const shippingBillingMismatch = !!shippingMismatchFlag;
+
+      const signalsSnapshot = {
+        email,
+        ipAddress,
+        bin: bin || null,
+        deviceFingerprint,
+        amount,
+        billingCountry,
+        shippingCountry,
+        isNewCustomer: isNewCustomerComputed,
+        deviceVelocityCount: deviceVelocityCountFinal,
+        ipVelocityCount: ipVelocityCountFinal,
+        emailVelocityCount: emailVelocityCountFinal,
+        shippingBillingMismatch,
+        binIssuerMismatch: riskResult.binIntel && riskResult.binIntel.issuerCountry !== billingCountry,
+        amountAnomaly,
+        ipIntel: riskResult.ipIntel || null,
+        emailIntel: riskResult.emailIntel || null,
+        binIntel: riskResult.binIntel || null,
+        connectedRisk: response.connectedRisk,
+        graphPath: riskResult.graphPath || [],
+        flags: riskResult.flags,
+        positives: riskResult.positives,
+      };
+
+      const savedOrder = await db.order.upsert({
+        where: { orderId },
+        create: {
+          orderId,
+          merchantId,
+          amount: amount || 0,
+          currency: 'USD',
+          email: email || null,
+          ipAddress: ipAddress || null,
+          deviceFingerprint: deviceFingerprint || null,
+          riskScore: riskResult.score,
+          riskLevel: response.decision === 'approve' ? 'low' : (response.decision === 'review' ? 'medium' : 'high'),
+          decision: response.decision,
+          connectedRisk: response.connectedRisk,
+          signalsSnapshot: JSON.stringify(signalsSnapshot),
+        },
+        update: {
+          amount: amount || 0,
+          email: email || null,
+          ipAddress: ipAddress || null,
+          deviceFingerprint: deviceFingerprint || null,
+          riskScore: riskResult.score,
+          riskLevel: response.decision === 'approve' ? 'low' : (response.decision === 'review' ? 'medium' : 'high'),
+          decision: response.decision,
+          connectedRisk: response.connectedRisk,
+          fingerprintVersion: order.fingerprintVersion || null,
+          fingerprintStatus: order.fingerprintStatus || null,
+          signalsSnapshot: JSON.stringify(signalsSnapshot),
+        },
+      });
+
+      // حفظ RiskEvaluation إذا كان القرار block أو review
+      if (response.decision === 'block' || response.decision === 'review') {
+        await db.riskEvaluation.upsert({
+        where: { orderId: savedOrder.id },
+        create: {
+          orderId: savedOrder.id,
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: response.decision === 'approve' ? 'low' : (response.decision === 'review' ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+            scoringVersion: riskResult.scoringVersion || 'v1.0',
+          },
+          update: {
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: response.decision === 'approve' ? 'low' : (response.decision === 'review' ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+          },
+        });
+      }
+    }
+
+    prometheus.recordEvaluateDuration(Date.now() - evaluateStart);
+    prometheus.recordEvaluateDecision(response.decision);
+    res.json(response);
+  } catch (error) {
+    logger.error({ module: 'risk', error: error.message, stack: error.stack }, 'Evaluate error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// نقطة نهاية مؤقتة لوضع علامة احتيال على جهاز (لأغراض الاختبار فقط)
+/**
+ * @swagger
+ * /risk/mark-fraud:
+ *   post:
+ *     summary: Mark a device as fraudulent (for testing)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [deviceFingerprint, merchantId]
+ *             properties:
+ *               deviceFingerprint: { type: string }
+ *               email: { type: string }
+ *               ipAddress: { type: string }
+ *               merchantId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Device marked as fraud
+ *       400:
+ *         description: Missing deviceFingerprint or merchantId
+ *       500:
+ *         description: Internal error
+ */
+router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
+  // منع الوصول في بيئة الإنتاج
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Endpoint not available in production' });
+  }
+  try {
+    const { deviceFingerprint, email, ipAddress } = req.body;
+    if (!deviceFingerprint) {
+      return res.status(400).json({ error: 'deviceFingerprint required' });
+    }
+
+    const { markOrderAsFraud } = require('../lib/identityGraph');
+    
+    const mockOrder = {
+      deviceFingerprint,
+      deviceId: deviceFingerprint,
+      email: email || 'fraud@test.com',
+      ipAddress: ipAddress || '192.168.1.1',
+      shippingAddress: JSON.stringify({ country: 'US' }),
+      fingerprintVersion: 'v3',
+    };
+
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+    await markOrderAsFraud(mockOrder, merchantId);
+    
+    res.json({ success: true, message: `Device ${deviceFingerprint} marked as fraud` });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'mark-fraud', error: error.message }, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+// نقطة نهاية للتعلم من نتائج الحظر (Feedback Loop)
+// تستقبل orderId و isFraud (true = الحظر كان صحيحًا, false = الحظر كان خاطئًا)
+const { processFeedback } = require('../lib/feedbackLoop');
+/**
+ * @swagger
+ * /risk/feedback:
+ *   post:
+ *     summary: Provide feedback on a previous evaluation (for learning)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [orderId, isFraud]
+ *             properties:
+ *               orderId: { type: string }
+ *               isFraud: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Feedback recorded
+ *       400:
+ *         description: Missing orderId or isFraud
+ *       500:
+ *         description: Internal error
+ */
+router.post('/feedback', apiKeyAuth, async (req, res) => {
+  try {
+    const { orderId, isFraud } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId is required' });
+    }
+    if (isFraud === undefined || isFraud === null) {
+      return res.status(400).json({ error: 'isFraud is required (true/false)' });
+    }
+
+    // استدعاء محرك التعلم
+    // نمرر isFraud كنتيجة (true = lost, false = won)
+    await processFeedback(orderId, isFraud ? 'lost' : 'won');
+
+    res.json({ success: true, message: 'Feedback recorded successfully' });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'feedback', error: error.message }, 'Feedback API error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// نقطة نهاية مؤقتة لاختبار buildGraphFromOrder
+/**
+ * @swagger
+ * /risk/test-graph:
+ *   post:
+ *     summary: Test identity graph building (for debugging)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [deviceFingerprint, merchantId]
+ *             properties:
+ *               deviceFingerprint: { type: string }
+ *               email: { type: string }
+ *               ipAddress: { type: string }
+ *               merchantId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Graph built
+ *       400:
+ *         description: Missing deviceFingerprint or merchantId
+ *       500:
+ *         description: Internal error
+ */
+router.post('/test-graph', apiKeyAuth, async (req, res) => {
+  // منع الوصول في بيئة الإنتاج
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ error: 'Endpoint not available in production' });
+  }
+  try {
+    const { deviceFingerprint, email, ipAddress } = req.body;
+    if (!deviceFingerprint) {
+      return res.status(400).json({ error: 'deviceFingerprint required' });
+    }
+
+    const { buildGraphFromOrder } = require('../lib/identityGraph');
+    
+    const mockOrder = {
+      deviceFingerprint,
+      deviceId: deviceFingerprint,
+      email: email || 'test@test.com',
+      ipAddress: ipAddress || '8.8.8.8',
+      shippingAddress: JSON.stringify({ country: 'US' }),
+      fingerprintVersion: 'v3',
+    };
+
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+    await buildGraphFromOrder(mockOrder, merchantId);
+    
+    res.json({ success: true, message: 'Graph built' });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'test-graph', error: error.message }, error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+// ========== Blacklist Management Endpoints ==========
+// إضافة عنصر إلى القائمة السوداء
+/**
+ * @swagger
+ * /risk/blacklist:
+ *   post:
+ *     summary: Add an entry to the blacklist
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [merchantId, type, value]
+ *             properties:
+ *               merchantId: { type: string }
+ *               type: { type: string, enum: [EMAIL, IP, DEVICE_FINGERPRINT] }
+ *               value: { type: string }
+ *               reason: { type: string }
+ *               expiresAt: { type: string, format: date-time }
+ *               createdBy: { type: string }
+ *     responses:
+ *       200:
+ *         description: Entry created
+ *       400:
+ *         description: Invalid input
+ */
+router.post('/blacklist', apiKeyAuth, async (req, res) => {
+  try {
+    const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
+    if (!merchantId || !type || !value) {
+      return res.status(400).json({ error: 'merchantId, type, and value are required' });
+    }
+    // التحقق من صحة النوع
+    const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
+    }
+
+    const blacklistEntry = await db.blacklistEntry.create({
+      data: {
+        merchantId,
+        type,
+        value,
+        reason: reason || null,
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        createdBy: createdBy || null,
+      },
+    });
+    res.json({ success: true, entry: blacklistEntry });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message }, 'Error adding blacklist entry');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// حذف عنصر من القائمة السوداء
+/**
+ * @swagger
+ * /risk/blacklist/{id}:
+ *   delete:
+ *     summary: Delete a blacklist entry
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [merchantId]
+ *             properties:
+ *               merchantId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Entry deleted
+ *       404:
+ *         description: Entry not found
+ */
+router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+    // التأكد من أن العنصر ينتمي إلى نفس التاجر
+    const existing = await db.blacklistEntry.findFirst({
+      where: { id, merchantId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Blacklist entry not found or not owned by this merchant' });
+    }
+
+    await db.blacklistEntry.delete({ where: { id } });
+    res.json({ success: true, message: 'Blacklist entry deleted' });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// ========== GET Blacklist (Query) ==========
+// استعراض القائمة السوداء للتاجر الحالي
+/**
+ * @swagger
+ * /risk/blacklist:
+ *   get:
+ *     summary: Get blacklist entries for a merchant
+ *     parameters:
+ *       - in: query
+ *         name: merchantId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: query
+ *         name: type
+ *         schema: { type: string, enum: [EMAIL, IP, DEVICE_FINGERPRINT] }
+ *       - in: query
+ *         name: includeExpired
+ *         schema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: List of blacklist entries
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 entries: { type: array, items: { $ref: '#/components/schemas/BlacklistEntry' } }
+ */
+router.get('/blacklist', apiKeyAuth, async (req, res) => {
+  try {
+    const merchantId = req.query.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required (as query param or header)' });
+    }
+
+    const { type, includeExpired } = req.query;
+    const where = { merchantId };
+
+    // تصفية حسب النوع (اختياري)
+    if (type) {
+      const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
+      if (!validTypes.includes(type)) {
+        return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
+      }
+      where.type = type;
+    }
+
+    // تصفية الصلاحية: بشكل افتراضي نعرض فقط العناصر السارية (غير منتهية أو expiresAt null)
+    if (includeExpired !== 'true') {
+      where.OR = [
+        { expiresAt: null },
+        { expiresAt: { gt: new Date() } }
+      ];
+    }
+
+    const blacklistEntries = await db.blacklistEntry.findMany({
+      where,
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json({ success: true, entries: blacklistEntries });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'blacklist-get', error: error.message }, 'Error fetching blacklist');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// ========== UPDATE Blacklist Entry ==========
+/**
+ * @swagger
+ * /risk/blacklist/{id}:
+ *   put:
+ *     summary: Update a blacklist entry (reason or expiresAt)
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               merchantId: { type: string }
+ *               reason: { type: string }
+ *               expiresAt: { type: string, format: date-time, nullable: true }
+ *     responses:
+ *       200:
+ *         description: Entry updated
+ *       400:
+ *         description: Missing merchantId
+ *       404:
+ *         description: Entry not found or not owned by this merchant
+ */
+router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+    // التحقق من ملكية العنصر
+    const existing = await db.blacklistEntry.findFirst({
+      where: { id, merchantId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Blacklist entry not found or not owned by this merchant' });
+    }
+
+    const { reason, expiresAt } = req.body;
+    const updateData = {};
+    if (reason !== undefined) updateData.reason = reason;
+    if (expiresAt !== undefined) {
+      updateData.expiresAt = expiresAt ? new Date(expiresAt) : null;
+    }
+
+    const updated = await db.blacklistEntry.update({
+      where: { id },
+      data: updateData,
+    });
+
+    res.json({ success: true, entry: updated });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'blacklist-update', error: error.message }, 'Error updating blacklist entry');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+module.exports = router;
