@@ -1,6 +1,10 @@
 ---
 title: ChargeGuard API
+<<<<<<< HEAD
 emoji: ???
+=======
+emoji: 🛡️
+>>>>>>> f1c34333185553dc76a82267b17ccfaebc05190e
 colorFrom: purple
 colorTo: gray
 sdk: docker
