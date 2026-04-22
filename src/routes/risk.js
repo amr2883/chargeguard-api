@@ -737,4 +737,259 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
   }
 });
 
+// WooCommerce webhook endpoint
+router.post('/woocommerce-webhook', apiKeyAuth, async (req, res) => {
+  try {
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+    // 1. Get raw body for signature verification
+    const rawBody = req.rawBody;
+    if (!rawBody) {
+      return res.status(400).json({ error: 'Raw body missing' });
+    }
+
+    // 2. Verify WooCommerce signature (if secret is configured)
+    const wcSecret = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
+    const signature = req.headers['x-wc-webhook-signature'];
+    if (wcSecret && signature) {
+      const { verifyWebhookSignature } = require('../lib/woocommerce');
+      const isValid = verifyWebhookSignature(rawBody, signature, wcSecret);
+      if (!isValid) {
+        logger.warn({ module: 'risk', merchantId, signature }, 'Invalid WooCommerce signature');
+        return res.status(401).json({ error: 'Invalid signature' });
+      }
+    } else if (wcSecret && !signature) {
+      // Secret configured but signature missing – reject
+      return res.status(401).json({ error: 'Missing signature' });
+    }
+    // If no secret configured, skip signature verification (not recommended for production)
+
+    // 3. Extract order data
+    const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
+    let extracted;
+    try {
+      extracted = extractOrderData(req.body);
+    } catch (err) {
+      logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
+      return res.status(400).json({ error: 'Invalid payload structure' });
+    }
+
+    // 4. Idempotency: check if order already processed
+    const existingOrder = await db.order.findUnique({
+      where: { orderId: extracted.orderId },
+      select: { decision: true, riskScore: true, signalsSnapshot: true, createdAt: true }
+    });
+    if (existingOrder) {
+      // Return cached response (within reasonable time window, e.g., 24h)
+      const ageHours = (Date.now() - new Date(existingOrder.createdAt).getTime()) / (1000 * 60 * 60);
+      if (ageHours < 24) {
+        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request – returning cached result');
+        return res.json({
+          orderId: extracted.orderId,
+          score: existingOrder.riskScore,
+          decision: existingOrder.decision,
+          cached: true
+        });
+      }
+    }
+
+    // 5. Build request for risk scoring
+    const riskRequest = buildRiskEvaluationRequest(extracted);
+    riskRequest.merchantId = merchantId;
+    riskRequest.deviceFingerprint = riskRequest.deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+
+    // 6. Call risk scoring (we need to fetch allOrders, disputes, blacklist similarly to /evaluate)
+    // For simplicity, we'll reuse the same logic as in /evaluate but with the built request.
+    // However, to avoid code duplication, we could refactor the scoring part into a shared function.
+    // Here we'll inline similar steps (you can later extract a function).
+
+    // Load recent orders, disputes, blacklist for this merchant
+    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentOrders = await db.order.findMany({
+      where: { merchantId, createdAt: { gte: last7days } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+    const formattedOrders = recentOrders.map(o => ({
+      id: o.orderId,
+      email: o.email,
+      ipAddress: o.ipAddress,
+      deviceFingerprint: o.deviceFingerprint,
+      amount: o.amount,
+      createdAt: o.createdAt,
+      riskLevel: o.riskLevel,
+    }));
+    const disputes = await db.disputeOutcome.findMany({
+      where: {
+        merchantId,
+        resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+        OR: [
+          { order: { email: extracted.email } },
+          { order: { deviceFingerprint: riskRequest.deviceFingerprint } },
+          { order: { ipAddress: extracted.ipAddress } }
+        ]
+      },
+      include: { order: true },
+      take: 200
+    });
+    const blacklist = await db.blacklistEntry.findMany({
+      where: {
+        merchantId,
+        OR: [
+          { type: 'EMAIL', value: extracted.email },
+          { type: 'IP', value: extracted.ipAddress },
+          { type: 'DEVICE_FINGERPRINT', value: riskRequest.deviceFingerprint }
+        ],
+        AND: [
+          { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
+        ]
+      }
+    });
+
+    // Velocity counts (optional)
+    const last1h = new Date(Date.now() - 60 * 60 * 1000);
+    const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const deviceVelocityCount = riskRequest.deviceFingerprint ? await db.order.count({
+      where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h } }
+    }) : 0;
+    const ipVelocityCount = extracted.ipAddress ? await db.order.count({
+      where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h } }
+    }) : 0;
+    const emailVelocityCount = extracted.email ? await db.order.count({
+      where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
+    }) : 0;
+
+    // Build order object for riskScoring (compatible with calculateRiskScore)
+    const orderForScoring = {
+      id: extracted.orderId,
+      email: extracted.email,
+      ipAddress: extracted.ipAddress,
+      deviceFingerprint: riskRequest.deviceFingerprint,
+      amount: extracted.amount,
+      billingAddress: extracted.billingCountry ? JSON.stringify({ country: extracted.billingCountry }) : null,
+      shippingAddress: extracted.shippingCountry ? JSON.stringify({ country: extracted.shippingCountry }) : null,
+      customerLoginId: extracted.customerLoginId,
+      createdAt: extracted.createdAt || new Date().toISOString(),
+      // Additional fields might be needed; default to null
+      eciCode: null,
+      avsResponse: null,
+      cvv2Response: null,
+      payment_details: extracted.bin ? { credit_card_bin: extracted.bin } : null,
+      fingerprintVersion: 'v3',
+      fingerprintConfig: null,
+      fingerprintHardware: null,
+      isNewCustomer: false, // will be computed inside riskScoring
+    };
+
+    const { calculateRiskScore } = require('../lib/riskScoring');
+    const riskResult = await calculateRiskScore(
+      orderForScoring,
+      formattedOrders,
+      disputes,
+      blacklist,
+      merchantId,
+      true,  // saveEvaluation
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
+    );
+
+    // Save order and risk evaluation (similar to /evaluate)
+    const signalsSnapshot = {
+      email: extracted.email,
+      ipAddress: extracted.ipAddress,
+      bin: extracted.bin,
+      deviceFingerprint: riskRequest.deviceFingerprint,
+      amount: extracted.amount,
+      billingCountry: extracted.billingCountry,
+      shippingCountry: extracted.shippingCountry,
+      isNewCustomer: riskResult.computedSignals?.isNewCustomer || false,
+      deviceVelocityCount,
+      ipVelocityCount,
+      emailVelocityCount,
+      shippingBillingMismatch: extracted.billingCountry !== extracted.shippingCountry,
+      binIssuerMismatch: false, // would need BIN intel
+      amountAnomaly: (riskResult.computedSignals?.orderMultiple || 0) >= 3,
+      ipIntel: riskResult.ipIntel || null,
+      emailIntel: riskResult.emailIntel || null,
+      binIntel: riskResult.binIntel || null,
+      connectedRisk: riskResult.graphRisk || 0,
+      graphPath: riskResult.graphPath || [],
+      flags: riskResult.flags,
+      positives: riskResult.positives,
+    };
+
+    await db.order.upsert({
+      where: { orderId: extracted.orderId },
+      create: {
+        orderId: extracted.orderId,
+        merchantId,
+        amount: extracted.amount,
+        currency: 'USD',
+        email: extracted.email,
+        ipAddress: extracted.ipAddress,
+        deviceFingerprint: riskRequest.deviceFingerprint,
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        connectedRisk: riskResult.graphRisk || 0,
+        signalsSnapshot: JSON.stringify(signalsSnapshot),
+        fingerprintVersion: 'v3',
+      },
+      update: {
+        amount: extracted.amount,
+        email: extracted.email,
+        ipAddress: extracted.ipAddress,
+        deviceFingerprint: riskRequest.deviceFingerprint,
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        connectedRisk: riskResult.graphRisk || 0,
+        signalsSnapshot: JSON.stringify(signalsSnapshot),
+      },
+    });
+
+    // Optionally save RiskEvaluation if decision is block or review
+    if (riskResult.decision.includes('Block') || riskResult.decision.includes('Review')) {
+      const savedOrder = await db.order.findUnique({ where: { orderId: extracted.orderId } });
+      if (savedOrder) {
+        await db.riskEvaluation.upsert({
+          where: { orderId: savedOrder.id },
+          create: {
+            orderId: savedOrder.id,
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+            scoringVersion: riskResult.scoringVersion || 'v1.0',
+          },
+          update: {
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+          },
+        });
+      }
+    }
+
+    // Return response
+    res.json({
+      orderId: extracted.orderId,
+      score: riskResult.score,
+      decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+      flags: riskResult.flags,
+      connectedRisk: riskResult.graphRisk || 0,
+    });
+
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', error: error.message, stack: error.stack }, 'Webhook error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;
