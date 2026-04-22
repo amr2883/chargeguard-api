@@ -24,7 +24,7 @@ try {
 } catch (e) {
   console.warn('⚠️ Swagger UI not available:', e.message);
 }
-app.use(express.json({ limit: '1mb', strict: false }));
+app.use(express.json({ limit: '1mb', strict: false, verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(morgan('dev'));
 // Global error handler
 app.use((err, req, res, next) => {
