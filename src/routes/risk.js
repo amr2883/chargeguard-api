@@ -740,18 +740,28 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
 // WooCommerce webhook endpoint
 router.post('/woocommerce-webhook', async (req, res) => {
   try {
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
-
     // 1. Get raw body for signature verification
     const rawBody = req.rawBody;
     if (!rawBody) {
       return res.status(400).json({ error: 'Raw body missing' });
     }
 
-    // 2. Verify WooCommerce signature (if secret is configured)
+    // 2. Parse raw body to JSON (نحدد parsedBody الأول)
+    let parsedBody;
+    try {
+      parsedBody = JSON.parse(rawBody.toString());
+    } catch (err) {
+      logger.error({ module: 'risk', err: err.message }, 'Failed to parse webhook body');
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+
+    // 3. استخراج merchantId (بعدين نستخدم parsedBody)
+    const merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+    // 4. Verify WooCommerce signature (if secret is configured)
     const wcSecret = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
     const signature = req.headers['x-wc-webhook-signature'];
     if (wcSecret && signature) {
@@ -767,26 +777,18 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
     // If no secret configured, skip signature verification (not recommended for production)
 
-   // 3. Parse raw body to JSON
-  let parsedBody;
-  try {
-    parsedBody = JSON.parse(rawBody.toString());
-  } catch (err) {
-    logger.error({ module: 'risk', err: err.message }, 'Failed to parse webhook body');
-    return res.status(400).json({ error: 'Invalid JSON payload' });
-  }
-  // 4. Extract order data
-  const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
-  let extracted;
-  try {
-    extracted = extractOrderData(parsedBody);
-  } catch (err) {
-    logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
-    return res.status(400).json({ error: 'Invalid payload structure' });
-  }
+   // 5. Extract order data
+   const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
+   let extracted;
+   try {
+     extracted = extractOrderData(parsedBody);
+   } catch (err) {
+     logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
+     return res.status(400).json({ error: 'Invalid payload structure' });
+   }
 
-    // 4. Idempotency: check if order already processed
-    const existingOrder = await db.order.findUnique({
+   // 6. Idempotency: check if order already processed
+   const existingOrder = await db.order.findUnique({
       where: { orderId: extracted.orderId },
       select: { decision: true, riskScore: true, signalsSnapshot: true, createdAt: true }
     });
@@ -804,17 +806,12 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // 5. Build request for risk scoring
+    // 7. Build request for risk scoring
     const riskRequest = buildRiskEvaluationRequest(extracted);
     riskRequest.merchantId = merchantId;
     riskRequest.deviceFingerprint = riskRequest.deviceFingerprint || `wc_${extracted.orderId}`; // fallback
 
-    // 6. Call risk scoring (we need to fetch allOrders, disputes, blacklist similarly to /evaluate)
-    // For simplicity, we'll reuse the same logic as in /evaluate but with the built request.
-    // However, to avoid code duplication, we could refactor the scoring part into a shared function.
-    // Here we'll inline similar steps (you can later extract a function).
-
-    // Load recent orders, disputes, blacklist for this merchant
+    // 8. Load recent orders, disputes, blacklist for this merchant
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentOrders = await db.order.findMany({
       where: { merchantId, createdAt: { gte: last7days } },
@@ -857,7 +854,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     });
 
-    // Velocity counts (optional)
+    // 9. Velocity counts
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -871,7 +868,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
     }) : 0;
 
-    // Build order object for riskScoring (compatible with calculateRiskScore)
+    // 10. Build order object for riskScoring (compatible with calculateRiskScore)
     const orderForScoring = {
       id: extracted.orderId,
       email: extracted.email,
@@ -882,7 +879,6 @@ router.post('/woocommerce-webhook', async (req, res) => {
       shippingAddress: extracted.shippingCountry ? JSON.stringify({ country: extracted.shippingCountry }) : null,
       customerLoginId: extracted.customerLoginId,
       createdAt: extracted.createdAt || new Date().toISOString(),
-      // Additional fields might be needed; default to null
       eciCode: null,
       avsResponse: null,
       cvv2Response: null,
@@ -904,7 +900,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
     );
 
-    // Save order and risk evaluation (similar to /evaluate)
+    // 11. Build signals snapshot
     const signalsSnapshot = {
       email: extracted.email,
       ipAddress: extracted.ipAddress,
@@ -929,6 +925,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       positives: riskResult.positives,
     };
 
+    // 12. Save order and risk evaluation
     await db.order.upsert({
       where: { orderId: extracted.orderId },
       create: {
