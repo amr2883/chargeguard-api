@@ -738,7 +738,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
 });
 
 // WooCommerce webhook endpoint
-router.post('/woocommerce-webhook', apiKeyAuth, async (req, res) => {
+router.post('/woocommerce-webhook', async (req, res) => {
   try {
     const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
@@ -767,15 +767,23 @@ router.post('/woocommerce-webhook', apiKeyAuth, async (req, res) => {
     }
     // If no secret configured, skip signature verification (not recommended for production)
 
-    // 3. Extract order data
-    const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
-    let extracted;
-    try {
-      extracted = extractOrderData(req.body);
-    } catch (err) {
-      logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
-      return res.status(400).json({ error: 'Invalid payload structure' });
-    }
+   // 3. Parse raw body to JSON
+  let parsedBody;
+  try {
+    parsedBody = JSON.parse(rawBody.toString());
+  } catch (err) {
+    logger.error({ module: 'risk', err: err.message }, 'Failed to parse webhook body');
+    return res.status(400).json({ error: 'Invalid JSON payload' });
+  }
+  // 4. Extract order data
+  const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
+  let extracted;
+  try {
+    extracted = extractOrderData(parsedBody);
+  } catch (err) {
+    logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
+    return res.status(400).json({ error: 'Invalid payload structure' });
+  }
 
     // 4. Idempotency: check if order already processed
     const existingOrder = await db.order.findUnique({
