@@ -741,7 +741,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
 router.post('/woocommerce-webhook', async (req, res) => {
   try {
     // 1. Get raw body for signature verification
-    const rawBody = req.rawBody;
+    const rawBody = req.body; // express.raw puts Buffer in req.body
     if (!rawBody) {
       return res.status(400).json({ error: 'Raw body missing' });
     }
