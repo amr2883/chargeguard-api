@@ -330,7 +330,7 @@ router.post('/evaluate', apiKeyAuth, async (req, res) => {
     res.json(response);
   } catch (error) {
     logger.error({ module: 'risk', error: error.message, stack: error.stack }, 'Evaluate error');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // نقطة نهاية مؤقتة لوضع علامة احتيال على جهاز (لأغراض الاختبار فقط)
@@ -437,7 +437,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
     res.json({ success: true, message: 'Feedback recorded successfully' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'feedback', error: error.message }, 'Feedback API error');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -553,7 +553,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entry: blacklistEntry });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message }, 'Error adding blacklist entry');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -603,7 +603,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
     res.json({ success: true, message: 'Blacklist entry deleted' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // ========== GET Blacklist (Query) ==========
@@ -670,7 +670,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entries: blacklistEntries });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-get', error: error.message }, 'Error fetching blacklist');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // ========== UPDATE Blacklist Entry ==========
@@ -733,7 +733,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entry: updated });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-update', error: error.message }, 'Error updating blacklist entry');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -996,7 +996,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
 
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', error: error.message, stack: error.stack }, 'Webhook error');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
