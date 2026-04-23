@@ -24,25 +24,9 @@ try {
 } catch (e) {
   console.warn('⚠️ Swagger UI not available:', e.message);
 }
-// Custom middleware: capture raw body and skip JSON parsing for webhook
-app.use((req, res, next) => {
-  let chunks = [];
-  req.on('data', chunk => chunks.push(chunk));
-  req.on('end', () => {
-    req.rawBody = Buffer.concat(chunks);
-    // Skip JSON parsing for WooCommerce webhook endpoint
-    if (req.originalUrl === '/api/risk/woocommerce-webhook') {
-      req.body = null;
-      return next();
-    }
-    try {
-      req.body = JSON.parse(req.rawBody.toString());
-    } catch (e) {
-      req.body = null;
-    }
-    next();
-  });
-});
+// Webhook raw body middleware (must be before express.json)
+app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
+app.use(express.json());
 app.use(morgan('dev'));
 // Global error handler
 app.use((err, req, res, next) => {
