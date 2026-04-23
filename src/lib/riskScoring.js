@@ -290,7 +290,7 @@ async function calculateRiskScore(
   // ─── Parallel Intel Calls ─────────────────────────────────────────────
   // IP + Email + BIN مستقلين تماماً — نشغلهم في نفس الوقت
   // Promise.allSettled يضمن إن فشل واحد مش بيوقف الباقيين
-  const binRaw = order.payment_details?.credit_card_bin ?? null;
+  const binRaw = order.payment_details?.card_bin ?? order.payment_details?.credit_card_bin ?? null;
   console.log(`[RISK] binRaw = ${binRaw}`);
   const [ipIntelSettled, emailIntelSettled, binIntelSettled] = await Promise.allSettled([
     ip ? getIPIntelligence(ip, merchantId) : Promise.resolve(null),

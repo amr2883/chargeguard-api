@@ -85,11 +85,10 @@ function normalizeBin(raw) {
 }
 
 // ─── Extract BIN from Shopify order ────────────────────────────────────
+// Extract BIN from order (WooCommerce primary, Shopify fallback)
 function extractBIN(order) {
-  // credit_card_bin = Shopify standard field
-  // payment_details?.cardBin = بعض الـ Shopify responses القديمة
-  // order.cardBin مش موجود في الـ schema — اتشال
-  const bin = order.payment_details?.credit_card_bin
+  const bin = order.payment_details?.card_bin
+           ?? order.payment_details?.credit_card_bin
            ?? order.payment_details?.cardBin
            ?? null;
   return normalizeBin(bin);
