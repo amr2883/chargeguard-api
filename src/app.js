@@ -46,6 +46,10 @@ app.use((req, res, next) => {
 app.use(morgan('dev'));
 // Global error handler
 app.use((err, req, res, next) => {
+  // Don't interfere with our webhook error handler
+  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    return next(err);
+  }
   console.error('🚨 Global error handler caught:', err.stack || err.message || err);
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
