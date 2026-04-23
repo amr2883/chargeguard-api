@@ -841,19 +841,23 @@ router.post('/woocommerce-webhook', async (req, res) => {
       include: { order: true },
       take: 200
     });
-    const blacklist = await db.blacklistEntry.findMany({
-      where: {
-        merchantId,
-        OR: [
-          { type: 'EMAIL', value: extracted.email },
-          { type: 'IP', value: extracted.ipAddress },
-          { type: 'DEVICE_FINGERPRINT', value: riskRequest.deviceFingerprint }
-        ],
-        AND: [
-          { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
-        ]
-      }
-    });
+    const blacklistOr = [];
+    if (extracted.email) blacklistOr.push({ type: 'EMAIL', value: extracted.email });
+    if (extracted.ipAddress) blacklistOr.push({ type: 'IP', value: extracted.ipAddress });
+    if (riskRequest.deviceFingerprint) blacklistOr.push({ type: 'DEVICE_FINGERPRINT', value: riskRequest.deviceFingerprint });
+
+    let blacklist = [];
+    if (blacklistOr.length > 0) {
+      blacklist = await db.blacklistEntry.findMany({
+        where: {
+          merchantId,
+          OR: blacklistOr,
+          AND: [
+            { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
+          ]
+        }
+      });
+    }
 
     // 9. Velocity counts
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
