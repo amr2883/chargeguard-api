@@ -1043,8 +1043,7 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
         ipAddress: true,
         deviceFingerprint: true,
         createdAt: true,
-        billingAddress: true,
-        shippingAddress: true,
+
         customerLoginId: true,
         fingerprintVersion: true,
         fingerprintConfig: true,
@@ -1112,8 +1111,12 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       ipAddress: existingOrder.ipAddress,
       deviceFingerprint: existingOrder.deviceFingerprint,
       amount: existingOrder.amount,
-      billingAddress: existingOrder.billingAddress,
-      shippingAddress: existingOrder.shippingAddress,
+      billingAddress: (() => {
+        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.billingCountry ? JSON.stringify({ country: s.billingCountry }) : null; } catch { return null; }
+      })(),
+      shippingAddress: (() => {
+        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.shippingCountry ? JSON.stringify({ country: s.shippingCountry }) : null; } catch { return null; }
+      })(),
       customerLoginId: existingOrder.customerLoginId,
       createdAt: existingOrder.createdAt.toISOString(),
       payment_details: { card_bin: bin },
