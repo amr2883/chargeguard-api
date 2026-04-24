@@ -1046,8 +1046,7 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
 
         customerLoginId: true,
         fingerprintVersion: true,
-        fingerprintConfig: true,
-        fingerprintHardware: true,
+
         riskLevel: true,
       }
     });
@@ -1120,9 +1119,9 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       customerLoginId: existingOrder.customerLoginId,
       createdAt: existingOrder.createdAt.toISOString(),
       payment_details: { card_bin: bin },
-      fingerprintVersion: existingOrder.fingerprintVersion,
-      fingerprintConfig: existingOrder.fingerprintConfig,
-      fingerprintHardware: existingOrder.fingerprintHardware,
+      fingerprintVersion: existingOrder.fingerprintVersion || 'v3',
+      fingerprintConfig: null,
+      fingerprintHardware: null,
       eciCode: null,
       avsResponse: null,
       cvv2Response: null,
