@@ -1001,5 +1001,219 @@ router.post('/woocommerce-webhook', async (req, res) => {
     res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
+// ========== Enrich Endpoint ==========
+// يُستخدم لإثراء الطلب ببيانات BIN من بوابات الدفع الخارجية (مثل Stripe)
+router.post('/enrich', apiKeyAuth, async (req, res) => {
+  try {
+    const { 
+      orderId, 
+      paymentIntentId, 
+      bin, 
+      cardBrand, 
+      cardCountry, 
+      funding, 
+      issuer,
+      idempotencyKey 
+    } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId is required' });
+    }
+    if (!bin) {
+      return res.status(400).json({ error: 'bin is required' });
+    }
+
+    const merchantId = req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'x-merchant-id header is required' });
+    }
+
+    // 1. البحث عن الطلب الأساسي
+    const existingOrder = await db.order.findUnique({
+      where: { orderId },
+      select: { 
+        id: true, 
+        merchantId: true, 
+        decision: true, 
+        riskScore: true, 
+        signalsSnapshot: true,
+        enrichmentIdempotencyKey: true,
+        amount: true,
+        email: true,
+        ipAddress: true,
+        deviceFingerprint: true,
+        createdAt: true,
+        billingAddress: true,
+        shippingAddress: true,
+        customerLoginId: true,
+        fingerprintVersion: true,
+        fingerprintConfig: true,
+        fingerprintHardware: true,
+        riskLevel: true,
+      }
+    });
+
+    // 2. إذا لم يوجد الطلب، نخزن pending enrichment
+    if (!existingOrder) {
+      await db.pendingEnrichment.create({
+        data: {
+          orderId,
+          paymentIntentId: paymentIntentId || null,
+          enrichData: JSON.stringify(req.body),
+          status: 'pending'
+        }
+      });
+      return res.status(202).json({ 
+        success: true, 
+        message: 'Order not found. Enrichment queued for processing.',
+        orderId 
+      });
+    }
+
+    // 3. التحقق من ملكية التاجر
+    if (existingOrder.merchantId !== merchantId) {
+      return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
+    }
+
+    // 4. Idempotency check
+    const effectiveIdempotencyKey = idempotencyKey || paymentIntentId || `enrich_${orderId}_${bin}`;
+    if (existingOrder.enrichmentIdempotencyKey === effectiveIdempotencyKey) {
+      // Already enriched with same data
+      return res.json({
+        success: true,
+        orderId,
+        enriched: false,
+        message: 'Order already enriched with this data.',
+        riskScore: existingOrder.riskScore,
+        decision: existingOrder.decision
+      });
+    }
+
+    // 5. تحديث الطلب ببيانات enrichment
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}');
+    } catch {}
+
+    // نضيف أو نحدث بيانات البطاقة في snapshot
+    snapshot.bin = bin;
+    if (cardBrand) snapshot.cardBrand = cardBrand;
+    if (cardCountry) snapshot.cardIssuerCountry = cardCountry;
+    if (funding) snapshot.cardFunding = funding;
+    if (issuer) snapshot.cardIssuer = issuer;
+    snapshot.enrichedAt = new Date().toISOString();
+    snapshot.enrichmentSource = 'stripe'; // or other gateway
+
+    // 6. تحضير الطلب لإعادة الحساب
+    const enrichedOrder = {
+      id: existingOrder.id,
+      orderId: existingOrder.orderId,
+      email: existingOrder.email,
+      ipAddress: existingOrder.ipAddress,
+      deviceFingerprint: existingOrder.deviceFingerprint,
+      amount: existingOrder.amount,
+      billingAddress: existingOrder.billingAddress,
+      shippingAddress: existingOrder.shippingAddress,
+      customerLoginId: existingOrder.customerLoginId,
+      createdAt: existingOrder.createdAt.toISOString(),
+      payment_details: { card_bin: bin },
+      fingerprintVersion: existingOrder.fingerprintVersion,
+      fingerprintConfig: existingOrder.fingerprintConfig,
+      fingerprintHardware: existingOrder.fingerprintHardware,
+      eciCode: null,
+      avsResponse: null,
+      cvv2Response: null,
+      isNewCustomer: false,
+    };
+
+    // تحميل البيانات المساعدة
+    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentOrders = await db.order.findMany({
+      where: { merchantId, createdAt: { gte: last7days } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+    const formattedOrders = recentOrders.map(o => ({
+      id: o.orderId,
+      email: o.email,
+      ipAddress: o.ipAddress,
+      deviceFingerprint: o.deviceFingerprint,
+      amount: o.amount,
+      createdAt: o.createdAt,
+      riskLevel: o.riskLevel,
+    }));
+    const disputes = await db.disputeOutcome.findMany({
+      where: { merchantId, resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) } },
+      include: { order: true },
+      take: 200
+    });
+    const blacklist = [];
+
+    // 7. إعادة حساب المخاطر
+    const { calculateRiskScore } = require('../lib/riskScoring');
+    const riskResult = await calculateRiskScore(
+      enrichedOrder,
+      formattedOrders,
+      disputes,
+      blacklist,
+      merchantId,
+      false, // لا تحفظ تقييمًا تلقائيًا حتى لا تتكرر
+      null
+    );
+
+    // 8. حفظ النتيجة الجديدة
+    const updatedSnapshot = {
+      ...snapshot,
+      ipIntel: riskResult.ipIntel || null,
+      emailIntel: riskResult.emailIntel || null,
+      binIntel: riskResult.binIntel || null,
+      flags: riskResult.flags,
+      positives: riskResult.positives,
+    };
+
+    await db.order.update({
+      where: { id: existingOrder.id },
+      data: {
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        enrichmentIdempotencyKey: effectiveIdempotencyKey,
+        signalsSnapshot: JSON.stringify(updatedSnapshot),
+      }
+    });
+
+    // 9. حفظ RiskEvaluation للحدث
+    await db.riskEvaluation.create({
+      data: {
+        orderId: existingOrder.id,
+        staticScore: riskResult.score,
+        learningScore: riskResult.score,
+        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+        positiveSignals: JSON.stringify(riskResult.positives || []),
+        scoringVersion: riskResult.scoringVersion || 'v1.0',
+      }
+    });
+
+    // 10. معالجة أي pending enrichments (إذا وجدت لهذا الطلب) - حذفها لأنها طبقت
+    await db.pendingEnrichment.deleteMany({
+      where: { orderId, status: 'pending' }
+    });
+
+    // الاستجابة النهائية
+    res.json({
+      success: true,
+      orderId,
+      enriched: true,
+      newRiskScore: riskResult.score,
+      newDecision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+      flags: riskResult.flags,
+    });
+
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'enrich', error: error.message, stack: error.stack }, 'Enrich error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 module.exports = router;

@@ -269,6 +269,21 @@ model CardTestAttempt {
   @@index([deviceHash, createdAt])
   @@index([ipHash, createdAt])
 }
+// ========== Pending Enrichment Queue ==========
+model PendingEnrichment {
+  id               String   @id @default(cuid())
+  orderId          String
+  paymentIntentId  String?
+  enrichData       String   // JSON مع بيانات التخصيب
+  status           String   @default("pending") // pending, processed, failed
+  createdAt        DateTime @default(now())
+  processedAt      DateTime?
+
+  @@index([orderId])
+  @@index([paymentIntentId])
+  @@index([status])
+}
+
 // ========== Blacklist (per merchant) ==========
 model BlacklistEntry {
   id          String   @id @default(cuid())
