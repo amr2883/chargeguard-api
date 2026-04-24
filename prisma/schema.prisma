@@ -62,6 +62,7 @@ model Order {
   riskLevel          String?  // low, medium, high
   decision           String?  // approve, review, block
   connectedRisk      Int?     @default(0)
+  enrichmentIdempotencyKey String?
   
   // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
   signalsSnapshot    String?
