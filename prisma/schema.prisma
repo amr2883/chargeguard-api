@@ -62,6 +62,7 @@ model Order {
   riskLevel          String?  // low, medium, high
   decision           String?  // approve, review, block
   connectedRisk      Int?     @default(0)
+  cardHash           String?  // optional reference to CardHash.cardHash
   enrichmentIdempotencyKey String?
   
   // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
@@ -283,6 +284,24 @@ model PendingEnrichment {
   @@index([orderId])
   @@index([paymentIntentId])
   @@index([status])
+}
+
+// ========== Card Hash Tracking ==========
+model CardHash {
+  id           String   @id @default(cuid())
+  merchantId   String
+  cardHash     String   @unique
+  last4        String
+  expMonth     Int
+  expYear      Int
+  brand        String
+  attemptCount Int      @default(1)
+  blockCount   Int      @default(0)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+
+  @@index([merchantId, cardHash])
+  @@index([lastSeenAt])
 }
 
 // ========== Blacklist (per merchant) ==========
