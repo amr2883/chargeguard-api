@@ -5,7 +5,7 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/app.js",
-    "start": "node src/app.js"
+    "start": "node wait-for-db.js && npx prisma db push --accept-data-loss && node src/app.js"
 
 ,
     "test": "jest",
