@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "dev": "nodemon src/app.js",
-    "start": "npx prisma db push --accept-data-loss && node src/app.js",
+    "start": "export DATABASE_URL=\"$DIRECT_URL\" && npx prisma db push --accept-data-loss && node src/app.js"
+
+,
     "test": "jest",
     "test:coverage": "jest --coverage"
   },
