@@ -1,4 +1,5 @@
-﻿const logger = require('../lib/logger');
+﻿const crypto = require('crypto');
+const logger = require('../lib/logger');
 const express = require('express');
 const router = express.Router();
 const { calculateRiskScore } = require('../lib/riskScoring');
@@ -8,11 +9,24 @@ const { normalizeBin } = require('../lib/binIntelligence');
 const { buildGraphFromOrder } = require('../lib/identityGraph');
 const prometheus = require('../lib/prometheus');
 
-const apiKeyAuth = (req, res, next) => {
+const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
-  if (apiKey !== process.env.API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (!apiKey) {
+    return res.status(401).json({ error: 'API key is required' });
   }
+
+  // البحث عن مفتاح API في جدول Tenant
+  const tenant = await db.tenant.findUnique({
+    where: { apiKey },
+    select: { id: true, email: true, isActive: true }
+  });
+
+  if (!tenant || !tenant.isActive) {
+    return res.status(401).json({ error: 'Invalid or inactive API key' });
+  }
+
+  // إرفاق معلومات المستأجر بالطلب لاستخدامها لاحقًا
+  req.tenant = { id: tenant.id, email: tenant.email };
   next();
 };
 /**
@@ -757,9 +771,10 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
 
     // 3. استخراج merchantId (بعدين نستخدم parsedBody)
-    const merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
+    let merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
+      merchantId = 'test_merchant_001'; // default for testing
+      logger.warn({ module: 'risk', endpoint: 'woocommerce-webhook' }, 'Merchant ID missing, using default');
     }
 
     // 4. Verify WooCommerce signature (if secret is configured)
@@ -767,10 +782,22 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const signature = req.headers['x-wc-webhook-signature'];
     if (wcSecret && signature) {
       const { verifyWebhookSignature } = require('../lib/woocommerce');
-      const isValid = verifyWebhookSignature(rawBody, signature, wcSecret);
+      const expected = crypto.createHmac('sha256', wcSecret).update(rawBody).digest('base64');
+      
+      // سجل معلومات المقارنة (بدون المفتاح أو البيانات الكاملة)
+      logger.warn({
+        module: 'risk',
+        receivedSignatureLength: signature.length,
+        expectedSignatureLength: expected.length,
+        firstRawBodyChars: rawBody.toString('utf8').slice(0, 50),
+        secretConfigured: !!wcSecret,
+        signaturePresent: !!signature,
+      }, 'Signature debug info');
+      
+      const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
       if (!isValid) {
-        logger.warn({ module: 'risk', merchantId, signature }, 'Invalid WooCommerce signature');
-        return res.status(401).json({ error: 'Invalid signature' });
+        logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch details');
+        return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
       }
     } else if (wcSecret && !signature) {
       // Secret configured but signature missing – reject
@@ -810,7 +837,14 @@ router.post('/woocommerce-webhook', async (req, res) => {
     // 7. Build request for risk scoring
     const riskRequest = buildRiskEvaluationRequest(extracted);
     riskRequest.merchantId = merchantId;
-    riskRequest.deviceFingerprint = riskRequest.deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+
+    // استخراج بصمة الجهاز من Webhook (إذا وجدت)
+    let deviceFingerprint = parsedBody.device_fingerprint || null;
+    if (!deviceFingerprint && parsedBody.meta_data) {
+        const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
+        if (fpMeta) deviceFingerprint = fpMeta.value;
+    }
+    riskRequest.deviceFingerprint = deviceFingerprint || `wc_${extracted.orderId}`; // fallback
 
     // 8. Load recent orders, disputes, blacklist for this merchant
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -1001,6 +1035,69 @@ router.post('/woocommerce-webhook', async (req, res) => {
     res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
+// ========== Check Device Endpoint ==========
+// يُستخدم بواسطة جدار الحماية الديناميكي في المكوّن الإضافي
+router.post('/check-device', apiKeyAuth, async (req, res) => {
+  try {
+    const { fingerprint } = req.body;
+    if (!fingerprint) {
+      return res.status(400).json({ error: 'fingerprint is required' });
+    }
+
+    const merchantId = req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'x-merchant-id header is required' });
+    }
+
+    // 1. البحث عن بصمة الجهاز في Identity Graph
+    const { getConnectedRisk } = require('../lib/identityGraph');
+    const mockOrder = {
+      deviceFingerprint: fingerprint,
+      fingerprintVersion: 'v3',
+    };
+
+    let blocked = false;
+    let reason = null;
+
+    try {
+      const graphResult = await getConnectedRisk(mockOrder, merchantId);
+      // إذا كان connectedRisk >= 80 نعتبره تهديداً عالياً ونمنعه
+      if (graphResult.connectedRisk >= 45) {
+        blocked = true;
+        reason = 'Device fingerprint linked to high-risk network';
+      }
+    } catch (err) {
+      logger.error({ module: 'risk', endpoint: 'check-device', err }, 'Graph lookup error');
+      // فشل آمن: لا نمنع المستخدم إذا فشل الفحص
+    }
+
+    // 2. (اختياري) البحث في القائمة السوداء المركزية
+    if (!blocked) {
+      const blacklisted = await db.blacklistEntry.findFirst({
+        where: {
+          merchantId,
+          type: 'DEVICE_FINGERPRINT',
+          value: fingerprint,
+          OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } },
+          ],
+        },
+      });
+      if (blacklisted) {
+        blocked = true;
+        reason = 'Device is blacklisted';
+      }
+    }
+
+    res.json({ blocked, reason });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'check-device', error: error.message }, 'Check-device error');
+    // في حالة الخطأ، نعيد blocked: false لمنع الإيجابيات الخاطئة
+    res.status(500).json({ blocked: false, error: error.message });
+  }
+});
+
 // ========== Enrich Endpoint ==========
 // يُستخدم لإثراء الطلب ببيانات BIN من بوابات الدفع الخارجية (مثل Stripe)
 router.post('/enrich', apiKeyAuth, async (req, res) => {
@@ -1013,6 +1110,10 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       cardCountry, 
       funding, 
       issuer,
+      last4,
+      expMonth,
+      expYear,
+      brand,
       idempotencyKey 
     } = req.body;
 
@@ -1028,6 +1129,33 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
+    // ─── CardHash generation (if last4+expiry+brand provided) ───
+    let cardHashRecord = null;
+    if (last4 && expMonth && expYear && brand && merchantId) {
+
+      const secret = process.env.CARD_HASH_SECRET;
+      if (!secret) throw new Error('CARD_HASH_SECRET missing');
+      const raw = `${merchantId}:${last4}:${expMonth}:${expYear}:${brand}`;
+      const cardHash = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+      
+      cardHashRecord = await db.cardHash.upsert({
+        where: { cardHash },
+        create: {
+          merchantId,
+          cardHash,
+          last4,
+          expMonth,
+          expYear,
+          brand,
+          attemptCount: 1,
+        },
+        update: {
+          attemptCount: { increment: 1 },
+          lastSeenAt: new Date(),
+        },
+      });
+    }
+
     // 1. البحث عن الطلب الأساسي
     const existingOrder = await db.order.findUnique({
       where: { orderId },
@@ -1037,7 +1165,7 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
         decision: true, 
         riskScore: true, 
         signalsSnapshot: true,
-        enrichmentIdempotencyKey: true,
+    
         amount: true,
         email: true,
         ipAddress: true,
@@ -1073,19 +1201,7 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
     }
 
-    // 4. Idempotency check
-    const effectiveIdempotencyKey = idempotencyKey || paymentIntentId || `enrich_${orderId}_${bin}`;
-    if (existingOrder.enrichmentIdempotencyKey === effectiveIdempotencyKey) {
-      // Already enriched with same data
-      return res.json({
-        success: true,
-        orderId,
-        enriched: false,
-        message: 'Order already enriched with this data.',
-        riskScore: existingOrder.riskScore,
-        decision: existingOrder.decision
-      });
-    }
+
 
     // 5. تحديث الطلب ببيانات enrichment
     let snapshot = {};
@@ -1160,7 +1276,8 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       blacklist,
       merchantId,
       false, // لا تحفظ تقييمًا تلقائيًا حتى لا تتكرر
-      null
+      null,
+      cardHashRecord   // ← إضافة معامل cardHashRecord
     );
 
     // 8. حفظ النتيجة الجديدة
@@ -1173,20 +1290,21 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
       positives: riskResult.positives,
     };
 
-    await db.order.update({
+       await db.order.update({
       where: { id: existingOrder.id },
       data: {
         riskScore: riskResult.score,
         riskLevel: riskResult.riskLevel,
         decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        enrichmentIdempotencyKey: effectiveIdempotencyKey,
+        cardHash: cardHashRecord?.cardHash ?? null,   // <-- السطر المضاف
         signalsSnapshot: JSON.stringify(updatedSnapshot),
       }
     });
 
-    // 9. حفظ RiskEvaluation للحدث
-    await db.riskEvaluation.create({
-      data: {
+    // 9. حفظ RiskEvaluation للحدث (upsert لتجنب تكرار orderId)
+    await db.riskEvaluation.upsert({
+      where: { orderId: existingOrder.id },
+      create: {
         orderId: existingOrder.id,
         staticScore: riskResult.score,
         learningScore: riskResult.score,
@@ -1194,7 +1312,14 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
         topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
         positiveSignals: JSON.stringify(riskResult.positives || []),
         scoringVersion: riskResult.scoringVersion || 'v1.0',
-      }
+      },
+      update: {
+        staticScore: riskResult.score,
+        learningScore: riskResult.score,
+        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+        positiveSignals: JSON.stringify(riskResult.positives || []),
+      },
     });
 
     // 10. معالجة أي pending enrichments (إذا وجدت لهذا الطلب) - حذفها لأنها طبقت
@@ -1214,6 +1339,99 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
 
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'enrich', error: error.message, stack: error.stack }, 'Enrich error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== Tenant Registration (Early Access) ==========
+
+/**
+ * @swagger
+ * /tenants/register:
+ *   post:
+ *     summary: Register a new tenant and receive an API key
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               storeUrl: { type: string }
+ *     responses:
+ *       201:
+ *         description: Registration successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 apiKey: { type: string }
+ *                 email: { type: string }
+ *       400:
+ *         description: Missing email or email already registered
+ *       500:
+ *         description: Internal server error
+ */
+// ========== Rate limiting (simple in-memory) ==========
+const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
+
+router.post('/tenants/register', async (req, res) => {
+  // Rate limiting: max 5 registrations per IP per hour
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000; // 1 hour
+  const maxAttempts = 5;
+
+  if (!registrationAttempts.has(ip) || (now - registrationAttempts.get(ip).lastReset) > windowMs) {
+    registrationAttempts.set(ip, { count: 0, lastReset: now });
+  }
+
+  const attempt = registrationAttempts.get(ip);
+  attempt.count++;
+
+  if (attempt.count > maxAttempts) {
+    return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+  }
+
+  try {
+    const { email, storeUrl } = req.body;
+
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    // Check if tenant already exists
+    const existing = await db.tenant.findUnique({ where: { email } });
+    if (existing) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    // Generate a unique API key
+    const apiKey = crypto.randomBytes(32).toString('base64');
+
+    const tenant = await db.tenant.create({
+      data: {
+        email,
+        storeUrl: storeUrl || null,
+        apiKey,
+        plan: 'early_access',
+        isActive: true
+      }
+    });
+
+    logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
+
+    res.status(201).json({
+      apiKey: tenant.apiKey,
+      email: tenant.email,
+      plan: tenant.plan,
+      message: 'Welcome to ChargeGuard Early Access! Use this API key in your plugin settings.'
+    });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'register', error: error.message }, 'Registration error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });

@@ -9,18 +9,54 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middlewares
-app.use(helmet());
+app.use(helmet({
+  hsts: {
+    maxAge: 31536000,
+    includeSubDomains: true,
+    preload: true
+  }
+}));
 app.use(cors());
 app.use(prometheus.httpMetricsMiddleware);
+// Swagger UI – متاح فقط في وضع التطوير أو عبر Basic Auth
 let swaggerUi, swaggerSpec;
 try {
   swaggerUi = require('swagger-ui-express');
   swaggerSpec = require('./swagger');
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  app.get('/api-docs.json', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.send(swaggerSpec);
-  });
+
+  // إذا كانت بيئة الإنتاج، نمنع Swagger UI إلا مع Basic Auth اختياري
+  if (process.env.NODE_ENV === 'production') {
+    const basicAuth = require('express-basic-auth');
+    const swaggerUser = process.env.SWAGGER_USER;
+    const swaggerPass = process.env.SWAGGER_PASSWORD;
+
+    if (swaggerUser && swaggerPass) {
+      // Basic Auth مفعل – يحمي Swagger UI
+      const users = {};
+      users[swaggerUser] = swaggerPass;
+
+      app.use('/api-docs', basicAuth({
+        users: users,
+        challenge: true,
+        realm: 'ChargeGuard API Documentation',
+      }));
+      app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+      app.get('/api-docs.json', (req, res) => {
+        res.setHeader('Content-Type', 'application/json');
+        res.send(swaggerSpec);
+      });
+    } else {
+      // لا يوجد SWAGGER_USER/PASSWORD – Swagger UI معطل تماماً في الإنتاج
+      console.log('🔒 Swagger UI disabled in production (no credentials provided)');
+    }
+  } else {
+    // وضع التطوير – متاح بدون حماية
+    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+    app.get('/api-docs.json', (req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.send(swaggerSpec);
+    });
+  }
 } catch (e) {
   console.warn('⚠️ Swagger UI not available:', e.message);
 }
