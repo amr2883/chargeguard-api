@@ -39,9 +39,7 @@ model MerchantProfile {
 
   createdAt           DateTime      @default(now())
   updatedAt           DateTime      @updatedAt
-}
-  id                  String   @id @default(cuid())
-  merchantId          String   @unique
+
   totalOrders         Int      @default(0)
   totalAmount         Float    @default(0)
   avgOrderValue       Float    @default(0)
