@@ -5,11 +5,41 @@ generator client {
 datasource db {
   provider  = "postgresql"
   url       = env("DATABASE_URL")
-  directUrl = env("DIRECT_URL")
+}
+
+// ========== Tenant (SaaS Client) ==========
+model Tenant {
+  id        String            @id @default(cuid())
+  email     String            @unique
+  storeUrl  String?
+  apiKey    String            @unique
+  plan      String            @default("early_access")
+  isActive  Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  profiles  MerchantProfile[]
 }
 
 // ========== Merchant Profile ==========
 model MerchantProfile {
+  id                  String        @id @default(cuid())
+  merchantId          String        @unique
+  totalOrders         Int           @default(0)
+  totalAmount         Float         @default(0)
+  avgOrderValue       Float         @default(0)
+  totalDisputes       Int           @default(0)
+  wonDisputes         Int           @default(0)
+  lostDisputes        Int           @default(0)
+  merchantWeightRatio Float         @default(0.0)
+  tenantId            String?
+  tenant              Tenant?       @relation(fields: [tenantId], references: [id])
+  
+  trustScore          Float         @default(0.3)
+  reportCount         Int           @default(0)
+
+  createdAt           DateTime      @default(now())
+  updatedAt           DateTime      @updatedAt
+}
   id                  String   @id @default(cuid())
   merchantId          String   @unique
   totalOrders         Int      @default(0)
