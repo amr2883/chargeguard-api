@@ -1,8 +1,8 @@
-// wait-for-db.js – ينتظر حتى تصبح قاعدة البيانات جاهزة
+// wait-for-db.js – ينتظر حتى تصبح قاعدة البيانات جاهزة، مع تجاهل أخطاء cold start
 const { PrismaClient } = require('@prisma/client');
 const prisma = new PrismaClient();
 
-async function waitForDb(retries = 30, delayMs = 10000) {
+async function waitForDb(retries = 10, delayMs = 3000) {
   for (let i = 0; i < retries; i++) {
     try {
       await prisma.$executeRawUnsafe('SELECT 1');
@@ -10,7 +10,7 @@ async function waitForDb(retries = 30, delayMs = 10000) {
       await prisma.$disconnect();
       process.exit(0);
     } catch (e) {
-      console.log(`⏳ Waiting for database... (attempt ${i+1}/${retries})`);
+      console.log(`⏳ Waiting for database... (attempt ${i + 1}/${retries}): ${e.message}`);
       await new Promise(r => setTimeout(r, delayMs));
     }
   }
