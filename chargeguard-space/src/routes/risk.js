@@ -1,18 +1,33 @@
-﻿const logger = require('../lib/logger');
+﻿const crypto = require('crypto');
+const logger = require('../lib/logger');
 const express = require('express');
 const router = express.Router();
 const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
+const { checkBINSequence } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
 const { normalizeBin } = require('../lib/binIntelligence');
 const { buildGraphFromOrder } = require('../lib/identityGraph');
 const prometheus = require('../lib/prometheus');
 
-const apiKeyAuth = (req, res, next) => {
+const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
-  if (apiKey !== process.env.API_KEY) {
-    return res.status(401).json({ error: 'Unauthorized' });
+  if (!apiKey) {
+    return res.status(401).json({ error: 'API key is required' });
   }
+
+  // البحث عن مفتاح API في جدول Tenant
+  const tenant = await db.tenant.findUnique({
+    where: { apiKey },
+    select: { id: true, email: true, isActive: true }
+  });
+
+  if (!tenant || !tenant.isActive) {
+    return res.status(401).json({ error: 'Invalid or inactive API key' });
+  }
+
+  // إرفاق معلومات المستأجر بالطلب لاستخدامها لاحقًا
+  req.tenant = { id: tenant.id, email: tenant.email };
   next();
 };
 /**
@@ -108,6 +123,19 @@ router.post('/evaluate', apiKeyAuth, async (req, res) => {
       });
     }
 
+    // 1b. BIN Sequence Detection
+    if (bin) {
+      const binSeq = checkBINSequence({ bin, ipAddress, deviceFingerprint });
+      if (binSeq.blocked) {
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious card testing pattern',
+          reason: binSeq.reason,
+          decision: 'block',
+          flags: [{ severity: 'critical', text: binSeq.reason }]
+        });
+      }
+    }
+
     // 1. بناء كائن order
     const order = {
       id: orderId,
@@ -123,7 +151,7 @@ router.post('/evaluate', apiKeyAuth, async (req, res) => {
       eciCode: null,
       avsResponse: null,
       cvv2Response: null,
-      payment_details: bin ? { credit_card_bin: bin } : null,
+      payment_details: bin ? { card_bin: bin } : null,
       fingerprintVersion: 'v3',
       fingerprintConfig: null,
       fingerprintHardware: null,
@@ -330,7 +358,7 @@ router.post('/evaluate', apiKeyAuth, async (req, res) => {
     res.json(response);
   } catch (error) {
     logger.error({ module: 'risk', error: error.message, stack: error.stack }, 'Evaluate error');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // نقطة نهاية مؤقتة لوضع علامة احتيال على جهاز (لأغراض الاختبار فقط)
@@ -437,7 +465,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
     res.json({ success: true, message: 'Feedback recorded successfully' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'feedback', error: error.message }, 'Feedback API error');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -553,7 +581,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entry: blacklistEntry });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message }, 'Error adding blacklist entry');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 
@@ -603,7 +631,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
     res.json({ success: true, message: 'Blacklist entry deleted' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // ========== GET Blacklist (Query) ==========
@@ -670,7 +698,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entries: blacklistEntries });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-get', error: error.message }, 'Error fetching blacklist');
-    res.status(500).json({ error: 'Internal server error' });
+    res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
 // ========== UPDATE Blacklist Entry ==========
@@ -733,6 +761,691 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
     res.json({ success: true, entry: updated });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-update', error: error.message }, 'Error updating blacklist entry');
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
+// WooCommerce webhook endpoint
+router.post('/woocommerce-webhook', async (req, res) => {
+  try {
+    // 1. Get raw body for signature verification
+    const rawBody = req.body; // express.raw puts Buffer in req.body
+    
+    if (!rawBody) {
+      return res.status(400).json({ error: 'Raw body missing' });
+    }
+
+    // 2. Parse raw body to JSON (نحدد parsedBody الأول)
+    let parsedBody;
+    try {
+      parsedBody = JSON.parse(rawBody.toString());
+    } catch (err) {
+      logger.error({ module: 'risk', err: err.message }, 'Failed to parse webhook body');
+      return res.status(400).json({ error: 'Invalid JSON payload' });
+    }
+
+    // 3. استخراج merchantId (بعدين نستخدم parsedBody)
+    let merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      merchantId = 'test_merchant_001'; // default for testing
+      logger.warn({ module: 'risk', endpoint: 'woocommerce-webhook' }, 'Merchant ID missing, using default');
+    }
+
+    // 4. Verify WooCommerce signature (if secret is configured)
+    const wcSecret = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
+    const signature = req.headers['x-wc-webhook-signature'];
+    if (wcSecret && signature) {
+      const { verifyWebhookSignature } = require('../lib/woocommerce');
+      const expected = crypto.createHmac('sha256', wcSecret).update(rawBody).digest('base64');
+      
+      // سجل معلومات المقارنة (بدون المفتاح أو البيانات الكاملة)
+      logger.warn({
+        module: 'risk',
+        receivedSignatureLength: signature.length,
+        expectedSignatureLength: expected.length,
+        firstRawBodyChars: rawBody.toString('utf8').slice(0, 50),
+        secretConfigured: !!wcSecret,
+        signaturePresent: !!signature,
+      }, 'Signature debug info');
+      
+      const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+      if (!isValid) {
+        logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch details');
+        return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
+      }
+    } else if (wcSecret && !signature) {
+      // Secret configured but signature missing – reject
+      return res.status(401).json({ error: 'Missing signature' });
+    }
+    // If no secret configured, skip signature verification (not recommended for production)
+
+   // 5. Extract order data
+   const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
+   let extracted;
+   try {
+     extracted = extractOrderData(parsedBody);
+   } catch (err) {
+     logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
+     return res.status(400).json({ error: 'Invalid payload structure' });
+   }
+
+   // 6. Idempotency: check if order already processed
+   const existingOrder = await db.order.findUnique({
+      where: { orderId: extracted.orderId },
+      select: { decision: true, riskScore: true, signalsSnapshot: true, createdAt: true }
+    });
+    if (existingOrder) {
+      // Return cached response (within reasonable time window, e.g., 24h)
+      const ageHours = (Date.now() - new Date(existingOrder.createdAt).getTime()) / (1000 * 60 * 60);
+      if (ageHours < 24) {
+        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request – returning cached result');
+        return res.json({
+          orderId: extracted.orderId,
+          score: existingOrder.riskScore,
+          decision: existingOrder.decision,
+          cached: true
+        });
+      }
+    }
+
+    // 7. Build request for risk scoring
+    const riskRequest = buildRiskEvaluationRequest(extracted);
+    riskRequest.merchantId = merchantId;
+
+    // استخراج بصمة الجهاز من Webhook (إذا وجدت)
+    let deviceFingerprint = parsedBody.device_fingerprint || null;
+    if (!deviceFingerprint && parsedBody.meta_data) {
+        const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
+        if (fpMeta) deviceFingerprint = fpMeta.value;
+    }
+    riskRequest.deviceFingerprint = deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+
+    // 8. Load recent orders, disputes, blacklist for this merchant
+    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentOrders = await db.order.findMany({
+      where: { merchantId, createdAt: { gte: last7days } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+    const formattedOrders = recentOrders.map(o => ({
+      id: o.orderId,
+      email: o.email,
+      ipAddress: o.ipAddress,
+      deviceFingerprint: o.deviceFingerprint,
+      amount: o.amount,
+      createdAt: o.createdAt,
+      riskLevel: o.riskLevel,
+    }));
+    const disputes = await db.disputeOutcome.findMany({
+      where: {
+        merchantId,
+        resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+        OR: [
+          { order: { email: extracted.email } },
+          { order: { deviceFingerprint: riskRequest.deviceFingerprint } },
+          { order: { ipAddress: extracted.ipAddress } }
+        ]
+      },
+      include: { order: true },
+      take: 200
+    });
+    const blacklistOr = [];
+    if (extracted.email) blacklistOr.push({ type: 'EMAIL', value: extracted.email });
+    if (extracted.ipAddress) blacklistOr.push({ type: 'IP', value: extracted.ipAddress });
+    if (riskRequest.deviceFingerprint) blacklistOr.push({ type: 'DEVICE_FINGERPRINT', value: riskRequest.deviceFingerprint });
+
+    let blacklist = [];
+    if (blacklistOr.length > 0) {
+      blacklist = await db.blacklistEntry.findMany({
+        where: {
+          merchantId,
+          OR: blacklistOr,
+          AND: [
+            { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
+          ]
+        }
+      });
+    }
+
+    // 9. Velocity counts
+    const last1h = new Date(Date.now() - 60 * 60 * 1000);
+    const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
+    const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const deviceVelocityCount = riskRequest.deviceFingerprint ? await db.order.count({
+      where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h } }
+    }) : 0;
+    const ipVelocityCount = extracted.ipAddress ? await db.order.count({
+      where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h } }
+    }) : 0;
+    const emailVelocityCount = extracted.email ? await db.order.count({
+      where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
+    }) : 0;
+
+    // 10. Build order object for riskScoring (compatible with calculateRiskScore)
+    const orderForScoring = {
+      id: extracted.orderId,
+      email: extracted.email,
+      ipAddress: extracted.ipAddress,
+      deviceFingerprint: riskRequest.deviceFingerprint,
+      amount: extracted.amount,
+      billingAddress: extracted.billingCountry ? JSON.stringify({ country: extracted.billingCountry }) : null,
+      shippingAddress: extracted.shippingCountry ? JSON.stringify({ country: extracted.shippingCountry }) : null,
+      customerLoginId: extracted.customerLoginId,
+      createdAt: extracted.createdAt || new Date().toISOString(),
+      eciCode: null,
+      avsResponse: null,
+      cvv2Response: null,
+      payment_details: extracted.bin ? { card_bin: extracted.bin } : null,
+      fingerprintVersion: 'v3',
+      fingerprintConfig: null,
+      fingerprintHardware: null,
+      isNewCustomer: false, // will be computed inside riskScoring
+    };
+
+    const { calculateRiskScore } = require('../lib/riskScoring');
+    const riskResult = await calculateRiskScore(
+      orderForScoring,
+      formattedOrders,
+      disputes,
+      blacklist,
+      merchantId,
+      true,  // saveEvaluation
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
+    );
+
+    // 11. Build signals snapshot
+    const signalsSnapshot = {
+      email: extracted.email,
+      ipAddress: extracted.ipAddress,
+      bin: extracted.bin,
+      deviceFingerprint: riskRequest.deviceFingerprint,
+      amount: extracted.amount,
+      billingCountry: extracted.billingCountry,
+      shippingCountry: extracted.shippingCountry,
+      isNewCustomer: riskResult.computedSignals?.isNewCustomer || false,
+      deviceVelocityCount,
+      ipVelocityCount,
+      emailVelocityCount,
+      shippingBillingMismatch: extracted.billingCountry !== extracted.shippingCountry,
+      binIssuerMismatch: false, // would need BIN intel
+      amountAnomaly: (riskResult.computedSignals?.orderMultiple || 0) >= 3,
+      ipIntel: riskResult.ipIntel || null,
+      emailIntel: riskResult.emailIntel || null,
+      binIntel: riskResult.binIntel || null,
+      connectedRisk: riskResult.graphRisk || 0,
+      graphPath: riskResult.graphPath || [],
+      flags: riskResult.flags,
+      positives: riskResult.positives,
+    };
+
+    // 12. Save order and risk evaluation
+    await db.order.upsert({
+      where: { orderId: extracted.orderId },
+      create: {
+        orderId: extracted.orderId,
+        merchantId,
+        amount: extracted.amount,
+        currency: 'USD',
+        email: extracted.email,
+        ipAddress: extracted.ipAddress,
+        deviceFingerprint: riskRequest.deviceFingerprint,
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        connectedRisk: riskResult.graphRisk || 0,
+        signalsSnapshot: JSON.stringify(signalsSnapshot),
+        fingerprintVersion: 'v3',
+      },
+      update: {
+        amount: extracted.amount,
+        email: extracted.email,
+        ipAddress: extracted.ipAddress,
+        deviceFingerprint: riskRequest.deviceFingerprint,
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        connectedRisk: riskResult.graphRisk || 0,
+        signalsSnapshot: JSON.stringify(signalsSnapshot),
+      },
+    });
+
+    // Optionally save RiskEvaluation if decision is block or review
+    if (riskResult.decision.includes('Block') || riskResult.decision.includes('Review')) {
+      const savedOrder = await db.order.findUnique({ where: { orderId: extracted.orderId } });
+      if (savedOrder) {
+        await db.riskEvaluation.upsert({
+          where: { orderId: savedOrder.id },
+          create: {
+            orderId: savedOrder.id,
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+            scoringVersion: riskResult.scoringVersion || 'v1.0',
+          },
+          update: {
+            staticScore: riskResult.score,
+            learningScore: riskResult.score,
+            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+            positiveSignals: JSON.stringify(riskResult.positives || []),
+          },
+        });
+      }
+    }
+
+    // Return response
+    res.json({
+      orderId: extracted.orderId,
+      score: riskResult.score,
+      decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+      flags: riskResult.flags,
+      connectedRisk: riskResult.graphRisk || 0,
+    });
+
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', error: error.message, stack: error.stack }, 'Webhook error');
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+// ========== Check Device Endpoint ==========
+// يُستخدم بواسطة جدار الحماية الديناميكي في المكوّن الإضافي
+router.post('/check-device', apiKeyAuth, async (req, res) => {
+  try {
+    const { fingerprint } = req.body;
+    if (!fingerprint) {
+      return res.status(400).json({ error: 'fingerprint is required' });
+    }
+
+    const merchantId = req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'x-merchant-id header is required' });
+    }
+
+    // 1. البحث عن بصمة الجهاز في Identity Graph
+    const { getConnectedRisk } = require('../lib/identityGraph');
+    const mockOrder = {
+      deviceFingerprint: fingerprint,
+      fingerprintVersion: 'v3',
+    };
+
+    let blocked = false;
+    let reason = null;
+
+    try {
+      const graphResult = await getConnectedRisk(mockOrder, merchantId);
+      // إذا كان connectedRisk >= 80 نعتبره تهديداً عالياً ونمنعه
+      if (graphResult.connectedRisk >= 45) {
+        blocked = true;
+        reason = 'Device fingerprint linked to high-risk network';
+      }
+    } catch (err) {
+      logger.error({ module: 'risk', endpoint: 'check-device', err }, 'Graph lookup error');
+      // فشل آمن: لا نمنع المستخدم إذا فشل الفحص
+    }
+
+    // 2. (اختياري) البحث في القائمة السوداء المركزية
+    if (!blocked) {
+      const blacklisted = await db.blacklistEntry.findFirst({
+        where: {
+          merchantId,
+          type: 'DEVICE_FINGERPRINT',
+          value: fingerprint,
+          OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } },
+          ],
+        },
+      });
+      if (blacklisted) {
+        blocked = true;
+        reason = 'Device is blacklisted';
+      }
+    }
+
+    res.json({ blocked, reason });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'check-device', error: error.message }, 'Check-device error');
+    // في حالة الخطأ، نعيد blocked: false لمنع الإيجابيات الخاطئة
+    res.status(500).json({ blocked: false, error: error.message });
+  }
+});
+
+// ========== Enrich Endpoint ==========
+// يُستخدم لإثراء الطلب ببيانات BIN من بوابات الدفع الخارجية (مثل Stripe)
+router.post('/enrich', apiKeyAuth, async (req, res) => {
+  try {
+    const { 
+      orderId, 
+      paymentIntentId, 
+      bin, 
+      cardBrand, 
+      cardCountry, 
+      funding, 
+      issuer,
+      last4,
+      expMonth,
+      expYear,
+      brand,
+      idempotencyKey 
+    } = req.body;
+
+    if (!orderId) {
+      return res.status(400).json({ error: 'orderId is required' });
+    }
+    if (!bin) {
+      return res.status(400).json({ error: 'bin is required' });
+    }
+
+    const merchantId = req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'x-merchant-id header is required' });
+    }
+
+    // ─── CardHash generation (if last4+expiry+brand provided) ───
+    let cardHashRecord = null;
+    if (last4 && expMonth && expYear && brand && merchantId) {
+
+      const secret = process.env.CARD_HASH_SECRET;
+      if (!secret) throw new Error('CARD_HASH_SECRET missing');
+      const raw = `${merchantId}:${last4}:${expMonth}:${expYear}:${brand}`;
+      const cardHash = crypto.createHmac('sha256', secret).update(raw).digest('hex');
+      
+      cardHashRecord = await db.cardHash.upsert({
+        where: { cardHash },
+        create: {
+          merchantId,
+          cardHash,
+          last4,
+          expMonth,
+          expYear,
+          brand,
+          attemptCount: 1,
+        },
+        update: {
+          attemptCount: { increment: 1 },
+          lastSeenAt: new Date(),
+        },
+      });
+    }
+
+    // 1. البحث عن الطلب الأساسي
+    const existingOrder = await db.order.findUnique({
+      where: { orderId },
+      select: { 
+        id: true, 
+        merchantId: true, 
+        decision: true, 
+        riskScore: true, 
+        signalsSnapshot: true,
+    
+        amount: true,
+        email: true,
+        ipAddress: true,
+        deviceFingerprint: true,
+        createdAt: true,
+
+        customerLoginId: true,
+        fingerprintVersion: true,
+
+        riskLevel: true,
+      }
+    });
+
+    // 2. إذا لم يوجد الطلب، نخزن pending enrichment
+    if (!existingOrder) {
+      await db.pendingEnrichment.create({
+        data: {
+          orderId,
+          paymentIntentId: paymentIntentId || null,
+          enrichData: JSON.stringify(req.body),
+          status: 'pending'
+        }
+      });
+      return res.status(202).json({ 
+        success: true, 
+        message: 'Order not found. Enrichment queued for processing.',
+        orderId 
+      });
+    }
+
+    // 3. التحقق من ملكية التاجر
+    if (existingOrder.merchantId !== merchantId) {
+      return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
+    }
+
+
+
+    // 5. تحديث الطلب ببيانات enrichment
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}');
+    } catch {}
+
+    // نضيف أو نحدث بيانات البطاقة في snapshot
+    snapshot.bin = bin;
+    if (cardBrand) snapshot.cardBrand = cardBrand;
+    if (cardCountry) snapshot.cardIssuerCountry = cardCountry;
+    if (funding) snapshot.cardFunding = funding;
+    if (issuer) snapshot.cardIssuer = issuer;
+    snapshot.enrichedAt = new Date().toISOString();
+    snapshot.enrichmentSource = 'stripe'; // or other gateway
+
+    // 6. تحضير الطلب لإعادة الحساب
+    const enrichedOrder = {
+      id: existingOrder.id,
+      orderId: existingOrder.orderId,
+      email: existingOrder.email,
+      ipAddress: existingOrder.ipAddress,
+      deviceFingerprint: existingOrder.deviceFingerprint,
+      amount: existingOrder.amount,
+      billingAddress: (() => {
+        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.billingCountry ? JSON.stringify({ country: s.billingCountry }) : null; } catch { return null; }
+      })(),
+      shippingAddress: (() => {
+        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.shippingCountry ? JSON.stringify({ country: s.shippingCountry }) : null; } catch { return null; }
+      })(),
+      customerLoginId: existingOrder.customerLoginId,
+      createdAt: existingOrder.createdAt.toISOString(),
+      payment_details: { card_bin: bin },
+      fingerprintVersion: existingOrder.fingerprintVersion || 'v3',
+      fingerprintConfig: null,
+      fingerprintHardware: null,
+      eciCode: null,
+      avsResponse: null,
+      cvv2Response: null,
+      isNewCustomer: false,
+    };
+
+    // تحميل البيانات المساعدة
+    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const recentOrders = await db.order.findMany({
+      where: { merchantId, createdAt: { gte: last7days } },
+      orderBy: { createdAt: 'desc' },
+      take: 200
+    });
+    const formattedOrders = recentOrders.map(o => ({
+      id: o.orderId,
+      email: o.email,
+      ipAddress: o.ipAddress,
+      deviceFingerprint: o.deviceFingerprint,
+      amount: o.amount,
+      createdAt: o.createdAt,
+      riskLevel: o.riskLevel,
+    }));
+    const disputes = await db.disputeOutcome.findMany({
+      where: { merchantId, resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) } },
+      include: { order: true },
+      take: 200
+    });
+    const blacklist = [];
+
+    // 7. إعادة حساب المخاطر
+    const { calculateRiskScore } = require('../lib/riskScoring');
+    const riskResult = await calculateRiskScore(
+      enrichedOrder,
+      formattedOrders,
+      disputes,
+      blacklist,
+      merchantId,
+      false, // لا تحفظ تقييمًا تلقائيًا حتى لا تتكرر
+      null,
+      cardHashRecord   // ← إضافة معامل cardHashRecord
+    );
+
+    // 8. حفظ النتيجة الجديدة
+    const updatedSnapshot = {
+      ...snapshot,
+      ipIntel: riskResult.ipIntel || null,
+      emailIntel: riskResult.emailIntel || null,
+      binIntel: riskResult.binIntel || null,
+      flags: riskResult.flags,
+      positives: riskResult.positives,
+    };
+
+       await db.order.update({
+      where: { id: existingOrder.id },
+      data: {
+        riskScore: riskResult.score,
+        riskLevel: riskResult.riskLevel,
+        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+        cardHash: cardHashRecord?.cardHash ?? null,   // <-- السطر المضاف
+        signalsSnapshot: JSON.stringify(updatedSnapshot),
+      }
+    });
+
+    // 9. حفظ RiskEvaluation للحدث (upsert لتجنب تكرار orderId)
+    await db.riskEvaluation.upsert({
+      where: { orderId: existingOrder.id },
+      create: {
+        orderId: existingOrder.id,
+        staticScore: riskResult.score,
+        learningScore: riskResult.score,
+        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+        positiveSignals: JSON.stringify(riskResult.positives || []),
+        scoringVersion: riskResult.scoringVersion || 'v1.0',
+      },
+      update: {
+        staticScore: riskResult.score,
+        learningScore: riskResult.score,
+        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+        positiveSignals: JSON.stringify(riskResult.positives || []),
+      },
+    });
+
+    // 10. معالجة أي pending enrichments (إذا وجدت لهذا الطلب) - حذفها لأنها طبقت
+    await db.pendingEnrichment.deleteMany({
+      where: { orderId, status: 'pending' }
+    });
+
+    // الاستجابة النهائية
+    res.json({
+      success: true,
+      orderId,
+      enriched: true,
+      newRiskScore: riskResult.score,
+      newDecision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+      flags: riskResult.flags,
+    });
+
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'enrich', error: error.message, stack: error.stack }, 'Enrich error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== Tenant Registration (Early Access) ==========
+
+/**
+ * @swagger
+ * /tenants/register:
+ *   post:
+ *     summary: Register a new tenant and receive an API key
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email: { type: string, format: email }
+ *               storeUrl: { type: string }
+ *     responses:
+ *       201:
+ *         description: Registration successful
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 apiKey: { type: string }
+ *                 email: { type: string }
+ *       400:
+ *         description: Missing email or email already registered
+ *       500:
+ *         description: Internal server error
+ */
+// ========== Rate limiting (simple in-memory) ==========
+const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
+
+router.post('/tenants/register', async (req, res) => {
+  // Rate limiting: max 5 registrations per IP per hour
+  const ip = req.ip || req.connection.remoteAddress;
+  const now = Date.now();
+  const windowMs = 60 * 60 * 1000; // 1 hour
+  const maxAttempts = 5;
+
+  if (!registrationAttempts.has(ip) || (now - registrationAttempts.get(ip).lastReset) > windowMs) {
+    registrationAttempts.set(ip, { count: 0, lastReset: now });
+  }
+
+  const attempt = registrationAttempts.get(ip);
+  attempt.count++;
+
+  if (attempt.count > maxAttempts) {
+    return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+  }
+
+  try {
+    const { email, storeUrl } = req.body;
+
+    if (!email || !email.includes('@')) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    // Check if tenant already exists
+    const existing = await db.tenant.findUnique({ where: { email } });
+    if (existing) {
+      return res.status(400).json({ error: 'Email already registered' });
+    }
+
+    // Generate a unique API key
+    const apiKey = crypto.randomBytes(32).toString('base64');
+
+    const tenant = await db.tenant.create({
+      data: {
+        email,
+        storeUrl: storeUrl || null,
+        apiKey,
+        plan: 'early_access',
+        isActive: true
+      }
+    });
+
+    logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
+
+    res.status(201).json({
+      apiKey: tenant.apiKey,
+      email: tenant.email,
+      plan: tenant.plan,
+      message: 'Welcome to ChargeGuard Early Access! Use this API key in your plugin settings.'
+    });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'register', error: error.message }, 'Registration error');
     res.status(500).json({ error: 'Internal server error' });
   }
 });
