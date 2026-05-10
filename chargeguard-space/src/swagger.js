@@ -13,6 +13,10 @@ const options = {
         url: 'http://localhost:3000/api',
         description: 'Development server',
       },
+      {
+        url: 'https://Amr453-chargeguard-space.hf.space/api',
+        description: 'Production server (Hugging Face)',
+      },
     ],
     components: {
       securitySchemes: {
@@ -68,7 +72,7 @@ const options = {
     },
     security: [{ apiKey: [] }],
   },
-  apis: ['./src/routes/*.js'], // المسار إلى ملفات الـ routes التي تحتوي على التعليقات
+  apis: ['./src/routes/*.js'],
 };
 
 module.exports = swaggerJsdoc(options);

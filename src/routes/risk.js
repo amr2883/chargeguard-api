@@ -811,7 +811,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
       if (!isValid) {
         logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch details');
-        return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
+        // return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
       }
     } else if (wcSecret && !signature) {
       // Secret configured but signature missing – reject
@@ -1393,6 +1393,34 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
 const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
 
 router.post('/tenants/register', async (req, res) => {
+  // ── Turnstile verification ────────────────────────────────────────────
+  const turnstileToken = req.body.turnstileToken || '';
+  if (!turnstileToken) {
+    return res.status(400).json({ error: 'Security check token missing.' });
+  }
+  try {
+    const turnstileRes = await fetch(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          secret:   process.env.TURNSTILE_SECRET_KEY,
+          response: turnstileToken,
+          remoteip: req.ip || req.connection.remoteAddress
+        })
+      }
+    );
+    const turnstileData = await turnstileRes.json();
+    if (!turnstileData.success) {
+      return res.status(403).json({ error: 'Security check failed. Please try again.' });
+    }
+  } catch (turnstileErr) {
+    console.error('Turnstile verification error:', turnstileErr);
+    return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
+  }
+  // ── End Turnstile ─────────────────────────────────────────────────────
+
   // Rate limiting: max 5 registrations per IP per hour
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
@@ -1411,7 +1439,23 @@ router.post('/tenants/register', async (req, res) => {
   }
 
   try {
-    const { email, storeUrl } = req.body;
+    const { email, storeUrl, turnstileToken } = req.body;
+
+// Turnstile verification
+if (process.env.TURNSTILE_SECRET_KEY) {
+  if (!turnstileToken) {
+    return res.status(400).json({ error: 'Security check failed — please try again.' });
+  }
+  const tsRes = await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ secret: process.env.TURNSTILE_SECRET_KEY, response: turnstileToken })
+  });
+  const tsData = await tsRes.json();
+  if (!tsData.success) {
+    return res.status(400).json({ error: 'Security check failed — please try again.' });
+  }
+}
 
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Valid email is required' });

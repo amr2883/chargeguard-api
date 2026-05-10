@@ -1,0 +1,756 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "ChargeGuard API",
+    "version": "1.0.0",
+    "description": "Fraud detection and card testing prevention API for WooCommerce"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000/api",
+      "description": "Development server"
+    },
+    {
+      "url": "https://Amr453-chargeguard-space.hf.space/api",
+      "description": "Production server (Hugging Face)"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "apiKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-api-key",
+        "description": "API key for authentication"
+      }
+    },
+    "schemas": {
+      "EvaluateRequest": {
+        "type": "object",
+        "required": [
+          "orderId",
+          "merchantId"
+        ],
+        "properties": {
+          "orderId": {
+            "type": "string",
+            "example": "order_123"
+          },
+          "merchantId": {
+            "type": "string",
+            "example": "merchant_001"
+          },
+          "email": {
+            "type": "string",
+            "example": "customer@example.com"
+          },
+          "ipAddress": {
+            "type": "string",
+            "example": "192.168.1.1"
+          },
+          "deviceFingerprint": {
+            "type": "string",
+            "example": "fp_abc123"
+          },
+          "amount": {
+            "type": "number",
+            "example": 99.99
+          },
+          "billingCountry": {
+            "type": "string",
+            "example": "US"
+          },
+          "shippingCountry": {
+            "type": "string",
+            "example": "US"
+          },
+          "bin": {
+            "type": "string",
+            "example": "424242"
+          },
+          "customerLoginId": {
+            "type": "string",
+            "example": "user_456"
+          },
+          "isNewCustomer": {
+            "type": "boolean",
+            "example": false
+          }
+        }
+      },
+      "EvaluateResponse": {
+        "type": "object",
+        "properties": {
+          "orderId": {
+            "type": "string"
+          },
+          "score": {
+            "type": "integer"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "approve",
+              "review",
+              "block"
+            ]
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "connectedRisk": {
+            "type": "integer"
+          },
+          "cached": {
+            "type": "boolean"
+          }
+        }
+      },
+      "BlacklistEntry": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "merchantId": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "EMAIL",
+              "IP",
+              "DEVICE_FINGERPRINT"
+            ]
+          },
+          "value": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  },
+  "security": [
+    {
+      "apiKey": []
+    }
+  ],
+  "paths": {
+    "/risk/evaluate": {
+      "post": {
+        "summary": "Evaluate an order for fraud risk",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EvaluateRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Risk assessment result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvaluateResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields"
+          },
+          "403": {
+            "description": "Blocked (blacklist or velocity)"
+          },
+          "500": {
+            "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/risk/mark-fraud": {
+      "post": {
+        "summary": "Mark a device as fraudulent (for testing)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "deviceFingerprint",
+                  "merchantId"
+                ],
+                "properties": {
+                  "deviceFingerprint": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "ipAddress": {
+                    "type": "string"
+                  },
+                  "merchantId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device marked as fraud"
+          },
+          "400": {
+            "description": "Missing deviceFingerprint or merchantId"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/risk/feedback": {
+      "post": {
+        "summary": "Provide feedback on a previous evaluation (for learning)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "orderId",
+                  "isFraud"
+                ],
+                "properties": {
+                  "orderId": {
+                    "type": "string"
+                  },
+                  "isFraud": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Feedback recorded"
+          },
+          "400": {
+            "description": "Missing orderId or isFraud"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/risk/test-graph": {
+      "post": {
+        "summary": "Test identity graph building (for debugging)",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "deviceFingerprint",
+                  "merchantId"
+                ],
+                "properties": {
+                  "deviceFingerprint": {
+                    "type": "string"
+                  },
+                  "email": {
+                    "type": "string"
+                  },
+                  "ipAddress": {
+                    "type": "string"
+                  },
+                  "merchantId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Graph built"
+          },
+          "400": {
+            "description": "Missing deviceFingerprint or merchantId"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/risk/blacklist": {
+      "post": {
+        "summary": "Add an entry to the blacklist",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "merchantId",
+                  "type",
+                  "value"
+                ],
+                "properties": {
+                  "merchantId": {
+                    "type": "string"
+                  },
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "EMAIL",
+                      "IP",
+                      "DEVICE_FINGERPRINT"
+                    ]
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "createdBy": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entry created"
+          },
+          "400": {
+            "description": "Invalid input"
+          }
+        }
+      },
+      "get": {
+        "summary": "Get blacklist entries for a merchant",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "merchantId",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "type",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "EMAIL",
+                "IP",
+                "DEVICE_FINGERPRINT"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "includeExpired",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of blacklist entries",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "entries": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/BlacklistEntry"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/risk/blacklist/{id}": {
+      "delete": {
+        "summary": "Delete a blacklist entry",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "merchantId"
+                ],
+                "properties": {
+                  "merchantId": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entry deleted"
+          },
+          "404": {
+            "description": "Entry not found"
+          }
+        }
+      },
+      "put": {
+        "summary": "Update a blacklist entry (reason or expiresAt)",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "merchantId": {
+                    "type": "string"
+                  },
+                  "reason": {
+                    "type": "string"
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "nullable": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Entry updated"
+          },
+          "400": {
+            "description": "Missing merchantId"
+          },
+          "404": {
+            "description": "Entry not found or not owned by this merchant"
+          }
+        }
+      }
+    },
+    "/risk/woocommerce-webhook": {
+      "post": {
+        "summary": "Receive WooCommerce webhook for order evaluation",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "id"
+                ],
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Order ID from WooCommerce"
+                  },
+                  "status": {
+                    "type": "string"
+                  },
+                  "total": {
+                    "type": "string"
+                  },
+                  "customer_ip_address": {
+                    "type": "string"
+                  },
+                  "merchantId": {
+                    "type": "string"
+                  },
+                  "billing": {
+                    "type": "object",
+                    "properties": {
+                      "email": {
+                        "type": "string"
+                      },
+                      "country": {
+                        "type": "string"
+                      }
+                    }
+                  },
+                  "shipping": {
+                    "type": "object"
+                  },
+                  "payment_details": {
+                    "type": "object",
+                    "properties": {
+                      "card_bin": {
+                        "type": "string"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Risk evaluation result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "orderId": {
+                      "type": "string"
+                    },
+                    "score": {
+                      "type": "integer"
+                    },
+                    "decision": {
+                      "type": "string",
+                      "enum": [
+                        "approve",
+                        "review",
+                        "block"
+                      ]
+                    },
+                    "flags": {
+                      "type": "array"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Invalid signature or missing signature"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/risk/check-device": {
+      "post": {
+        "summary": "Check if a device fingerprint is blocked",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "fingerprint"
+                ],
+                "properties": {
+                  "fingerprint": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Device check result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "blocked": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "nullable": true
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing fingerprint"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    },
+    "/risk/enrich": {
+      "post": {
+        "summary": "Enrich an order with card data from Stripe",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "orderId",
+                  "bin"
+                ],
+                "properties": {
+                  "orderId": {
+                    "type": "string"
+                  },
+                  "paymentIntentId": {
+                    "type": "string"
+                  },
+                  "bin": {
+                    "type": "string"
+                  },
+                  "cardBrand": {
+                    "type": "string"
+                  },
+                  "cardCountry": {
+                    "type": "string"
+                  },
+                  "funding": {
+                    "type": "string"
+                  },
+                  "issuer": {
+                    "type": "string"
+                  },
+                  "idempotencyKey": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Enrichment result (new risk score and decision)",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "enriched": {
+                      "type": "boolean"
+                    },
+                    "newRiskScore": {
+                      "type": "integer"
+                    },
+                    "newDecision": {
+                      "type": "string",
+                      "enum": [
+                        "approve",
+                        "review",
+                        "block"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing required fields"
+          },
+          "403": {
+            "description": "Merchant ID mismatch"
+          },
+          "500": {
+            "description": "Internal error"
+          }
+        }
+      }
+    }
+  },
+  "tags": []
+}
