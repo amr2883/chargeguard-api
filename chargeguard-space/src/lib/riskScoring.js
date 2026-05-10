@@ -290,8 +290,8 @@ async function calculateRiskScore(
   // ─── Parallel Intel Calls ─────────────────────────────────────────────
   // IP + Email + BIN مستقلين تماماً — نشغلهم في نفس الوقت
   // Promise.allSettled يضمن إن فشل واحد مش بيوقف الباقيين
-  const binRaw = order.payment_details?.credit_card_bin ?? null;
-  console.log(`[RISK] binRaw = ${binRaw}`);
+  const binRaw = order.payment_details?.card_bin ?? order.payment_details?.credit_card_bin ?? null;
+  
   const [ipIntelSettled, emailIntelSettled, binIntelSettled] = await Promise.allSettled([
     ip ? getIPIntelligence(ip, merchantId) : Promise.resolve(null),
     getEmailIntelligence(email, merchantId),
@@ -416,7 +416,7 @@ async function calculateRiskScore(
       order.shippingAddress,
       disputes.filter(d => !emailDisputeIds.has(d.id)),
     );
-        console.log(`[RISK] findSimilarDisputes returned: similarEmail=${similar.similarEmail.length}, similarIP=${similar.similarIP.length}, similarAddr=${similar.similarAddr.length}`);
+        
 
     if (similar.similarEmail.length > 0) {
       score -= 15;
@@ -446,7 +446,7 @@ async function calculateRiskScore(
     logger.error({ module: 'riskScoring', err: simErr }, 'Similarity check error');
   }
   // ─── BIN Intel Result ─────────────────────────────────────────────────
-console.log(`[RISK] binIntelSettled status = ${binIntelSettled.status}, value = ${JSON.stringify(binIntelSettled.value)}`);
+
 if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     try {
       const binIntel = binIntelSettled.value;

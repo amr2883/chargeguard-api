@@ -1,0 +1,337 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ========== Tenant (SaaS Client) ==========
+model Tenant {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  storeUrl  String?
+  apiKey         String   @unique
+  webhookSecret  String?
+  plan           String   @default("early_access")
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ربط المستأجر بملفات التاجر
+  profiles  MerchantProfile[] @relation("TenantProfiles")
+}
+
+// ========== Merchant Profile ==========
+model MerchantProfile {
+  id                  String   @id @default(cuid())
+  merchantId          String   @unique
+  totalOrders         Int      @default(0)
+  totalAmount         Float    @default(0)
+  avgOrderValue       Float    @default(0)
+  totalDisputes       Int      @default(0)
+  wonDisputes         Int      @default(0)
+  lostDisputes        Int      @default(0)
+  merchantWeightRatio Float    @default(0.0)
+  
+  // ===== حقول جديدة للثقة (Merchant Trust) =====
+  trustScore          Float    @default(0.3)
+  reportCount         Int      @default(0)
+
+  tenantId            String?
+  tenant              Tenant?          @relation("TenantProfiles", fields: [tenantId], references: [id])
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+}
+
+// ========== Signal Statistics ==========
+model SignalStat {
+  id            String   @id @default(cuid())
+  merchantId    String?  // null = global
+  signalType    String
+  signalValue   String
+  rawWins       Int      @default(0)
+  rawLosses     Int      @default(0)
+  totalEvents   Int      @default(0)
+  confidence    Float    @default(0.5)
+  lastDecayAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([merchantId, signalType, signalValue])
+  @@index([merchantId])
+}
+
+// ========== Order (جديد) ==========
+model Order {
+  id                 String   @id @default(cuid())
+  orderId            String   @unique  // معرف الطلب من WooCommerce
+  merchantId         String
+  amount             Float
+  currency           String   @default("USD")
+  email              String?
+  ipAddress          String?
+  customerLoginId    String?
+  deviceFingerprint  String?
+  fingerprintVersion String?
+  fingerprintStatus  String?
+  riskScore          Int?
+  riskLevel          String?  // low, medium, high
+  decision           String?  // approve, review, block
+  connectedRisk      Int?     @default(0)
+  cardHash           String?  // optional reference to CardHash.cardHash
+  
+  // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
+  signalsSnapshot    String?
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+
+  // علاقات (اختيارية لكن مفيدة)
+  riskEvaluations    RiskEvaluation[]
+  disputeOutcomes    DisputeOutcome[]
+}
+
+// ========== Risk Evaluation (Flight Recorder) ==========
+model RiskEvaluation {
+  id              String   @id @default(cuid())
+  orderId         String   @unique
+  // ربط بالـ Order (جديد)
+  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  
+  staticScore     Float
+  learningScore   Float
+  finalDecision   String
+  topSignals      String   @default("[]")
+  positiveSignals String   @default("[]")
+  scoringVersion  String
+  outcomeStatus   String   @default("PENDING")
+  createdAt       DateTime @default(now())
+
+  // Economic snapshot
+  fraudProb       Float?
+  expectedLoss    Float?
+  thresholdUsed   Float?
+  decisionBefore  String?
+  decisionAfter   String?
+}
+
+// ========== Dispute Outcome (for learning) ==========
+model DisputeOutcome {
+  id                String   @id @default(cuid())
+  disputeId         String   @unique
+  merchantId        String
+  orderId           String?
+  // ربط بالـ Order (جديد)
+  order             Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  
+  result            String   // "won" or "lost"
+  signalsPresent    String   @default("[]")
+  caseScore         Int?
+  resolvedAt        DateTime @default(now())
+}
+// ========== Pattern Sharing (Cross-Merchant Learning) ==========
+model FraudPattern {
+  id             String        @id @default(cuid())
+  patternHash    String        @unique
+  patternDesc    String?
+  signalCount    Int           @default(0)
+  weightedScore  Float         @default(0)
+  fraudCount     Int           @default(0)
+  legitCount     Int           @default(0)
+  totalCount     Int           @default(0)
+  signals        String?       // JSON array of signal types
+  merchantsSeen  Int           @default(0)
+  version        Int           @default(0)
+  learnedAtCount Int?
+  clusterId      String?
+  firstSeen      DateTime      @default(now())
+  lastSeen       DateTime      @updatedAt
+
+  cluster        FraudCluster? @relation(fields: [clusterId], references: [id])
+
+  @@index([patternHash])
+  @@index([clusterId])
+  @@index([lastSeen])
+  @@index([fraudCount])
+}
+
+model FraudCluster {
+  id                 String         @id @default(cuid())
+  clusterHash        String         @unique
+  clusterDesc        String?
+  totalCount         Int            @default(0)
+  fraudCount         Int            @default(0)
+  merchantsSeen      Int            @default(0)
+  weightedFraudScore Float          @default(0)
+  firstSeen          DateTime       @default(now())
+  lastSeen           DateTime       @updatedAt
+
+  patterns           FraudPattern[]
+
+  @@index([clusterHash])
+  @@index([fraudCount])
+}
+
+model PatternMerchant {
+  patternHash String
+  merchantId  String
+  createdAt   DateTime @default(now())
+
+  @@id([patternHash, merchantId])
+  @@index([patternHash])
+}
+// ========== Identity Graph ==========
+model IdentityNode {
+  id                   String   @id @default(cuid())
+  merchantId           String?
+  type                 String   // DEVICE, EMAIL, IP, ADDRESS, FINGERPRINT
+  hashedValue          String
+  maskedValue          String?
+  fingerprintConfig    String?
+  fingerprintHardware  String?
+  fraudEvents          Int      @default(0)
+  successOrders        Int      @default(0)
+  chargebacks          Int      @default(0)
+  totalTransactions    Int      @default(0)
+  merchantsSeen        Int      @default(0)
+  recentMerchants      Int      @default(0)
+  flaggedAtCount       Int?
+  lastHealedAt         DateTime?
+  firstSeen            DateTime @default(now())
+  lastSeen             DateTime @default(now())
+
+  // علاقات مع IdentityEdge
+  fromEdges IdentityEdge[] @relation("fromEdges")
+  toEdges   IdentityEdge[] @relation("toEdges")
+
+  @@unique([merchantId, type, hashedValue])
+  @@index([merchantId, type, lastSeen])
+  @@index([hashedValue])
+}
+
+model IdentityEdge {
+  id            String   @id @default(cuid())
+  fromId        String
+  toId          String
+  relation      String   // LINKED_TO, USED_WITH, SHIPPED_TO, LOGGED_FROM
+  seenCount     Int      @default(1)
+  uniqueOrders  Int      @default(1)
+  orderId       String?
+  firstSeenAt   DateTime @default(now())
+  lastSeenAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  from IdentityNode @relation("fromEdges", fields: [fromId], references: [id], onDelete: Cascade)
+  to   IdentityNode @relation("toEdges",   fields: [toId],   references: [id], onDelete: Cascade)
+
+  @@unique([fromId, toId, relation])
+  @@index([fromId])
+  @@index([toId])
+}
+
+model IdentityEvent {
+  id            String   @id @default(cuid())
+  nodeId        String
+  merchantId    String?
+  type          String   // FRAUD_CONFIRMED, CHARGEBACK, CLEAN_ORDER
+  eventCategory String
+  weight        Float
+  createdAt     DateTime @default(now())
+
+  @@index([nodeId, createdAt])
+}
+
+model ComputedIdentityRisk {
+  nodeId           String
+  algorithmVersion Int
+  riskScore        Float
+  alertLevel       String?
+  fraudWeight      Float
+  cleanWeight      Float
+  eventCount       Int
+  computedAt       DateTime @default(now())
+
+  @@id([nodeId, algorithmVersion])
+}
+
+// ========== BIN Local Cache ==========
+model BinRecord {
+  bin            String   @id
+  brand          String?
+  cardType       String?
+  issuerName     String?
+  issuerCountry  String?
+  isPrepaid      Boolean  @default(false)
+  isCommercial   Boolean  @default(false)
+  source         String
+  hitCount       Int      @default(1)
+  lastSeenAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+}
+
+// ========== Card Testing Velocity ==========
+model CardTestAttempt {
+  id            String   @id @default(cuid())
+  merchantId    String
+  binPrefix     String?
+  ipHash        String?
+  emailHash     String?
+  deviceHash    String?
+  amount        Float
+  wasBlocked    Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@index([merchantId, createdAt])
+  @@index([deviceHash, createdAt])
+  @@index([ipHash, createdAt])
+}
+// ========== Card Hash Tracking ==========
+model CardHash {
+  id           String   @id @default(cuid())
+  merchantId   String
+  cardHash     String   @unique
+  last4        String
+  expMonth     Int
+  expYear      Int
+  brand        String
+  attemptCount Int      @default(1)
+  blockCount   Int      @default(0)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+
+  @@index([merchantId, cardHash])
+  @@index([lastSeenAt])
+}
+
+// ========== Pending Enrichment ==========
+model PendingEnrichment {
+  id          String   @id @default(cuid())
+  orderId     String
+  paymentIntentId String?
+  enrichData  String
+  status      String   @default("pending")
+  createdAt   DateTime @default(now())
+  processedAt DateTime?
+
+  @@index([orderId])
+  @@index([status])
+}
+
+// ========== Blacklist (per merchant) ==========
+model BlacklistEntry {
+  id          String   @id @default(cuid())
+  merchantId  String
+  type        String   // EMAIL, IP, DEVICE_FINGERPRINT
+  value       String   // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة)
+  reason      String?  // سبب الإضافة
+  expiresAt   DateTime? // تاريخ انتهاء الحظر (اختياري)
+  createdAt   DateTime @default(now())
+  createdBy   String?  // من أضافها (مثل admin@store.com)
+
+  @@unique([merchantId, type, value])
+  @@index([merchantId, type, expiresAt])
+}

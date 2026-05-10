@@ -3,28 +3,41 @@ generator client {
 }
 
 datasource db {
-  provider = "postgresql"
-  url      = env("DATABASE_URL")
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+}
+
+// ========== Tenant (SaaS Client) ==========
+model Tenant {
+  id        String            @id @default(cuid())
+  email     String            @unique
+  storeUrl  String?
+apiKey         String   @unique
+  webhookSecret  String?  plan      String            @default("early_access")
+  isActive  Boolean           @default(true)
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+  profiles  MerchantProfile[]
 }
 
 // ========== Merchant Profile ==========
 model MerchantProfile {
-  id                  String   @id @default(cuid())
-  merchantId          String   @unique
-  totalOrders         Int      @default(0)
-  totalAmount         Float    @default(0)
-  avgOrderValue       Float    @default(0)
-  totalDisputes       Int      @default(0)
-  wonDisputes         Int      @default(0)
-  lostDisputes        Int      @default(0)
-  merchantWeightRatio Float    @default(0.0)
+  id                  String        @id @default(cuid())
+  merchantId          String        @unique
+  totalOrders         Int           @default(0)
+  totalAmount         Float         @default(0)
+  avgOrderValue       Float         @default(0)
+  totalDisputes       Int           @default(0)
+  wonDisputes         Int           @default(0)
+  lostDisputes        Int           @default(0)
+  merchantWeightRatio Float         @default(0.0)
+  tenantId            String?
+  tenant              Tenant?       @relation(fields: [tenantId], references: [id])
   
-  // ===== حقول جديدة للثقة (Merchant Trust) =====
-  trustScore          Float    @default(0.3)
-  reportCount         Int      @default(0)
+  trustScore          Float         @default(0.3)
+  reportCount         Int           @default(0)
 
-  createdAt           DateTime @default(now())
-  updatedAt           DateTime @updatedAt
+  createdAt           DateTime      @default(now())
 }
 
 // ========== Signal Statistics ==========
@@ -62,6 +75,8 @@ model Order {
   riskLevel          String?  // low, medium, high
   decision           String?  // approve, review, block
   connectedRisk      Int?     @default(0)
+  cardHash           String?  // optional reference to CardHash.cardHash
+  enrichmentIdempotencyKey String?
   
   // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
   signalsSnapshot    String?
@@ -269,6 +284,39 @@ model CardTestAttempt {
   @@index([deviceHash, createdAt])
   @@index([ipHash, createdAt])
 }
+// ========== Pending Enrichment Queue ==========
+model PendingEnrichment {
+  id               String   @id @default(cuid())
+  orderId          String
+  paymentIntentId  String?
+  enrichData       String   // JSON مع بيانات التخصيب
+  status           String   @default("pending") // pending, processed, failed
+  createdAt        DateTime @default(now())
+  processedAt      DateTime?
+
+  @@index([orderId])
+  @@index([paymentIntentId])
+  @@index([status])
+}
+
+// ========== Card Hash Tracking ==========
+model CardHash {
+  id           String   @id @default(cuid())
+  merchantId   String
+  cardHash     String   @unique
+  last4        String
+  expMonth     Int
+  expYear      Int
+  brand        String
+  attemptCount Int      @default(1)
+  blockCount   Int      @default(0)
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+
+  @@index([merchantId, cardHash])
+  @@index([lastSeenAt])
+}
+
 // ========== Blacklist (per merchant) ==========
 model BlacklistEntry {
   id          String   @id @default(cuid())

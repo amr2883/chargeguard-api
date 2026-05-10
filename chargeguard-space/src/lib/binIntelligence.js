@@ -8,7 +8,7 @@
 //
 // Feature flags: ENABLE_BIN_INTEL (default true), BIN_FALLBACK_API (free|neutrino)
 
-// const db = require("../db.server.js"); // غير مطلوب حاليًا
+const db = require('./db'); // Prisma client for BinRecord
 const { recordBIN, checkBINLimit, binlistGlobalBucket } = require('./metrics');
 const prometheus = require('./prometheus');
 const logger = require('../lib/logger');
@@ -85,11 +85,10 @@ function normalizeBin(raw) {
 }
 
 // ─── Extract BIN from Shopify order ────────────────────────────────────
+// Extract BIN from order (WooCommerce primary, Shopify fallback)
 function extractBIN(order) {
-  // credit_card_bin = Shopify standard field
-  // payment_details?.cardBin = بعض الـ Shopify responses القديمة
-  // order.cardBin مش موجود في الـ schema — اتشال
-  const bin = order.payment_details?.credit_card_bin
+  const bin = order.payment_details?.card_bin
+           ?? order.payment_details?.credit_card_bin
            ?? order.payment_details?.cardBin
            ?? null;
   return normalizeBin(bin);
@@ -99,8 +98,30 @@ function extractBIN(order) {
 // بترجع { record, effectiveBin } — effectiveBin للـ lastSeenAt update
 // الـ cache key منفصل عنه — دايماً bin.slice(0,6) في getBINIntelligence
 async function lookupInLocalDB(bin) {
-  // قاعدة البيانات المحلية غير متاحة حاليًا - نعتمد على API الخارجي
-  return null;
+  const binPrefix = bin.slice(0, 6);
+  try {
+    const record = await db.binRecord.findUnique({
+      where: { bin: binPrefix },
+    });
+    if (!record) return null;
+
+    // تحديث hitCount و lastSeenAt في الخلفية (لا ننتظر حتى لا نؤخر الاستجابة)
+    db.binRecord.update({
+      where: { bin: binPrefix },
+      data: {
+        hitCount: { increment: 1 },
+        lastSeenAt: new Date(),
+      },
+    }).catch(err => logger.error({ module: 'binIntel', err }, 'Failed to update hitCount for bin ' + binPrefix));
+
+    return {
+      record: record,
+      effectiveBin: binPrefix,
+    };
+  } catch (err) {
+    logger.error({ module: 'binIntel', err }, 'DB lookup failed for bin ' + binPrefix);
+    return null;
+  }
 }
 
 // ─── Fetch from binlist.net free API ───────────────────────────────────
@@ -196,9 +217,42 @@ async function fetchFromNeutrino(bin) {
 // cacheKey = effectiveBin (6-8 digits حسب ما الـ DB لاقى) — يضمن cache consistency
 // binPrefix = دايماً 6 digits للـ DB — consistent مع الـ BIN standard
 async function persistBinData(cacheKey, data) {
-  // Update in-memory cache
+  // تحديث الـ in-memory cache أولاً
   binCache.set(cacheKey, data);
-  // DB persistence معطل مؤقتًا - لا توجد قاعدة بيانات محلية بعد
+
+  const binPrefix = cacheKey.slice(0, 6);
+  const now = new Date();
+  try {
+    await db.binRecord.upsert({
+      where: { bin: binPrefix },
+      create: {
+        bin: binPrefix,
+        brand: data.brand,
+        cardType: data.cardType,
+        issuerName: data.issuerName,
+        issuerCountry: data.issuerCountry,
+        isPrepaid: data.isPrepaid ?? false,
+        isCommercial: data.isCommercial ?? false,
+        source: data.source,
+        hitCount: 1,
+        lastSeenAt: now,
+        createdAt: now,
+      },
+      update: {
+        brand: data.brand,
+        cardType: data.cardType,
+        issuerName: data.issuerName,
+        issuerCountry: data.issuerCountry,
+        isPrepaid: data.isPrepaid ?? false,
+        isCommercial: data.isCommercial ?? false,
+        source: data.source,
+        hitCount: { increment: 1 },
+        lastSeenAt: now,
+      },
+    });
+  } catch (err) {
+    logger.error({ module: 'binIntel', err }, 'Failed to upsert BinRecord for bin ' + binPrefix);
+  }
 }
 
 // ─── Main entry point ───────────────────────────────────────────────────
