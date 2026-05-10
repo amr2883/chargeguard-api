@@ -1,6 +1,6 @@
 ---
 title: ChargeGuard API
-emoji: ???
+emoji: 🛡️
 colorFrom: purple
 colorTo: gray
 sdk: docker
@@ -28,6 +28,8 @@ ChargeGuard هو نظام كشف ومنع احتيال متكامل، مصمم �
 - [المراقبة (Prometheus + Grafana)](#-المراقبة-prometheus--grafana)
 - [HTTPS والأمان](#-https-والأمان)
 - [النشر على الإنترنت (Cloudflare Tunnel)](#-النشر-على-الإنترنت-cloudflare-tunnel)
+- [النشر على Hugging Face Spaces (مجاني)](#-النشر-على-hugging-face-spaces-مجاني)
+- [ضمان استمرارية الخدمة (منع السبات)](#-ضمان-استمرارية-الخدمة-منع-السبات)
 - [الاختبارات](#-الاختبارات)
 - [التطوير المحلي](#-التطوير-المحلي)
 - [استكشاف الأخطاء وإصلاحها](#-استكشاف-الأخطاء-وإصلاحها)
@@ -65,5 +67,5 @@ ChargeGuard هو نظام كشف ومنع احتيال متكامل، مصمم �
 ### 1. استنساخ المستودع
 
 ```bash
-git clone https://github.com/your-repo/chargeguard-woocommerce-backend.git
+git clone https://github.com/Amr453/chargeguard-woocommerce-backend.git
 cd chargeguard-woocommerce-backend
