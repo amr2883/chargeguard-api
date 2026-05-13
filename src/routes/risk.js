@@ -1394,19 +1394,19 @@ const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
 
 router.post('/tenants/register', async (req, res) => {
   // ── Turnstile verification ────────────────────────────────────────────
-  const turnstileToken = req.body.turnstileToken || '';
-  if (!turnstileToken) {
+  const hcaptchaToken = req.body.hcaptchaToken || '';
+  if (!hcaptchaToken) {
     return res.status(400).json({ error: 'Security check token missing.' });
   }
   try {
     const turnstileRes = await fetch(
-      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      'https://api.hcaptcha.com/siteverify',
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams({
-          secret:   process.env.TURNSTILE_SECRET_KEY,
-          response: turnstileToken,
+          secret:   process.env.HCAPTCHA_SECRET_KEY,
+          response: hcaptchaToken,
           remoteip: req.ip || req.connection.remoteAddress
         })
       }
@@ -1439,7 +1439,7 @@ router.post('/tenants/register', async (req, res) => {
   }
 
   try {
-    const { email, storeUrl, turnstileToken } = req.body;
+    const { email, storeUrl, hcaptchaToken } = req.body;
 
 
 
