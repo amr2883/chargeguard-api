@@ -1479,5 +1479,44 @@ router.post('/tenants/register', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+// ========== Auto-Cleanup Blocked Orders ==========
+router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
+  try {
+    const merchantId = req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'x-merchant-id header is required' });
+    }
+
+    // البحث عن الطلبات المحظورة (decision = 'block')
+    const blockedOrders = await db.order.findMany({
+      where: { merchantId, decision: 'block' },
+      select: { id: true, orderId: true }
+    });
+
+    if (blockedOrders.length === 0) {
+      return res.json({ success: true, cleanedCount: 0, message: 'No blocked orders to clean' });
+    }
+
+    // حذف الطلبات المحظورة
+    const deleteResult = await db.order.deleteMany({
+      where: { merchantId, decision: 'block' }
+    });
+
+    logger.info({ 
+      module: 'risk', 
+      merchantId, 
+      cleanedCount: deleteResult.count 
+    }, 'Auto-cleanup completed');
+
+    res.json({ 
+      success: true, 
+      cleanedCount: deleteResult.count,
+      message: `Cleaned ${deleteResult.count} blocked orders` 
+    });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'cleanup-blocked', error: error.message }, 'Cleanup error');
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 
 module.exports = router;
