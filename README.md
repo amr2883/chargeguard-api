@@ -69,3 +69,4 @@ ChargeGuard هو نظام كشف ومنع احتيال متكامل، مصمم �
 ```bash
 git clone https://github.com/Amr453/chargeguard-woocommerce-backend.git
 cd chargeguard-woocommerce-backend
+## Build Verification - 2026-05-22 19:34:33
