@@ -10,6 +10,8 @@ const { normalizeBin } = require('../lib/binIntelligence');
 const { buildGraphFromOrder } = require('../lib/identityGraph');
 const prometheus = require('../lib/prometheus');
 
+const { domainAuthMiddleware, normalizeDomain } = require('../lib/domainAuth');
+
 const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) {
@@ -55,7 +57,7 @@ const apiKeyAuth = async (req, res, next) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/evaluate', apiKeyAuth, async (req, res) => {
+router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     // استخراج البيانات
     const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
@@ -1051,7 +1053,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
 });
 // ========== Check Device Endpoint ==========
 // يُستخدم بواسطة جدار الحماية الديناميكي في المكوّن الإضافي
-router.post('/check-device', apiKeyAuth, async (req, res) => {
+router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { fingerprint } = req.body;
     if (!fingerprint) {
@@ -1114,7 +1116,7 @@ router.post('/check-device', apiKeyAuth, async (req, res) => {
 
 // ========== Enrich Endpoint ==========
 // يُستخدم لإثراء الطلب ببيانات BIN من بوابات الدفع الخارجية (مثل Stripe)
-router.post('/enrich', apiKeyAuth, async (req, res) => {
+router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { 
       orderId, 
@@ -1456,13 +1458,23 @@ router.post('/tenants/register', async (req, res) => {
     // Generate a unique API key
     const apiKey = crypto.randomBytes(32).toString('base64');
 
+    // استخراج الدومين من storeUrl وتخزينه في allowedDomains
+    const allowedDomains = [];
+    if (storeUrl) {
+      const normalizedDomain = normalizeDomain(storeUrl);
+      if (normalizedDomain) {
+        allowedDomains.push(normalizedDomain);
+      }
+    }
+
     const tenant = await db.tenant.create({
       data: {
         email,
         storeUrl: storeUrl || null,
         apiKey,
         plan: 'early_access',
-        isActive: true
+        isActive: true,
+        allowedDomains: allowedDomains
       }
     });
 
@@ -1516,6 +1528,105 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'cleanup-blocked', error: error.message }, 'Cleanup error');
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// ========== GET /risk/verify-key ==========
+// يُستخدم بواسطة زر "تحقق من المفتاح" في إضافة WooCommerce
+// لا يستخدم domainAuthMiddleware عمداً — التاجر قد يتحقق قبل تسجيل دومينه
+/**
+ * @swagger
+ * /risk/verify-key:
+ *   get:
+ *     summary: Verify if an API key is valid and active
+ *     parameters:
+ *       - in: header
+ *         name: x-api-key
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: x-store-domain
+ *         required: false
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: API key is valid and active
+ *       400:
+ *         description: Missing x-api-key header
+ *       401:
+ *         description: Invalid or inactive API key
+ *       403:
+ *         description: Domain not authorized for this key
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/verify-key', async (req, res) => {
+  try {
+    // 1. التحقق من وجود الـ header
+    const apiKey = req.headers['x-api-key'];
+    if (!apiKey) {
+      return res.status(400).json({
+        valid: false,
+        message: 'Missing x-api-key header'
+      });
+    }
+
+    // 2. البحث في قاعدة البيانات
+    const tenant = await db.tenant.findUnique({
+      where: { apiKey },
+      select: {
+        id: true,
+        isActive: true,
+        allowedDomains: true
+        // عمداً لا نجلب email أو أي بيانات حساسة
+      }
+    });
+
+    // 3. مفتاح غير موجود أو غير نشط
+    if (!tenant || !tenant.isActive) {
+      return res.status(401).json({
+        valid: false,
+        message: 'Invalid or inactive API key'
+      });
+    }
+
+    // 4. التحقق الاختياري من الدومين
+    //    يُطبَّق فقط إذا كان التاجر لديه allowedDomains مسجلة
+    //    (للحفاظ على التوافق مع التجار القدامى الذين ليس لديهم دومين مسجل)
+    if (tenant.allowedDomains && tenant.allowedDomains.length > 0) {
+      const requestDomain = req.headers['x-store-domain'];
+      if (requestDomain) {
+        const normalizedRequest = normalizeDomain(requestDomain);
+        const isAllowed = tenant.allowedDomains
+          .map(d => normalizeDomain(d))
+          .includes(normalizedRequest);
+
+        if (!isAllowed) {
+          return res.status(403).json({
+            valid: false,
+            message: 'Domain not authorized for this API key'
+          });
+        }
+      }
+      // لو x-store-domain مش موجود لكن allowedDomains موجودة:
+      // نسمح بالمرور — التاجر قد يكون يختبر من خارج المتجر
+    }
+
+    // 5. كل شيء صحيح
+    return res.status(200).json({
+      valid: true,
+      message: 'API key is valid'
+    });
+
+  } catch (error) {
+    logger.error(
+      { module: 'risk', endpoint: 'verify-key', error: error.message },
+      'Verify key error'
+    );
+    return res.status(500).json({
+      valid: false,
+      message: 'Internal server error'
+    });
   }
 });
 
