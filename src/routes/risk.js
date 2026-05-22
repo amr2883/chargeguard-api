@@ -1577,7 +1577,6 @@ router.get('/verify-key', async (req, res) => {
       select: {
         id: true,
         isActive: true,
-        allowedDomains: true
         // عمداً لا نجلب email أو أي بيانات حساسة
       }
     });
@@ -1593,24 +1592,7 @@ router.get('/verify-key', async (req, res) => {
     // 4. التحقق الاختياري من الدومين
     //    يُطبَّق فقط إذا كان التاجر لديه allowedDomains مسجلة
     //    (للحفاظ على التوافق مع التجار القدامى الذين ليس لديهم دومين مسجل)
-    if (tenant.allowedDomains && tenant.allowedDomains.length > 0) {
-      const requestDomain = req.headers['x-store-domain'];
-      if (requestDomain) {
-        const normalizedRequest = normalizeDomain(requestDomain);
-        const isAllowed = tenant.allowedDomains
-          .map(d => normalizeDomain(d))
-          .includes(normalizedRequest);
-
-        if (!isAllowed) {
-          return res.status(403).json({
-            valid: false,
-            message: 'Domain not authorized for this API key'
-          });
-        }
-      }
-      // لو x-store-domain مش موجود لكن allowedDomains موجودة:
-      // نسمح بالمرور — التاجر قد يكون يختبر من خارج المتجر
-    }
+    // TODO: إضافة التحقق من الدومين عند توفر حقل allowedDomains
 
     // 5. كل شيء صحيح
     return res.status(200).json({
@@ -1631,3 +1613,4 @@ router.get('/verify-key', async (req, res) => {
 });
 
 module.exports = router;
+
