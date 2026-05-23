@@ -8,32 +8,106 @@ async function sendApiKeyEmail(email, apiKey) {
     to: email,
     subject: '🔑 Your ChargeGuard API Key',
     html: `
-      <div style="font-family:sans-serif;max-width:600px;margin:0 auto;padding:32px;background:#0b1121;color:#cbd5e1;border-radius:12px;">
-        <div style="margin-bottom:24px;">
-          <h1 style="color:#f97316;font-size:24px;margin:0;">ChargeGuard</h1>
-          <p style="color:#64748b;font-size:14px;margin:4px 0 0;">Early Access</p>
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+        
+        <!-- Header -->
+        <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+          <table cellpadding="0" cellspacing="0" style="width:100%;">
+            <tr>
+              <td>
+                <table cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding-right:10px;vertical-align:middle;">
+                      <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;display:flex;align-items:center;justify-content:center;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                        </svg>
+                      </div>
+                    </td>
+                    <td style="vertical-align:middle;">
+                      <span style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+              <td style="text-align:right;vertical-align:middle;">
+                <span style="font-size:11px;color:#64748b;font-family:monospace;letter-spacing:0.08em;text-transform:uppercase;">Early Access</span>
+              </td>
+            </tr>
+          </table>
         </div>
 
-        <h2 style="color:#f1f5f9;font-size:20px;">Welcome aboard 🎉</h2>
-        <p>Your API key is ready. Copy it now and keep it safe — <strong style="color:#fca5a5;">it grants full access to your store's protection.</strong></p>
+        <!-- Body -->
+        <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+          
+          <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">Welcome aboard 🎉</h2>
+          <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your ChargeGuard API key is ready. Save it somewhere safe — you'll need it to activate protection on your store.</p>
 
-        <div style="background:#020617;border:1px dashed #f97316;border-radius:8px;padding:16px 20px;margin:24px 0;word-break:break-all;font-family:monospace;font-size:14px;color:#f97316;">
-          ${apiKey}
+          <!-- API Key Box -->
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
+            <p style="font-size:11px;font-family:monospace;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your API Key</p>
+            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${apiKey}</p>
+          </div>
+
+          <!-- Warning -->
+          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
+            <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Never share this key.</strong> It grants full access to your store's fraud protection — treat it like a password.</p>
+          </div>
+
+          <!-- Steps -->
+          <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">Get protected in 3 steps</h3>
+          
+          <table cellpadding="0" cellspacing="0" style="width:100%;">
+            <tr>
+              <td style="padding-bottom:12px;vertical-align:top;">
+                <table cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                      <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">1</div>
+                    </td>
+                    <td style="vertical-align:top;">
+                      <p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Install the plugin</strong> — Download and upload via Plugins → Add New → Upload Plugin</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding-bottom:12px;vertical-align:top;">
+                <table cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                      <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">2</div>
+                    </td>
+                    <td style="vertical-align:top;">
+                      <p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Activate & configure</strong> — Go to WooCommerce → Settings → ChargeGuard and paste your key</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="vertical-align:top;">
+                <table cellpadding="0" cellspacing="0">
+                  <tr>
+                    <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                      <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">3</div>
+                    </td>
+                    <td style="vertical-align:top;">
+                      <p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">You're protected</strong> — The firewall activates instantly. Bots blocked. Fees stopped.</p>
+                    </td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+          </table>
         </div>
 
-        <div style="background:rgba(239,68,68,0.1);border:1px solid rgba(239,68,68,0.25);border-radius:8px;padding:12px 16px;margin-bottom:24px;font-size:13px;color:#fca5a5;">
-          ⚠️ Never share this key. Treat it like a password.
+        <!-- Footer -->
+        <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+          <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">You received this email because you signed up for ChargeGuard Early Access. If you didn't register, you can safely ignore this email.</p>
         </div>
 
-        <h3 style="color:#f1f5f9;font-size:16px;">Next Steps</h3>
-        <ol style="color:#cbd5e1;font-size:14px;line-height:2;">
-          <li>Download the plugin from your dashboard</li>
-          <li>Go to <strong>WooCommerce → Settings → ChargeGuard</strong></li>
-          <li>Paste your API key and save</li>
-        </ol>
-
-        <hr style="border:none;border-top:1px solid rgba(255,255,255,0.07);margin:24px 0;">
-        <p style="font-size:12px;color:#64748b;">This email was sent because you registered for ChargeGuard Early Access. If you didn't register, ignore this email.</p>
       </div>
     `
   });
