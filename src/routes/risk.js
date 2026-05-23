@@ -1,4 +1,11 @@
 ﻿const crypto = require('crypto');
+
+// ── IP Hashing (GDPR-safe) ────────────────────────────────────────────────
+const hashIp = (ip) => {
+  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
+  return crypto.createHmac('sha256', salt).update(ip).digest('hex');
+};
+// ─────────────────────────────────────────────────────────────────────────
 const logger = require('../lib/logger');
 const express = require('express');
 const router = express.Router();
@@ -1391,8 +1398,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
-// ========== Rate limiting (simple in-memory) ==========
-const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
+
 
 router.post('/tenants/register', async (req, res) => {
       // ── Turnstile verification ────────────────────────────────────────────
@@ -1423,22 +1429,35 @@ router.post('/tenants/register', async (req, res) => {
       }
       // ── End Turnstile ─────────────────────────────────────────────────────
 
-  // Rate limiting: max 5 registrations per IP per hour
+  // ── Rate Limiting (Persistent DB) ────────────────────────────────────────
   const ip = req.ip || req.connection.remoteAddress;
-  const now = Date.now();
-  const windowMs = 60 * 60 * 1000; // 1 hour
-  const maxAttempts = 5;
+  const ipHash = hashIp(ip);
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const MAX_ATTEMPTS = 5;
 
-  if (!registrationAttempts.has(ip) || (now - registrationAttempts.get(ip).lastReset) > windowMs) {
-    registrationAttempts.set(ip, { count: 0, lastReset: now });
+  try {
+    const [, recentCount] = await Promise.all([
+      db.registrationAttempt.deleteMany({
+        where: { createdAt: { lt: oneHourAgo } }
+      }),
+      db.registrationAttempt.count({
+        where: { ipHash, createdAt: { gte: oneHourAgo } }
+      })
+    ]);
+
+    if (recentCount >= MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+    }
+
+    await db.registrationAttempt.create({ data: { ipHash } });
+
+  } catch (rateLimitErr) {
+    logger.error(
+      { module: 'risk', endpoint: 'register', error: rateLimitErr.message },
+      'Rate limiter DB error — failing open'
+    );
   }
-
-  const attempt = registrationAttempts.get(ip);
-  attempt.count++;
-
-  if (attempt.count > maxAttempts) {
-    return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
-  }
+  // ── End Rate Limiting ─────────────────────────────────────────────────────
 
   try {
     const { email, storeUrl } = req.body;
