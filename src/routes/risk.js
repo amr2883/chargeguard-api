@@ -1,11 +1,11 @@
-ï»¿const crypto = require('crypto');
+const crypto = require('crypto');
 
-// â”€â”€ IP Hashing (GDPR-safe) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
 const hashIp = (ip) => {
   const salt = process.env.SECRET_SALT || 'default_salt_change_me';
   return crypto.createHmac('sha256', salt).update(ip).digest('hex');
 };
-// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// ?????????????????????????????????????????????????????????????????????????
 const logger = require('../lib/logger');
 const express = require('express');
 const router = express.Router();
@@ -25,7 +25,7 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'API key is required' });
   }
 
-  // Ø§Ù„Ø¨Ø­Ø« Ø¹Ù† Ù…ÙØªØ§Ø­ API ÙÙŠ Ø¬Ø¯ÙˆÙ„ Tenant
+  // ÇáÈÍË Úä ãİÊÇÍ API İí ÌÏæá Tenant
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
     select: { id: true, email: true, isActive: true }
@@ -35,7 +35,7 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'Invalid or inactive API key' });
   }
 
-  // Ø¥Ø±ÙØ§Ù‚ Ù…Ø¹Ù„ÙˆÙ…Ø§Øª Ø§Ù„Ù…Ø³ØªØ£Ø¬Ø± Ø¨Ø§Ù„Ø·Ù„Ø¨ Ù„Ø§Ø³ØªØ®Ø¯Ø§Ù…Ù‡Ø§ Ù„Ø§Ø­Ù‚Ù‹Ø§
+  // ÅÑİÇŞ ãÚáæãÇÊ ÇáãÓÊÃÌÑ ÈÇáØáÈ áÇÓÊÎÏÇãåÇ áÇÍŞğÇ
   req.tenant = { id: tenant.id, email: tenant.email };
   next();
 };
@@ -66,21 +66,21 @@ const apiKeyAuth = async (req, res, next) => {
  */
 router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
-    // Ø§Ø³ØªØ®Ø±Ø§Ø¬ Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª
+    // ÇÓÊÎÑÇÌ ÇáÈíÇäÇÊ
     const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
     const merchantId = bodyMerchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-        // Idempotency: Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„Ø·Ù„Ø¨Ø§Øª Ø§Ù„Ù…ÙƒØ±Ø±Ø© Ø®Ù„Ø§Ù„ Ø¢Ø®Ø± 5 Ø¯Ù‚Ø§Ø¦Ù‚
-    const idempotencyWindow = 5 * 60 * 1000; // 5 Ø¯Ù‚Ø§Ø¦Ù‚
+        // Idempotency: ÇáÊÍŞŞ ãä ÇáØáÈÇÊ ÇáãßÑÑÉ ÎáÇá ÂÎÑ 5 ÏŞÇÆŞ
+    const idempotencyWindow = 5 * 60 * 1000; // 5 ÏŞÇÆŞ
     const existingOrder = await db.order.findUnique({
       where: { orderId },
       select: { decision: true, riskScore: true, connectedRisk: true, signalsSnapshot: true, createdAt: true }
     });
     if (existingOrder && (Date.now() - new Date(existingOrder.createdAt).getTime()) < idempotencyWindow) {
-      // Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„Ø±Ø¯ Ø§Ù„Ù…Ø®Ø²Ù†
+      // ÅÚÇÏÉ ÇáÑÏ ÇáãÎÒä
       const oldSnapshot = existingOrder.signalsSnapshot ? JSON.parse(existingOrder.signalsSnapshot) : {};
       prometheus.recordIdempotencyHit();
       return res.json({
@@ -95,7 +95,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
     logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
 
-    // 0. ÙØ­Øµ Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø³ÙˆØ¯Ø§Ø¡
+    // 0. İÍÕ ÇáŞÇÆãÉ ÇáÓæÏÇÁ
     const blacklistCheck = await db.blacklistEntry.findFirst({
       where: {
         merchantId,
@@ -122,7 +122,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     }
 
 
-    // 1. ÙØ­Øµ Ø§Ù„Ø³Ø±Ø¹Ø© (Velocity Check)
+    // 1. İÍÕ ÇáÓÑÚÉ (Velocity Check)
     const velocityCheck = checkVelocity({ ip: ipAddress, deviceFingerprint });
     if (velocityCheck.blocked) {
       return res.status(403).json({
@@ -145,7 +145,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       }
     }
 
-    // 1. Ø¨Ù†Ø§Ø¡ ÙƒØ§Ø¦Ù† order
+    // 1. ÈäÇÁ ßÇÆä order
     const order = {
       id: orderId,
       email: email,
@@ -167,11 +167,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       isNewCustomer: isNewCustomer || false,
     };
 
-    // 2. ØªØ¬Ù‡ÙŠØ² Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ù…Ø³Ø§Ø¹Ø¯Ø©
+    // 2. ÊÌåíÒ ÇáÈíÇäÇÊ ÇáãÓÇÚÏÉ
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    // Ø¬Ù„Ø¨ Ø§Ù„Ø·Ù„Ø¨Ø§Øª Ø§Ù„Ø³Ø§Ø¨Ù‚Ø© Ù…Ù† Ù‚Ø§Ø¹Ø¯Ø© Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª
-    // Ø¬Ù„Ø¨ Ø¢Ø®Ø± 200 Ø·Ù„Ø¨ ÙÙ‚Ø· Ù„Ø­Ø³Ø§Ø¨ Ø§Ù„Ù…ØªÙˆØ³Ø·Ø§Øª (Ø£ÙØ¶Ù„ Ø£Ø¯Ø§Ø¡)
+    // ÌáÈ ÇáØáÈÇÊ ÇáÓÇÈŞÉ ãä ŞÇÚÏÉ ÇáÈíÇäÇÊ
+    // ÌáÈ ÂÎÑ 200 ØáÈ İŞØ áÍÓÇÈ ÇáãÊæÓØÇÊ (ÃİÖá ÃÏÇÁ)
     const recentOrders = await db.order.findMany({
       where: { merchantId, createdAt: { gte: last7days } },
       orderBy: { createdAt: 'desc' },
@@ -189,7 +189,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       riskLevel: o.riskLevel,
     }));
 
-    // Ø­Ø³Ø§Ø¨ Ø§Ù„Ù€ velocity counts Ø¨Ø§Ø³ØªØ®Ø¯Ø§Ù… Ø§Ø³ØªØ¹Ù„Ø§Ù…Ø§Øª Ù…Ù†ÙØµÙ„Ø© (Ø£Ø³Ø±Ø¹)
+    // ÍÓÇÈ ÇáÜ velocity counts ÈÇÓÊÎÏÇã ÇÓÊÚáÇãÇÊ ãäİÕáÉ (ÃÓÑÚ)
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -206,10 +206,10 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       where: { merchantId, email, createdAt: { gte: last6h } }
     }) : 0;
 
-    // Ø¥Ø¶Ø§ÙØ© Ù‡Ø°Ù‡ Ø§Ù„Ù‚ÙŠÙ… Ø¥Ù„Ù‰ computedSignals (ÙŠÙ…ÙƒÙ† ØªÙ…Ø±ÙŠØ±Ù‡Ø§ Ø¥Ù„Ù‰ riskScoring Ù„Ø§Ø­Ù‚Ø§Ù‹)
-    // Ù„ÙƒÙ†Ù†Ø§ Ø³Ù†Ø³ØªØ®Ø¯Ù…Ù‡Ø§ Ù…Ø¨Ø§Ø´Ø±Ø© ÙÙŠ signalsSnapshot
+    // ÅÖÇİÉ åĞå ÇáŞíã Åáì computedSignals (íãßä ÊãÑíÑåÇ Åáì riskScoring áÇÍŞÇğ)
+    // áßääÇ ÓäÓÊÎÏãåÇ ãÈÇÔÑÉ İí signalsSnapshot
 
-    // Ø¬Ù„Ø¨ Ø§Ù„Ù†Ø²Ø§Ø¹Ø§Øª Ø§Ù„Ø³Ø§Ø¨Ù‚Ø© (Ø¢Ø®Ø± 90 ÙŠÙˆÙ…)
+    // ÌáÈ ÇáäÒÇÚÇÊ ÇáÓÇÈŞÉ (ÂÎÑ 90 íæã)
     const disputes = await db.disputeOutcome.findMany({
       where: {
         merchantId,
@@ -225,7 +225,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     });
     const blacklist = [];
 
-    // 3. Ø¨Ù†Ø§Ø¡ Ø§Ù„Ø±Ø³Ù… Ø§Ù„Ø¨ÙŠØ§Ù†ÙŠ Ù„Ù„Ù‡ÙˆÙŠØ© Ø£ÙˆÙ„Ø§Ù‹
+    // 3. ÈäÇÁ ÇáÑÓã ÇáÈíÇäí ááåæíÉ ÃæáÇğ
     const orderForGraph = {
       deviceFingerprint: deviceFingerprint,
       deviceId: deviceFingerprint,
@@ -242,7 +242,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     }
         const evaluateStart = Date.now();
 
-    // 4. Ø§Ø³ØªØ¯Ø¹Ø§Ø¡ Ù…Ø­Ø±Ùƒ Ø§Ù„ØªÙ‚ÙŠÙŠÙ… (Ù…Ø¹ ØªÙ…Ø±ÙŠØ± velocityCounts)
+    // 4. ÇÓÊÏÚÇÁ ãÍÑß ÇáÊŞííã (ãÚ ÊãÑíÑ velocityCounts)
     const riskResult = await calculateRiskScore(
       order,
       formattedOrders,
@@ -253,7 +253,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount }  // velocity counts
     );
 
-    // 5. Ø¨Ù†Ø§Ø¡ Ø§Ù„Ø§Ø³ØªØ¬Ø§Ø¨Ø©
+    // 5. ÈäÇÁ ÇáÇÓÊÌÇÈÉ
     const response = {
       orderId: orderId,
       score: riskResult.score,
@@ -263,20 +263,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       connectedRisk: 0,
     };
 
-     // Ø§Ø³ØªØ®Ø¯Ø§Ù… connectedRisk Ù…Ø¨Ø§Ø´Ø±Ø© Ù…Ù† Ù†ØªÙŠØ¬Ø© Identity Graph
+     // ÇÓÊÎÏÇã connectedRisk ãÈÇÔÑÉ ãä äÊíÌÉ Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
-    // ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø© Ø§Ù„ÙØ§Ø´Ù„Ø© ÙÙŠ Ø·Ø¨Ù‚Ø© Ø§Ù„Ø³Ø±Ø¹Ø©
+    // ÊÓÌíá ÇáãÍÇæáÉ ÇáİÇÔáÉ İí ØÈŞÉ ÇáÓÑÚÉ
     if (response.decision === 'block') {
       recordFailedAttempt({ ip: ipAddress, deviceFingerprint });
     }
 
-    // 6. Ø­ÙØ¸ Ø§Ù„Ø·Ù„Ø¨ ÙÙŠ Ù‚Ø§Ø¹Ø¯Ø© Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª
+    // 6. ÍİÙ ÇáØáÈ İí ŞÇÚÏÉ ÇáÈíÇäÇÊ
     if (orderId) {
         const computed = riskResult.computedSignals || {};
-      // Ø§Ø³ØªØ®Ø¯Ø§Ù… Ø§Ù„Ù‚ÙŠÙ… Ø§Ù„Ù…Ø­Ø³ÙˆØ¨Ø© Ù…Ø³Ø¨Ù‚Ø§Ù‹ Ù…Ù† externalVelocity (Ø§Ù„Ù…ÙˆØ¬ÙˆØ¯Ø© ÙÙŠ Ø§Ù„Ù†Ø·Ø§Ù‚)
-      const deviceVelocityCountFinal = deviceVelocityCount;   // Ù…Ù† Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø¯Ø§Ù„Ø©
-      const ipVelocityCountFinal = ipVelocityCount;           // Ù…Ù† Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø¯Ø§Ù„Ø©
-      const emailVelocityCountFinal = emailVelocityCount;     // Ù…Ù† Ø£Ø¹Ù„Ù‰ Ø§Ù„Ø¯Ø§Ù„Ø©
+      // ÇÓÊÎÏÇã ÇáŞíã ÇáãÍÓæÈÉ ãÓÈŞÇğ ãä externalVelocity (ÇáãæÌæÏÉ İí ÇáäØÇŞ)
+      const deviceVelocityCountFinal = deviceVelocityCount;   // ãä ÃÚáì ÇáÏÇáÉ
+      const ipVelocityCountFinal = ipVelocityCount;           // ãä ÃÚáì ÇáÏÇáÉ
+      const emailVelocityCountFinal = emailVelocityCount;     // ãä ÃÚáì ÇáÏÇáÉ
       const isNewCustomerComputed = computed.isNewCustomer || false;
       const amountAnomaly = (computed.orderMultiple || 0) >= 3;
 
@@ -338,7 +338,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
         },
       });
 
-      // Ø­ÙØ¸ RiskEvaluation Ø¥Ø°Ø§ ÙƒØ§Ù† Ø§Ù„Ù‚Ø±Ø§Ø± block Ø£Ùˆ review
+      // ÍİÙ RiskEvaluation ÅĞÇ ßÇä ÇáŞÑÇÑ block Ãæ review
       if (response.decision === 'block' || response.decision === 'review') {
         await db.riskEvaluation.upsert({
         where: { orderId: savedOrder.id },
@@ -370,7 +370,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
-// Ù†Ù‚Ø·Ø© Ù†Ù‡Ø§ÙŠØ© Ù…Ø¤Ù‚ØªØ© Ù„ÙˆØ¶Ø¹ Ø¹Ù„Ø§Ù…Ø© Ø§Ø­ØªÙŠØ§Ù„ Ø¹Ù„Ù‰ Ø¬Ù‡Ø§Ø² (Ù„Ø£ØºØ±Ø§Ø¶ Ø§Ù„Ø§Ø®ØªØ¨Ø§Ø± ÙÙ‚Ø·)
+// äŞØÉ äåÇíÉ ãÄŞÊÉ áæÖÚ ÚáÇãÉ ÇÍÊíÇá Úáì ÌåÇÒ (áÃÛÑÇÖ ÇáÇÎÊÈÇÑ İŞØ)
 /**
  * @swagger
  * /risk/mark-fraud:
@@ -397,7 +397,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
  *         description: Internal error
  */
 router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
-  // Ù…Ù†Ø¹ Ø§Ù„ÙˆØµÙˆÙ„ ÙÙŠ Ø¨ÙŠØ¦Ø© Ø§Ù„Ø¥Ù†ØªØ§Ø¬
+  // ãäÚ ÇáæÕæá İí ÈíÆÉ ÇáÅäÊÇÌ
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
   }
@@ -430,8 +430,8 @@ router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-// Ù†Ù‚Ø·Ø© Ù†Ù‡Ø§ÙŠØ© Ù„Ù„ØªØ¹Ù„Ù… Ù…Ù† Ù†ØªØ§Ø¦Ø¬ Ø§Ù„Ø­Ø¸Ø± (Feedback Loop)
-// ØªØ³ØªÙ‚Ø¨Ù„ orderId Ùˆ isFraud (true = Ø§Ù„Ø­Ø¸Ø± ÙƒØ§Ù† ØµØ­ÙŠØ­Ù‹Ø§, false = Ø§Ù„Ø­Ø¸Ø± ÙƒØ§Ù† Ø®Ø§Ø·Ø¦Ù‹Ø§)
+// äŞØÉ äåÇíÉ ááÊÚáã ãä äÊÇÆÌ ÇáÍÙÑ (Feedback Loop)
+// ÊÓÊŞÈá orderId æ isFraud (true = ÇáÍÙÑ ßÇä ÕÍíÍğÇ, false = ÇáÍÙÑ ßÇä ÎÇØÆğÇ)
 const { processFeedback } = require('../lib/feedbackLoop');
 /**
  * @swagger
@@ -467,8 +467,8 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'isFraud is required (true/false)' });
     }
 
-    // Ø§Ø³ØªØ¯Ø¹Ø§Ø¡ Ù…Ø­Ø±Ùƒ Ø§Ù„ØªØ¹Ù„Ù…
-    // Ù†Ù…Ø±Ø± isFraud ÙƒÙ†ØªÙŠØ¬Ø© (true = lost, false = won)
+    // ÇÓÊÏÚÇÁ ãÍÑß ÇáÊÚáã
+    // äãÑÑ isFraud ßäÊíÌÉ (true = lost, false = won)
     await processFeedback(orderId, isFraud ? 'lost' : 'won');
 
     res.json({ success: true, message: 'Feedback recorded successfully' });
@@ -478,7 +478,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
   }
 });
 
-// Ù†Ù‚Ø·Ø© Ù†Ù‡Ø§ÙŠØ© Ù…Ø¤Ù‚ØªØ© Ù„Ø§Ø®ØªØ¨Ø§Ø± buildGraphFromOrder
+// äŞØÉ äåÇíÉ ãÄŞÊÉ áÇÎÊÈÇÑ buildGraphFromOrder
 /**
  * @swagger
  * /risk/test-graph:
@@ -505,7 +505,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
  *         description: Internal error
  */
 router.post('/test-graph', apiKeyAuth, async (req, res) => {
-  // Ù…Ù†Ø¹ Ø§Ù„ÙˆØµÙˆÙ„ ÙÙŠ Ø¨ÙŠØ¦Ø© Ø§Ù„Ø¥Ù†ØªØ§Ø¬
+  // ãäÚ ÇáæÕæá İí ÈíÆÉ ÇáÅäÊÇÌ
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
   }
@@ -539,7 +539,7 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
   }
 });
 // ========== Blacklist Management Endpoints ==========
-// Ø¥Ø¶Ø§ÙØ© Ø¹Ù†ØµØ± Ø¥Ù„Ù‰ Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø³ÙˆØ¯Ø§Ø¡
+// ÅÖÇİÉ ÚäÕÑ Åáì ÇáŞÇÆãÉ ÇáÓæÏÇÁ
 /**
  * @swagger
  * /risk/blacklist:
@@ -571,7 +571,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
     if (!merchantId || !type || !value) {
       return res.status(400).json({ error: 'merchantId, type, and value are required' });
     }
-    // Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† ØµØ­Ø© Ø§Ù„Ù†ÙˆØ¹
+    // ÇáÊÍŞŞ ãä ÕÍÉ ÇáäæÚ
     const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
@@ -594,7 +594,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
   }
 });
 
-// Ø­Ø°Ù Ø¹Ù†ØµØ± Ù…Ù† Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø³ÙˆØ¯Ø§Ø¡
+// ÍĞİ ÚäÕÑ ãä ÇáŞÇÆãÉ ÇáÓæÏÇÁ
 /**
  * @swagger
  * /risk/blacklist/{id}:
@@ -628,7 +628,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-    // Ø§Ù„ØªØ£ÙƒØ¯ Ù…Ù† Ø£Ù† Ø§Ù„Ø¹Ù†ØµØ± ÙŠÙ†ØªÙ…ÙŠ Ø¥Ù„Ù‰ Ù†ÙØ³ Ø§Ù„ØªØ§Ø¬Ø±
+    // ÇáÊÃßÏ ãä Ãä ÇáÚäÕÑ íäÊãí Åáì äİÓ ÇáÊÇÌÑ
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -644,7 +644,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
   }
 });
 // ========== GET Blacklist (Query) ==========
-// Ø§Ø³ØªØ¹Ø±Ø§Ø¶ Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø³ÙˆØ¯Ø§Ø¡ Ù„Ù„ØªØ§Ø¬Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ
+// ÇÓÊÚÑÇÖ ÇáŞÇÆãÉ ÇáÓæÏÇÁ ááÊÇÌÑ ÇáÍÇáí
 /**
  * @swagger
  * /risk/blacklist:
@@ -682,7 +682,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
     const { type, includeExpired } = req.query;
     const where = { merchantId };
 
-    // ØªØµÙÙŠØ© Ø­Ø³Ø¨ Ø§Ù„Ù†ÙˆØ¹ (Ø§Ø®ØªÙŠØ§Ø±ÙŠ)
+    // ÊÕİíÉ ÍÓÈ ÇáäæÚ (ÇÎÊíÇÑí)
     if (type) {
       const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
       if (!validTypes.includes(type)) {
@@ -691,7 +691,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
       where.type = type;
     }
 
-    // ØªØµÙÙŠØ© Ø§Ù„ØµÙ„Ø§Ø­ÙŠØ©: Ø¨Ø´ÙƒÙ„ Ø§ÙØªØ±Ø§Ø¶ÙŠ Ù†Ø¹Ø±Ø¶ ÙÙ‚Ø· Ø§Ù„Ø¹Ù†Ø§ØµØ± Ø§Ù„Ø³Ø§Ø±ÙŠØ© (ØºÙŠØ± Ù…Ù†ØªÙ‡ÙŠØ© Ø£Ùˆ expiresAt null)
+    // ÊÕİíÉ ÇáÕáÇÍíÉ: ÈÔßá ÇİÊÑÇÖí äÚÑÖ İŞØ ÇáÚäÇÕÑ ÇáÓÇÑíÉ (ÛíÑ ãäÊåíÉ Ãæ expiresAt null)
     if (includeExpired !== 'true') {
       where.OR = [
         { expiresAt: null },
@@ -747,7 +747,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-    // Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† Ù…Ù„ÙƒÙŠØ© Ø§Ù„Ø¹Ù†ØµØ±
+    // ÇáÊÍŞŞ ãä ãáßíÉ ÇáÚäÕÑ
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -784,7 +784,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Raw body missing' });
     }
 
-    // 2. Parse raw body to JSON (Ù†Ø­Ø¯Ø¯ parsedBody Ø§Ù„Ø£ÙˆÙ„)
+    // 2. Parse raw body to JSON (äÍÏÏ parsedBody ÇáÃæá)
     let parsedBody;
     try {
       parsedBody = JSON.parse(rawBody.toString());
@@ -793,7 +793,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Invalid JSON payload' });
     }
 
-    // 3. Ø§Ø³ØªØ®Ø±Ø§Ø¬ merchantId (Ø¨Ø¹Ø¯ÙŠÙ† Ù†Ø³ØªØ®Ø¯Ù… parsedBody)
+    // 3. ÇÓÊÎÑÇÌ merchantId (ÈÚÏíä äÓÊÎÏã parsedBody)
     let merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
       merchantId = 'test_merchant_001'; // default for testing
@@ -807,7 +807,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const { verifyWebhookSignature } = require('../lib/woocommerce');
       const expected = crypto.createHmac('sha256', wcSecret).update(rawBody).digest('base64');
       
-      // Ø³Ø¬Ù„ Ù…Ø¹Ù„ÙˆÙ…Ø§Øª Ø§Ù„Ù…Ù‚Ø§Ø±Ù†Ø© (Ø¨Ø¯ÙˆÙ† Ø§Ù„Ù…ÙØªØ§Ø­ Ø£Ùˆ Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„ÙƒØ§Ù…Ù„Ø©)
+      // ÓÌá ãÚáæãÇÊ ÇáãŞÇÑäÉ (ÈÏæä ÇáãİÊÇÍ Ãæ ÇáÈíÇäÇÊ ÇáßÇãáÉ)
       logger.warn({
         module: 'risk',
         receivedSignatureLength: signature.length,
@@ -823,7 +823,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
         // return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
       }
     } else if (wcSecret && !signature) {
-      // Secret configured but signature missing â€“ reject
+      // Secret configured but signature missing – reject
       return res.status(401).json({ error: 'Missing signature' });
     }
     // If no secret configured, skip signature verification (not recommended for production)
@@ -847,7 +847,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       // Return cached response (within reasonable time window, e.g., 24h)
       const ageHours = (Date.now() - new Date(existingOrder.createdAt).getTime()) / (1000 * 60 * 60);
       if (ageHours < 24) {
-        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request â€“ returning cached result');
+        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request – returning cached result');
         return res.json({
           orderId: extracted.orderId,
           score: existingOrder.riskScore,
@@ -861,7 +861,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const riskRequest = buildRiskEvaluationRequest(extracted);
     riskRequest.merchantId = merchantId;
 
-    // Ø§Ø³ØªØ®Ø±Ø§Ø¬ Ø¨ØµÙ…Ø© Ø§Ù„Ø¬Ù‡Ø§Ø² Ù…Ù† Webhook (Ø¥Ø°Ø§ ÙˆØ¬Ø¯Øª)
+    // ÇÓÊÎÑÇÌ ÈÕãÉ ÇáÌåÇÒ ãä Webhook (ÅĞÇ æÌÏÊ)
     let deviceFingerprint = parsedBody.device_fingerprint || null;
     if (!deviceFingerprint && parsedBody.meta_data) {
         const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
@@ -1059,7 +1059,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
   }
 });
 // ========== Check Device Endpoint ==========
-// ÙŠÙØ³ØªØ®Ø¯Ù… Ø¨ÙˆØ§Ø³Ø·Ø© Ø¬Ø¯Ø§Ø± Ø§Ù„Ø­Ù…Ø§ÙŠØ© Ø§Ù„Ø¯ÙŠÙ†Ø§Ù…ÙŠÙƒÙŠ ÙÙŠ Ø§Ù„Ù…ÙƒÙˆÙ‘Ù† Ø§Ù„Ø¥Ø¶Ø§ÙÙŠ
+// íõÓÊÎÏã ÈæÇÓØÉ ÌÏÇÑ ÇáÍãÇíÉ ÇáÏíäÇãíßí İí Çáãßæøä ÇáÅÖÇİí
 router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { fingerprint } = req.body;
@@ -1072,7 +1072,7 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
-    // 1. Ø§Ù„Ø¨Ø­Ø« Ø¹Ù† Ø¨ØµÙ…Ø© Ø§Ù„Ø¬Ù‡Ø§Ø² ÙÙŠ Identity Graph
+    // 1. ÇáÈÍË Úä ÈÕãÉ ÇáÌåÇÒ İí Identity Graph
     const { getConnectedRisk } = require('../lib/identityGraph');
     const mockOrder = {
       deviceFingerprint: fingerprint,
@@ -1084,17 +1084,17 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
 
     try {
       const graphResult = await getConnectedRisk(mockOrder, merchantId);
-      // Ø¥Ø°Ø§ ÙƒØ§Ù† connectedRisk >= 80 Ù†Ø¹ØªØ¨Ø±Ù‡ ØªÙ‡Ø¯ÙŠØ¯Ø§Ù‹ Ø¹Ø§Ù„ÙŠØ§Ù‹ ÙˆÙ†Ù…Ù†Ø¹Ù‡
+      // ÅĞÇ ßÇä connectedRisk >= 80 äÚÊÈÑå ÊåÏíÏÇğ ÚÇáíÇğ æäãäÚå
       if (graphResult.connectedRisk >= 45) {
         blocked = true;
         reason = 'Device fingerprint linked to high-risk network';
       }
     } catch (err) {
       logger.error({ module: 'risk', endpoint: 'check-device', err }, 'Graph lookup error');
-      // ÙØ´Ù„ Ø¢Ù…Ù†: Ù„Ø§ Ù†Ù…Ù†Ø¹ Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… Ø¥Ø°Ø§ ÙØ´Ù„ Ø§Ù„ÙØ­Øµ
+      // İÔá Âãä: áÇ äãäÚ ÇáãÓÊÎÏã ÅĞÇ İÔá ÇáİÍÕ
     }
 
-    // 2. (Ø§Ø®ØªÙŠØ§Ø±ÙŠ) Ø§Ù„Ø¨Ø­Ø« ÙÙŠ Ø§Ù„Ù‚Ø§Ø¦Ù…Ø© Ø§Ù„Ø³ÙˆØ¯Ø§Ø¡ Ø§Ù„Ù…Ø±ÙƒØ²ÙŠØ©
+    // 2. (ÇÎÊíÇÑí) ÇáÈÍË İí ÇáŞÇÆãÉ ÇáÓæÏÇÁ ÇáãÑßÒíÉ
     if (!blocked) {
       const blacklisted = await db.blacklistEntry.findFirst({
         where: {
@@ -1116,13 +1116,13 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
     res.json({ blocked, reason });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'check-device', error: error.message }, 'Check-device error');
-    // ÙÙŠ Ø­Ø§Ù„Ø© Ø§Ù„Ø®Ø·Ø£ØŒ Ù†Ø¹ÙŠØ¯ blocked: false Ù„Ù…Ù†Ø¹ Ø§Ù„Ø¥ÙŠØ¬Ø§Ø¨ÙŠØ§Øª Ø§Ù„Ø®Ø§Ø·Ø¦Ø©
+    // İí ÍÇáÉ ÇáÎØÃ¡ äÚíÏ blocked: false áãäÚ ÇáÅíÌÇÈíÇÊ ÇáÎÇØÆÉ
     res.status(500).json({ blocked: false, error: error.message });
   }
 });
 
 // ========== Enrich Endpoint ==========
-// ÙŠÙØ³ØªØ®Ø¯Ù… Ù„Ø¥Ø«Ø±Ø§Ø¡ Ø§Ù„Ø·Ù„Ø¨ Ø¨Ø¨ÙŠØ§Ù†Ø§Øª BIN Ù…Ù† Ø¨ÙˆØ§Ø¨Ø§Øª Ø§Ù„Ø¯ÙØ¹ Ø§Ù„Ø®Ø§Ø±Ø¬ÙŠØ© (Ù…Ø«Ù„ Stripe)
+// íõÓÊÎÏã áÅËÑÇÁ ÇáØáÈ ÈÈíÇäÇÊ BIN ãä ÈæÇÈÇÊ ÇáÏİÚ ÇáÎÇÑÌíÉ (ãËá Stripe)
 router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { 
@@ -1152,7 +1152,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
-    // â”€â”€â”€ CardHash generation (if last4+expiry+brand provided) â”€â”€â”€
+    // ??? CardHash generation (if last4+expiry+brand provided) ???
     let cardHashRecord = null;
     if (last4 && expMonth && expYear && brand && merchantId) {
 
@@ -1179,7 +1179,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       });
     }
 
-    // 1. Ø§Ù„Ø¨Ø­Ø« Ø¹Ù† Ø§Ù„Ø·Ù„Ø¨ Ø§Ù„Ø£Ø³Ø§Ø³ÙŠ
+    // 1. ÇáÈÍË Úä ÇáØáÈ ÇáÃÓÇÓí
     const existingOrder = await db.order.findUnique({
       where: { orderId },
       select: { 
@@ -1202,7 +1202,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       }
     });
 
-    // 2. Ø¥Ø°Ø§ Ù„Ù… ÙŠÙˆØ¬Ø¯ Ø§Ù„Ø·Ù„Ø¨ØŒ Ù†Ø®Ø²Ù† pending enrichment
+    // 2. ÅĞÇ áã íæÌÏ ÇáØáÈ¡ äÎÒä pending enrichment
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
@@ -1219,20 +1219,20 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       });
     }
 
-    // 3. Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† Ù…Ù„ÙƒÙŠØ© Ø§Ù„ØªØ§Ø¬Ø±
+    // 3. ÇáÊÍŞŞ ãä ãáßíÉ ÇáÊÇÌÑ
     if (existingOrder.merchantId !== merchantId) {
       return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
     }
 
 
 
-    // 5. ØªØ­Ø¯ÙŠØ« Ø§Ù„Ø·Ù„Ø¨ Ø¨Ø¨ÙŠØ§Ù†Ø§Øª enrichment
+    // 5. ÊÍÏíË ÇáØáÈ ÈÈíÇäÇÊ enrichment
     let snapshot = {};
     try {
       snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}');
     } catch {}
 
-    // Ù†Ø¶ÙŠÙ Ø£Ùˆ Ù†Ø­Ø¯Ø« Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ø¨Ø·Ø§Ù‚Ø© ÙÙŠ snapshot
+    // äÖíİ Ãæ äÍÏË ÈíÇäÇÊ ÇáÈØÇŞÉ İí snapshot
     snapshot.bin = bin;
     if (cardBrand) snapshot.cardBrand = cardBrand;
     if (cardCountry) snapshot.cardIssuerCountry = cardCountry;
@@ -1241,7 +1241,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     snapshot.enrichedAt = new Date().toISOString();
     snapshot.enrichmentSource = 'stripe'; // or other gateway
 
-    // 6. ØªØ­Ø¶ÙŠØ± Ø§Ù„Ø·Ù„Ø¨ Ù„Ø¥Ø¹Ø§Ø¯Ø© Ø§Ù„Ø­Ø³Ø§Ø¨
+    // 6. ÊÍÖíÑ ÇáØáÈ áÅÚÇÏÉ ÇáÍÓÇÈ
     const enrichedOrder = {
       id: existingOrder.id,
       orderId: existingOrder.orderId,
@@ -1267,7 +1267,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       isNewCustomer: false,
     };
 
-    // ØªØ­Ù…ÙŠÙ„ Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª Ø§Ù„Ù…Ø³Ø§Ø¹Ø¯Ø©
+    // ÊÍãíá ÇáÈíÇäÇÊ ÇáãÓÇÚÏÉ
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentOrders = await db.order.findMany({
       where: { merchantId, createdAt: { gte: last7days } },
@@ -1290,7 +1290,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     });
     const blacklist = [];
 
-    // 7. Ø¥Ø¹Ø§Ø¯Ø© Ø­Ø³Ø§Ø¨ Ø§Ù„Ù…Ø®Ø§Ø·Ø±
+    // 7. ÅÚÇÏÉ ÍÓÇÈ ÇáãÎÇØÑ
     const { calculateRiskScore } = require('../lib/riskScoring');
     const riskResult = await calculateRiskScore(
       enrichedOrder,
@@ -1298,12 +1298,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       disputes,
       blacklist,
       merchantId,
-      false, // Ù„Ø§ ØªØ­ÙØ¸ ØªÙ‚ÙŠÙŠÙ…Ù‹Ø§ ØªÙ„Ù‚Ø§Ø¦ÙŠÙ‹Ø§ Ø­ØªÙ‰ Ù„Ø§ ØªØªÙƒØ±Ø±
+      false, // áÇ ÊÍİÙ ÊŞííãğÇ ÊáŞÇÆíğÇ ÍÊì áÇ ÊÊßÑÑ
       null,
-      cardHashRecord   // â† Ø¥Ø¶Ø§ÙØ© Ù…Ø¹Ø§Ù…Ù„ cardHashRecord
+      cardHashRecord   // ? ÅÖÇİÉ ãÚÇãá cardHashRecord
     );
 
-    // 8. Ø­ÙØ¸ Ø§Ù„Ù†ØªÙŠØ¬Ø© Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø©
+    // 8. ÍİÙ ÇáäÊíÌÉ ÇáÌÏíÏÉ
     const updatedSnapshot = {
       ...snapshot,
       ipIntel: riskResult.ipIntel || null,
@@ -1319,12 +1319,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
         riskScore: riskResult.score,
         riskLevel: riskResult.riskLevel,
         decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        cardHash: cardHashRecord?.cardHash ?? null,   // <-- Ø§Ù„Ø³Ø·Ø± Ø§Ù„Ù…Ø¶Ø§Ù
+        cardHash: cardHashRecord?.cardHash ?? null,   // <-- ÇáÓØÑ ÇáãÖÇİ
         signalsSnapshot: JSON.stringify(updatedSnapshot),
       }
     });
 
-    // 9. Ø­ÙØ¸ RiskEvaluation Ù„Ù„Ø­Ø¯Ø« (upsert Ù„ØªØ¬Ù†Ø¨ ØªÙƒØ±Ø§Ø± orderId)
+    // 9. ÍİÙ RiskEvaluation ááÍÏË (upsert áÊÌäÈ ÊßÑÇÑ orderId)
     await db.riskEvaluation.upsert({
       where: { orderId: existingOrder.id },
       create: {
@@ -1345,12 +1345,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       },
     });
 
-    // 10. Ù…Ø¹Ø§Ù„Ø¬Ø© Ø£ÙŠ pending enrichments (Ø¥Ø°Ø§ ÙˆØ¬Ø¯Øª Ù„Ù‡Ø°Ø§ Ø§Ù„Ø·Ù„Ø¨) - Ø­Ø°ÙÙ‡Ø§ Ù„Ø£Ù†Ù‡Ø§ Ø·Ø¨Ù‚Øª
+    // 10. ãÚÇáÌÉ Ãí pending enrichments (ÅĞÇ æÌÏÊ áåĞÇ ÇáØáÈ) - ÍĞİåÇ áÃäåÇ ØÈŞÊ
     await db.pendingEnrichment.deleteMany({
       where: { orderId, status: 'pending' }
     });
 
-    // Ø§Ù„Ø§Ø³ØªØ¬Ø§Ø¨Ø© Ø§Ù„Ù†Ù‡Ø§Ø¦ÙŠØ©
+    // ÇáÇÓÊÌÇÈÉ ÇáäåÇÆíÉ
     res.json({
       success: true,
       orderId,
@@ -1401,7 +1401,37 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
 
 router.post('/tenants/register', async (req, res) => {
-      // â”€â”€ Turnstile verification â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ?? Rate Limiting (Persistent DB) ????????????????????????????????????????
+  const ip = req.ip || req.connection.remoteAddress;
+  const ipHash = hashIp(ip);
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+  const MAX_ATTEMPTS = 5;
+
+  try {
+    const [, recentCount] = await Promise.all([
+      db.registrationAttempt.deleteMany({
+        where: { createdAt: { lt: oneHourAgo } }
+      }),
+      db.registrationAttempt.count({
+        where: { ipHash, createdAt: { gte: oneHourAgo } }
+      })
+    ]);
+
+    if (recentCount >= MAX_ATTEMPTS) {
+      return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+    }
+
+    await db.registrationAttempt.create({ data: { ipHash } });
+
+  } catch (rateLimitErr) {
+    logger.error(
+      { module: 'risk', endpoint: 'register', error: rateLimitErr.message },
+      'Rate limiter DB error — failing open'
+    );
+  }
+  // ?? End Rate Limiting ?????????????????????????????????????????????????????
+
+  // ?? Turnstile verification ????????????????????????????????????????????
       const turnstileToken = req.body.turnstileToken || '';
       if (!turnstileToken) {
         return res.status(400).json({ error: 'Security check token missing.' });
@@ -1427,37 +1457,8 @@ router.post('/tenants/register', async (req, res) => {
         console.error('Turnstile verification error:', turnstileErr);
         return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
       }
-      // â”€â”€ End Turnstile â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+      // ?? End Turnstile ?????????????????????????????????????????????????????
 
-  // â”€â”€ Rate Limiting (Persistent DB) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  const ip = req.ip || req.connection.remoteAddress;
-  const ipHash = hashIp(ip);
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-  const MAX_ATTEMPTS = 5;
-
-  try {
-    const [, recentCount] = await Promise.all([
-      db.registrationAttempt.deleteMany({
-        where: { createdAt: { lt: oneHourAgo } }
-      }),
-      db.registrationAttempt.count({
-        where: { ipHash, createdAt: { gte: oneHourAgo } }
-      })
-    ]);
-
-    if (recentCount >= MAX_ATTEMPTS) {
-      return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
-    }
-
-    await db.registrationAttempt.create({ data: { ipHash } });
-
-  } catch (rateLimitErr) {
-    logger.error(
-      { module: 'risk', endpoint: 'register', error: rateLimitErr.message },
-      'Rate limiter DB error â€” failing open'
-    );
-  }
-  // â”€â”€ End Rate Limiting â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
   try {
     const { email, storeUrl } = req.body;
@@ -1477,7 +1478,7 @@ router.post('/tenants/register', async (req, res) => {
     // Generate a unique API key
     const apiKey = crypto.randomBytes(32).toString('base64');
 
-    // Ø§Ø³ØªØ®Ø±Ø§Ø¬ Ø§Ù„Ø¯ÙˆÙ…ÙŠÙ† Ù…Ù† storeUrl ÙˆØªØ®Ø²ÙŠÙ†Ù‡ ÙÙŠ allowedDomains
+    // ÇÓÊÎÑÇÌ ÇáÏæãíä ãä storeUrl æÊÎÒíäå İí allowedDomains
     const allowedDomains = [];
     if (storeUrl) {
       const normalizedDomain = normalizeDomain(storeUrl);
@@ -1498,7 +1499,7 @@ router.post('/tenants/register', async (req, res) => {
 
     logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
 
-    // Ø¥Ø±Ø³Ø§Ù„ Ø§Ù„Ø¥ÙŠÙ…ÙŠÙ„ â€” fire-and-forget (Ù„Ø§ ÙŠÙˆÙ‚Ù Ø§Ù„ØªØ³Ø¬ÙŠÙ„ Ù„Ùˆ ÙØ´Ù„)
+    // ÅÑÓÇá ÇáÅíãíá — fire-and-forget (áÇ íæŞİ ÇáÊÓÌíá áæ İÔá)
     const { sendApiKeyEmail } = require('../lib/email');
     sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
       logger.error({ module: 'email', error: err.message }, 'Failed to send API key email');
@@ -1523,7 +1524,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
-    // Ø§Ù„Ø¨Ø­Ø« Ø¹Ù† Ø§Ù„Ø·Ù„Ø¨Ø§Øª Ø§Ù„Ù…Ø­Ø¸ÙˆØ±Ø© (decision = 'block')
+    // ÇáÈÍË Úä ÇáØáÈÇÊ ÇáãÍÙæÑÉ (decision = 'block')
     const blockedOrders = await db.order.findMany({
       where: { merchantId, decision: 'block' },
       select: { id: true, orderId: true }
@@ -1533,7 +1534,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
       return res.json({ success: true, cleanedCount: 0, message: 'No blocked orders to clean' });
     }
 
-    // Ø­Ø°Ù Ø§Ù„Ø·Ù„Ø¨Ø§Øª Ø§Ù„Ù…Ø­Ø¸ÙˆØ±Ø©
+    // ÍĞİ ÇáØáÈÇÊ ÇáãÍÙæÑÉ
     const deleteResult = await db.order.deleteMany({
       where: { merchantId, decision: 'block' }
     });
@@ -1556,8 +1557,8 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
 });
 
 // ========== GET /risk/verify-key ==========
-// ÙŠÙØ³ØªØ®Ø¯Ù… Ø¨ÙˆØ§Ø³Ø·Ø© Ø²Ø± "ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„Ù…ÙØªØ§Ø­" ÙÙŠ Ø¥Ø¶Ø§ÙØ© WooCommerce
-// Ù„Ø§ ÙŠØ³ØªØ®Ø¯Ù… domainAuthMiddleware Ø¹Ù…Ø¯Ø§Ù‹ â€” Ø§Ù„ØªØ§Ø¬Ø± Ù‚Ø¯ ÙŠØªØ­Ù‚Ù‚ Ù‚Ø¨Ù„ ØªØ³Ø¬ÙŠÙ„ Ø¯ÙˆÙ…ÙŠÙ†Ù‡
+// íõÓÊÎÏã ÈæÇÓØÉ ÒÑ "ÊÍŞŞ ãä ÇáãİÊÇÍ" İí ÅÖÇİÉ WooCommerce
+// áÇ íÓÊÎÏã domainAuthMiddleware ÚãÏÇğ — ÇáÊÇÌÑ ŞÏ íÊÍŞŞ ŞÈá ÊÓÌíá Ïæãíäå
 /**
  * @swagger
  * /risk/verify-key:
@@ -1586,7 +1587,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
  */
 router.get('/verify-key', async (req, res) => {
   try {
-    // 1. Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† ÙˆØ¬ÙˆØ¯ Ø§Ù„Ù€ header
+    // 1. ÇáÊÍŞŞ ãä æÌæÏ ÇáÜ header
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
       return res.status(400).json({
@@ -1595,17 +1596,17 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 2. Ø§Ù„Ø¨Ø­Ø« ÙÙŠ Ù‚Ø§Ø¹Ø¯Ø© Ø§Ù„Ø¨ÙŠØ§Ù†Ø§Øª
+    // 2. ÇáÈÍË İí ŞÇÚÏÉ ÇáÈíÇäÇÊ
     const tenant = await db.tenant.findUnique({
       where: { apiKey },
       select: {
         id: true,
         isActive: true,
-        // Ø¹Ù…Ø¯Ø§Ù‹ Ù„Ø§ Ù†Ø¬Ù„Ø¨ email Ø£Ùˆ Ø£ÙŠ Ø¨ÙŠØ§Ù†Ø§Øª Ø­Ø³Ø§Ø³Ø©
+        // ÚãÏÇğ áÇ äÌáÈ email Ãæ Ãí ÈíÇäÇÊ ÍÓÇÓÉ
       }
     });
 
-    // 3. Ù…ÙØªØ§Ø­ ØºÙŠØ± Ù…ÙˆØ¬ÙˆØ¯ Ø£Ùˆ ØºÙŠØ± Ù†Ø´Ø·
+    // 3. ãİÊÇÍ ÛíÑ ãæÌæÏ Ãæ ÛíÑ äÔØ
     if (!tenant || !tenant.isActive) {
       return res.status(401).json({
         valid: false,
@@ -1613,12 +1614,12 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 4. Ø§Ù„ØªØ­Ù‚Ù‚ Ø§Ù„Ø§Ø®ØªÙŠØ§Ø±ÙŠ Ù…Ù† Ø§Ù„Ø¯ÙˆÙ…ÙŠÙ†
-    //    ÙŠÙØ·Ø¨ÙÙ‘Ù‚ ÙÙ‚Ø· Ø¥Ø°Ø§ ÙƒØ§Ù† Ø§Ù„ØªØ§Ø¬Ø± Ù„Ø¯ÙŠÙ‡ allowedDomains Ù…Ø³Ø¬Ù„Ø©
-    //    (Ù„Ù„Ø­ÙØ§Ø¸ Ø¹Ù„Ù‰ Ø§Ù„ØªÙˆØ§ÙÙ‚ Ù…Ø¹ Ø§Ù„ØªØ¬Ø§Ø± Ø§Ù„Ù‚Ø¯Ø§Ù…Ù‰ Ø§Ù„Ø°ÙŠÙ† Ù„ÙŠØ³ Ù„Ø¯ÙŠÙ‡Ù… Ø¯ÙˆÙ…ÙŠÙ† Ù…Ø³Ø¬Ù„)
-    // TODO: Ø¥Ø¶Ø§ÙØ© Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„Ø¯ÙˆÙ…ÙŠÙ† Ø¹Ù†Ø¯ ØªÙˆÙØ± Ø­Ù‚Ù„ allowedDomains
+    // 4. ÇáÊÍŞŞ ÇáÇÎÊíÇÑí ãä ÇáÏæãíä
+    //    íõØÈóøŞ İŞØ ÅĞÇ ßÇä ÇáÊÇÌÑ áÏíå allowedDomains ãÓÌáÉ
+    //    (ááÍİÇÙ Úáì ÇáÊæÇİŞ ãÚ ÇáÊÌÇÑ ÇáŞÏÇãì ÇáĞíä áíÓ áÏíåã Ïæãíä ãÓÌá)
+    // TODO: ÅÖÇİÉ ÇáÊÍŞŞ ãä ÇáÏæãíä ÚäÏ ÊæİÑ ÍŞá allowedDomains
 
-    // 5. ÙƒÙ„ Ø´ÙŠØ¡ ØµØ­ÙŠØ­
+    // 5. ßá ÔíÁ ÕÍíÍ
     return res.status(200).json({
       valid: true,
       message: 'API key is valid'
