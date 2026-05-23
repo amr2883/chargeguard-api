@@ -1474,7 +1474,6 @@ router.post('/tenants/register', async (req, res) => {
         apiKey,
         plan: 'early_access',
         isActive: true,
-        allowedDomains: allowedDomains
       }
     });
 
