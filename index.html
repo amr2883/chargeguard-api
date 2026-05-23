@@ -9,17 +9,17 @@
     <title>ChargeGuard — Stop Card Testing Before It Costs You</title>
     <meta name="description" content="Automated card testing bots are draining your WooCommerce revenue through gateway fees. ChargeGuard stops them in real-time — invisible to real customers, lethal to bots.">
     <meta name="robots" content="index, follow">
-    <link rel="canonical" href="https://chargeguard-io.netlify.app/">
+    <link rel="canonical" href="https://master.chargeguard-landing.pages.dev/">
 
     <!-- ═══════════════════════════════════════════════
          OPEN GRAPH — Facebook · LinkedIn · WhatsApp
     ═══════════════════════════════════════════════ -->
     <meta property="og:type"        content="website">
     <meta property="og:site_name"   content="ChargeGuard">
-    <meta property="og:url"         content="https://chargeguard-io.netlify.app/">
+    <meta property="og:url"         content="https://master.chargeguard-landing.pages.dev/">
     <meta property="og:title"       content="ChargeGuard — Stop Card Testing Before It Costs You">
     <meta property="og:description" content="Card testing bots charge your gateway for every stolen card attempt. ChargeGuard blocks them in real-time — free for the first 10 WooCommerce stores.">
-    <meta property="og:image"       content="https://chargeguard-io.netlify.app/og-image.png">
+    <meta property="og:image"       content="https://master.chargeguard-landing.pages.dev/og-image.png">
     <meta property="og:image:width"  content="1200">
     <meta property="og:image:height" content="630">
     <meta property="og:image:alt"    content="ChargeGuard dashboard showing card testing attacks blocked in real-time">
@@ -32,7 +32,7 @@
     <meta name="twitter:site"        content="@chargeguard">
     <meta name="twitter:title"       content="ChargeGuard — Stop Card Testing Before It Costs You">
     <meta name="twitter:description" content="Card testing bots charge your gateway for every stolen card attempt. ChargeGuard blocks them in real-time — free for the first 10 WooCommerce stores.">
-    <meta name="twitter:image"       content="https://chargeguard-io.netlify.app/og-image.png">
+    <meta name="twitter:image"       content="https://master.chargeguard-landing.pages.dev/og-image.png">
     <meta name="twitter:image:alt"   content="ChargeGuard dashboard showing attacks blocked in real-time">
 
     <!-- ═══════════════════════════════════════════════
@@ -43,7 +43,7 @@
         "@context": "https://schema.org",
         "@type": "SoftwareApplication",
         "name": "ChargeGuard",
-        "url": "https://chargeguard-io.netlify.app/",
+        "url": "https://master.chargeguard-landing.pages.dev/",
         "description": "Real-time card testing attack prevention for WooCommerce. Blocks bots before they trigger gateway fees — invisible to legitimate customers.",
         "applicationCategory": "SecurityApplication",
         "operatingSystem": "WordPress / WooCommerce",
@@ -57,7 +57,7 @@
         "publisher": {
             "@type": "Organization",
             "name": "ChargeGuard",
-            "url": "https://chargeguard-io.netlify.app/"
+            "url": "https://master.chargeguard-landing.pages.dev/"
         },
         "featureList": [
             "Real-time card testing detection",
@@ -78,7 +78,17 @@
     <!-- ═══════════════════════════════════════════════
          FONTS
     ═══════════════════════════════════════════════ -->
-    <script src="https://js.hcaptcha.com/1/api.js" async defer></script>
+    
+<script>
+    window.onTurnstileSuccess = function(token) {
+        console.log('[Turnstile] Token ready');
+        window._turnstileToken = token;
+    };
+    window.onTurnstileError = function(errorCode) {
+        console.error('[Turnstile] Error:', errorCode);
+    };
+</script>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1724,7 +1734,7 @@
                     </svg>
                 </div>
                 <div class="step-title">Install the Plugin</div>
-                <div class="step-desc">Download <code style="font-family:var(--font-mono);font-size:0.8em;color:var(--orange);">chargeguard.zip</code> and upload it to WordPress in under 60 seconds. No server access needed.</div>
+                <div class="step-desc">Download <a href="https://github.com/amr2883/chargeguard-plugin/releases/latest/download/chargeguard.zip" download="chargeguard.zip" style="color:var(--orange);text-decoration:underline;text-underline-offset:3px;font-family:var(--font-mono);font-size:0.8em;">chargeguard.zip</a> and upload it to WordPress in under 60 seconds. No server access needed.</div>
             </div>
 
             <div class="step-arrow">
@@ -1977,19 +1987,20 @@
                             <input type="text" id="storeUrl" name="storeUrl" placeholder="https://yourstore.com" autocomplete="url">
                         </div>
                         <!-- hCaptcha widget -->
-                        <div class="h-captcha"
-                             data-sitekey="bc10f32e-7474-4dce-8d86-d0d611de2714"
-                             
-                             style="margin-bottom:0.75rem;">
-                        </div>
-
+<div class="cf-turnstile"
+     data-sitekey="0x4AAAAAADN9Zgc_f4OR2xVx"
+     data-callback="onTurnstileSuccess"
+     data-error-callback="onTurnstileError"
+     style="margin-bottom:0.75rem;">
+</div>
                         <button type="submit" class="form-submit" id="submit-btn">
                             <svg viewBox="0 0 24 24">
                                 <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
                             </svg>
                             Get My Free API Key
                         </button>
-                    </form>
+                    
+</form>
 
                     <div class="message" id="message"></div>
 
@@ -2029,7 +2040,7 @@
                                 <div class="step-num">1</div>
                                 <span>
                                     <strong style="color:var(--text-primary);">Install the plugin</strong> — 
-                                    <a id="plugin-download-link" href="/chargeguard-1.0.0.zip" download style="color:var(--orange); text-decoration:underline; text-underline-offset:3px;">Download the plugin</a> 
+                                    <a id="plugin-download-link" href="https://github.com/amr2883/chargeguard-plugin/releases/latest/download/chargeguard.zip" download style="color:var(--orange); text-decoration:underline; text-underline-offset:3px;">Download the plugin</a> 
                                     — upload it via Plugins &#8594; Add New &#8594; Upload Plugin.
                                 </span>
                             </li>
@@ -2119,6 +2130,32 @@
 
             const FETCH_TIMEOUT_MS = 15000;
 
+        // استدعاء Turnstile في الوضع Invisible
+        let turnstileReady = false;
+
+        
+
+        function ensureTurnstileToken() {
+            return new Promise(function(resolve, reject) {
+                var input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input && input.value) {
+                    return resolve(input.value);
+                }
+                // إذا لم يظهر بعد، ننتظر قليلاً
+                var attempts = 0;
+                var check = setInterval(function() {
+                    var inp = document.querySelector('input[name="cf-turnstile-response"]');
+                    if (inp && inp.value) {
+                        clearInterval(check);
+                        resolve(inp.value);
+                    } else if (++attempts > 20) { // 2 ثانية كحد أقصى
+                        clearInterval(check);
+                        reject(new Error('Turnstile timeout'));
+                    }
+                }, 100);
+            });
+        }
+
             window.CG_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
             function normalizeUrl(raw) {
@@ -2201,16 +2238,13 @@
                 );
 
                 try {
-                    const turnstileInput = document.querySelector(
-                        'input[name="h-captcha-response"]'
-                    );
-                    const hcaptchaToken = turnstileInput?.value || '';
-
-                    if (!hcaptchaToken) {
-                        showMessage(
-                            'Security check not ready yet — please wait a moment and try again.',
-                            'error'
-                        );
+                    // تأكد من وجود Turnstile token قبل الإرسال
+                    showMessage('Verifying security…', 'info');
+                    let turnstileToken;
+                    try {
+                        turnstileToken = await ensureTurnstileToken();
+                    } catch (e) {
+                        showMessage('Security check failed. Please refresh and try again.', 'error');
                         resetButton();
                         clearTimeout(timeoutId);
                         return;
@@ -2222,7 +2256,7 @@
                         body:    JSON.stringify({
                             email,
                             storeUrl:        normalizedUrl,
-                            hcaptchaToken
+                            turnstileToken
                         }),
                         signal: controller.signal
                     });
