@@ -338,3 +338,12 @@ model BlacklistEntry {
   @@unique([merchantId, type, value])
   @@index([merchantId, type, expiresAt])
 }
+
+// ========== Registration Rate Limiting ==========
+model RegistrationAttempt {
+  id        Int      @id @default(autoincrement())
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([ipHash, createdAt])
+}
