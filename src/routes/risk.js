@@ -1479,6 +1479,12 @@ router.post('/tenants/register', async (req, res) => {
 
     logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
 
+    // إرسال الإيميل — fire-and-forget (لا يوقف التسجيل لو فشل)
+    const { sendApiKeyEmail } = require('../lib/email');
+    sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
+      logger.error({ module: 'email', error: err.message }, 'Failed to send API key email');
+    });
+
     res.status(201).json({
       apiKey: tenant.apiKey,
       email: tenant.email,
