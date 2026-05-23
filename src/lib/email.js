@@ -3,6 +3,8 @@ const { Resend } = require('resend');
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 async function sendApiKeyEmail(email, apiKey) {
+  console.log('[Email] Attempting to send API key email to:', email);
+  console.log('[Email] RESEND_API_KEY exists:', !!process.env.RESEND_API_KEY);
   await resend.emails.send({
     from: 'ChargeGuard <onboarding@resend.dev>',
     to: email,
