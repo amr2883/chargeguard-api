@@ -7,7 +7,7 @@
  * لمنع التضخم والامتثال لمبدأ Data Minimization (GDPR Art. 5.1.e).
  *
  * يُستدعى من app.js عبر:
- *   const { runFastCleanup, runDailyRetention } = require('./retention');
+ *   const { runFastCleanup, runDailyRetention } = require('./lib/retention');
  *
  * مهمتان:
  *   - runFastCleanup()    → كل 10 دقائق (خفيفة، حساسة للوقت)
