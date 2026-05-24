@@ -28,7 +28,7 @@ const apiKeyAuth = async (req, res, next) => {
   // ����� �� ����� API �� ���� Tenant
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
-    select: { id: true, email: true, isActive: true }
+    select: { id: true, email: true, isActive: true, webhookSecret: true }
   });
 
   if (!tenant || !tenant.isActive) {
@@ -36,7 +36,7 @@ const apiKeyAuth = async (req, res, next) => {
   }
 
   // ����� ������� �������� ������ ���������� ������
-  req.tenant = { id: tenant.id, email: tenant.email };
+  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret };
   next();
 };
 /**
@@ -1684,7 +1684,9 @@ const blockedAttemptRateLimit = (req, res, next) => {
 const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern']);
 const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
 
-router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, async (req, res) => {
+const verifyHmacSignature = require('../middleware/verifyHmac');
+
+router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { cardBin, cardType, reason, ipHash, amountAttempted } = req.body;
 
