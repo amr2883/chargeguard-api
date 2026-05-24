@@ -20,7 +20,8 @@ model Tenant {
   updatedAt     DateTime @updatedAt
 
   // ربط المستأجر بملفات التاجر
-  profiles MerchantProfile[] @relation("TenantProfiles")
+  profiles         MerchantProfile[]  @relation("TenantProfiles")
+  blockedAttempts  BlockedAttempt[]   @relation("TenantBlockedAttempts")
 }
 
 // ========== Merchant Profile ==========
@@ -290,6 +291,21 @@ model CardTestAttempt {
   @@index([merchantId, createdAt])
   @@index([deviceHash, createdAt])
   @@index([ipHash, createdAt])
+}
+
+// ========== Blocked Attempt (Dashboard) ==========
+model BlockedAttempt {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation("TenantBlockedAttempts", fields: [tenantId], references: [id], onDelete: Cascade)
+  blockedAt   DateTime @default(now())
+  cardBin     String?  // أول 6 أرقام فقط — لا نخزن رقم البطاقة كاملاً
+  cardType    String?  // Visa, Mastercard, Amex, Unknown
+  reason      String   // card_testing, velocity, blacklist, pattern
+  ipHash      String?  // SHA-256 للـ IP — لا نخزن IP الكامل (GDPR)
+  amountAttempted Float?
+
+  @@index([tenantId, blockedAt])
 }
 
 // ========== Card Hash Tracking ==========
