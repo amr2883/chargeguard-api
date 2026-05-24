@@ -51,7 +51,7 @@ const authByApiKey = async (req, res, next) => {
   try {
     const tenant = await prisma.tenant.findUnique({
       where:  { apiKey },
-      select: { id: true, email: true, plan: true, isActive: true, createdAt: true },
+      select: { id: true, email: true, plan: true, isActive: true, createdAt: true, apiKey: true, keyRotatedAt: true },
     });
     if (!tenant || !tenant.isActive) {
       return setTimeout(() => res.status(401).json({ error: 'Unauthorized' }), 200);
@@ -840,6 +840,89 @@ const buildDashboardHtml = (tenant, data) => {
     </table>
   </div>
 
+  <!-- ── API Key Section ── -->
+  <div class="tbl-wrap" style="margin-top:1.5rem;">
+    <div class="tbl-header">
+      <span class="tbl-title">🔑 API Key</span>
+      <span class="tbl-count">Keep this secret</span>
+    </div>
+    <div style="padding:1.25rem 1.5rem;">
+      <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
+        <code id="apiKeyDisplay" style="font-family:'DM Mono',monospace;font-size:.8rem;color:var(--text-sub);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.5rem .875rem;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+          ••••••••••••••••••••••••••••••••••••••••••••
+        </code>
+        <button onclick="toggleKey()" id="toggleBtn" style="padding:.45rem .9rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-sub);font-size:.75rem;cursor:pointer;">Show</button>
+        <button onclick="copyKey()" style="padding:.45rem .9rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-sub);font-size:.75rem;cursor:pointer;">Copy</button>
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.75rem;">
+        <span style="font-size:.72rem;color:var(--text-dim);">
+          Last rotated: <strong style="color:var(--text-sub);">${tenant.keyRotatedAt ? new Intl.DateTimeFormat('en-US',{dateStyle:'medium',timeStyle:'short'}).format(new Date(tenant.keyRotatedAt)) : 'Never'}</strong>
+        </span>
+        <button onclick="rotateKey()" id="rotateBtn" style="padding:.5rem 1.1rem;background:#dc2626;border:none;border-radius:6px;color:#fff;font-size:.78rem;font-weight:600;cursor:pointer;display:flex;align-items:center;gap:.4rem;">
+          ⟳ Rotate Key
+        </button>
+      </div>
+      <div id="rotateMsg" style="display:none;margin-top:.75rem;padding:.6rem .9rem;border-radius:6px;font-size:.78rem;"></div>
+    </div>
+  </div>
+
+  <script>
+    const _key = ${JSON.stringify(tenant.apiKey)};
+    let _visible = false;
+
+    function toggleKey() {
+      _visible = !_visible;
+      document.getElementById('apiKeyDisplay').textContent = _visible ? _key : '••••••••••••••••••••••••••••••••••••••••••••';
+      document.getElementById('toggleBtn').textContent = _visible ? 'Hide' : 'Show';
+    }
+
+    function copyKey() {
+      const val = _visible ? _key : _key;
+      navigator.clipboard.writeText(val).then(() => showMsg('✅ Copied to clipboard!', '#16a34a'));
+    }
+
+    async function rotateKey() {
+      if (!confirm('⚠️ Your current API key will be invalidated immediately.\\n\\nYou must update your plugin settings after rotation.\\n\\nContinue?')) return;
+      const btn = document.getElementById('rotateBtn');
+      btn.disabled = true;
+      btn.textContent = 'Rotating...';
+      try {
+        const res = await fetch('/api/dashboard/rotate-key', {
+          method: 'POST',
+          headers: { 'X-Api-Key': _key }
+        });
+        const data = await res.json();
+        if (res.ok) {
+          showMsg('✅ ' + data.message, '#16a34a');
+          document.getElementById('apiKeyDisplay').textContent = data.newApiKey;
+          _visible = true;
+          document.getElementById('toggleBtn').textContent = 'Hide';
+          btn.textContent = '⟳ Rotate Key';
+          btn.disabled = false;
+        } else {
+          showMsg('❌ ' + (data.error || 'Failed'), '#dc2626');
+          btn.textContent = '⟳ Rotate Key';
+          btn.disabled = false;
+        }
+      } catch (e) {
+        showMsg('❌ Network error', '#dc2626');
+        btn.textContent = '⟳ Rotate Key';
+        btn.disabled = false;
+      }
+    }
+
+    function showMsg(text, color) {
+      const el = document.getElementById('rotateMsg');
+      el.textContent = text;
+      el.style.background = color + '18';
+      el.style.border = '1px solid ' + color + '44';
+      el.style.color = color;
+      el.style.display = 'block';
+      setTimeout(() => el.style.display = 'none', 5000);
+    }
+  </script>
+
+
   <footer>
     ChargeGuard
     <span>·</span>
@@ -852,5 +935,55 @@ const buildDashboardHtml = (tenant, data) => {
 </body>
 </html>`;
 };
+
+// ── POST /api/dashboard/rotate-key ──────────────────────────────────────
+router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
+  try {
+    const tenant = req.tenant;
+
+    // منع التدوير المتكرر: 5 دقائق بين كل rotation
+    if (tenant.keyRotatedAt) {
+      const msSinceLastRotation = Date.now() - new Date(tenant.keyRotatedAt).getTime();
+      const cooldownMs = 5 * 60 * 1000; // 5 دقائق
+      if (msSinceLastRotation < cooldownMs) {
+        const waitSecs = Math.ceil((cooldownMs - msSinceLastRotation) / 1000);
+        return res.status(429).json({
+          error: `Please wait ${Math.ceil(waitSecs / 60)} minute(s) before rotating again.`,
+          retryAfter: waitSecs
+        });
+      }
+    }
+
+    // توليد مفتاح جديد آمن
+    const crypto = require('crypto');
+    const newApiKey = crypto.randomBytes(32).toString('base64url');
+
+    // Atomic update في DB
+    await prisma.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        apiKey: newApiKey,
+        keyRotatedAt: new Date()
+      }
+    });
+
+    // إرسال إيميل (fire-and-forget)
+    const { sendRotatedKeyEmail } = require('../lib/email');
+    sendRotatedKeyEmail(tenant.email, newApiKey).catch(err => {
+      console.error('[rotate-key] Email failed:', err.message);
+    });
+
+    return res.json({
+      success: true,
+      newApiKey,
+      message: 'API key rotated successfully. Update your plugin settings now.'
+    });
+
+  } catch (err) {
+    console.error('[rotate-key] Error:', err.message);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+// ────────────────────────────────────────────────────────────────────────
 
 module.exports = router;
