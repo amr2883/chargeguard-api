@@ -1637,16 +1637,5 @@ router.get('/verify-key', async (req, res) => {
   }
 });
 
-// ── Temp Debug Endpoint ──────────────────────────────────────────────────
-router.get('/debug-ip', (req, res) => {
-  res.json({
-    ip: req.ip,
-    ips: req.ips,
-    xForwardedFor: req.headers['x-forwarded-for'],
-    xRealIp: req.headers['x-real-ip'],
-  });
-});
-// ─────────────────────────────────────────────────────────────────────────
-
 module.exports = router;
 
