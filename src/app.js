@@ -1,4 +1,5 @@
 ﻿require('dotenv').config();
+const { runFastCleanup, runDailyRetention } = require('./retention');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -65,15 +66,16 @@ app.get('/metrics', async (req, res) => {
 // ============================================================
 //  نقطة GET لتنظيف الطلبات المحظورة وإبقاء الخادم مستيقظًا
 // ============================================================
+app.get('/api/retention-config', (req, res) => {
+  const { RETENTION } = require('./retention');
+  res.json({ success: true, retention: RETENTION });
+});
+
 app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ⏰ External ping — running cleanup...`);
+  console.log(`[${new Date().toISOString()}] ⏰ External ping — running fast cleanup...`);
   try {
-    const { PrismaClient } = require('@prisma/client');
-    const prisma = new PrismaClient();
-    const deleted = await prisma.order.deleteMany({ where: { decision: 'block' } });
-    await prisma.$disconnect();
-    console.log(`[${new Date().toISOString()}] ✅ Cleanup completed — cleanedCount: ${deleted.count}`);
-    res.json({ success: true, cleanedCount: deleted.count });
+    await runFastCleanup(prismaForCleanup);
+    res.json({ success: true });
   } catch (err) {
     console.error(`[${new Date().toISOString()}] ❌ Cleanup failed:`, err.message);
     res.status(500).json({ error: err.message });
@@ -81,34 +83,34 @@ app.get('/api/cleanup-now', async (req, res) => {
 });
 
 // ============================================================
-//  Auto-Cleanup Cron Job (Internal)
+//  Cleanup Intervals
 // ============================================================
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
+const DAILY_RETENTION_MS  = 24 * 60 * 60 * 1000;
 
-async function runAutoCleanup() {
-  const startedAt = new Date().toISOString();
-  console.log(`[${startedAt}] ⏰ Auto-cleanup started...`);
-  try {
-    const { PrismaClient } = require('@prisma/client');
-    const prisma = new PrismaClient();
-    const deleted = await prisma.order.deleteMany({ where: { decision: 'block' } });
-    await prisma.$disconnect();
-    console.log(`[${new Date().toISOString()}] ✅ Auto-cleanup completed — cleanedCount: ${deleted.count}`);
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ❌ Auto-cleanup failed:`, err.message);
-  }
-}
+// prisma مشترك لـ FastCleanup فقط (يبقى مفتوحاً طول عمر الخادم)
+const { PrismaClient } = require('@prisma/client');
+const prismaForCleanup = new PrismaClient();
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
 
-  // ── 1) Internal cleanup scheduler (every 10 min) ─────────────
+  // ── 1) Fast cleanup (every 10 min) — blocked orders, expired blacklist, stale pending
   setTimeout(() => {
-    console.log(`[${new Date().toISOString()}] 🔄 Internal cleanup scheduler started (every 10 min)`);
-    setInterval(runAutoCleanup, CLEANUP_INTERVAL_MS);
+    console.log(`[${new Date().toISOString()}] 🔄 Fast cleanup scheduler started (every 10 min)`);
+    setInterval(() => runFastCleanup(prismaForCleanup), CLEANUP_INTERVAL_MS);
   }, 30 * 1000);
 
-  // ── 2) Keep-alive self-ping (every 14 min) ────────────────────
+  // ── 2) Daily retention (every 24h) — full data retention policy
+  setTimeout(() => {
+    const { RETENTION } = require('./retention');
+    console.log(`[${new Date().toISOString()}] 🗓️  Daily retention scheduler started (every 24h)`);
+    console.log(`[${new Date().toISOString()}] 📋 Retention config (days):`, RETENTION);
+    runDailyRetention();
+    setInterval(runDailyRetention, DAILY_RETENTION_MS);
+  }, 5 * 60 * 1000); // بعد 5 دقائق من بدء الخادم (يمنح الخادم وقت للاستقرار)
+
+  // ── 3) Keep-alive self-ping (every 14 min) ────────────────────
   // Render Free tier ينام بعد 15 دقيقة من غياب HTTP requests خارجية.
   // هذا الـ ping يرسل request حقيقي من الخادم لنفسه عبر الشبكة
   // حتى تسجّله Render كـ activity وتمنع الـ cold start.
