@@ -88,8 +88,40 @@ async function runAutoCleanup() {
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on http://localhost:${PORT}`);
+
+  // ── 1) Internal cleanup scheduler (every 10 min) ─────────────
   setTimeout(() => {
     console.log(`[${new Date().toISOString()}] 🔄 Internal cleanup scheduler started (every 10 min)`);
     setInterval(runAutoCleanup, CLEANUP_INTERVAL_MS);
   }, 30 * 1000);
+
+  // ── 2) Keep-alive self-ping (every 14 min) ────────────────────
+  // Render Free tier ينام بعد 15 دقيقة من غياب HTTP requests خارجية.
+  // هذا الـ ping يرسل request حقيقي من الخادم لنفسه عبر الشبكة
+  // حتى تسجّله Render كـ activity وتمنع الـ cold start.
+  // لا نستخدم أي مكتبة خارجية — http/https القياسي فقط.
+  const KEEP_ALIVE_MS = 14 * 60 * 1000;
+  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
+
+  setTimeout(() => {
+    const httpModule = RENDER_URL.startsWith('https') ? require('https') : require('http');
+
+    const selfPing = () => {
+      const targetUrl = `${RENDER_URL}/health`;
+      const req = httpModule.get(targetUrl, (res) => {
+        console.log(`[${new Date().toISOString()}] 💓 Keep-alive ping → ${res.statusCode} OK`);
+        res.resume();
+      });
+      req.on('error', (err) => {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Keep-alive ping failed: ${err.message}`);
+      });
+      req.setTimeout(10000, () => {
+        console.warn(`[${new Date().toISOString()}] ⚠️ Keep-alive ping timeout — destroying request`);
+        req.destroy();
+      });
+    };
+
+    setInterval(selfPing, KEEP_ALIVE_MS);
+    console.log(`[${new Date().toISOString()}] 💓 Keep-alive started — pinging ${RENDER_URL}/health every 14 min`);
+  }, 60 * 1000);
 });
