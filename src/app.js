@@ -1,5 +1,5 @@
-Ôªørequire('dotenv').config();
-const { runFastCleanup, runDailyRetention } = require('./retention');
+require('dotenv').config();
+const { runFastCleanup, runDailyRetention } = require('./lib/retention');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -24,7 +24,7 @@ try {
     res.send(swaggerSpec);
   });
 } catch (e) {
-  console.warn('‚ö†Ô∏è Swagger UI not available:', e.message);
+  console.warn('?? Swagger UI not available:', e.message);
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
@@ -40,18 +40,18 @@ const dashboardRoutes = require('./routes/dashboard');
 app.use('/api/risk',  riskRoutes);
 app.use('/api/auth',  authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
-// Morgan ŸÖÿπÿ∑ŸëŸÑ ŸÑŸÄ /admin ŸÑŸÖŸÜÿπ ÿ™ÿ≥ÿ¨ŸäŸÑ ÿßŸÑŸÄ secret ŸÅŸä ÿßŸÑŸÑŸàÿ∫
+// Morgan „⁄ÿ¯· ·‹ /admin ·„‰⁄  ”ÃÌ· «·‹ secret ›Ì «··Ê€
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
 }, adminRoutes);
 
-// ‚îÄ‚îÄ Global error handler ‚Äî MUST be after all routes ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
+// ?? Global error handler ó MUST be after all routes ??????????
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
     return next(err);
   }
-  console.error('üö® Global error handler caught:', err.stack || err.message || err);
+  console.error('?? Global error handler caught:', err.stack || err.message || err);
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
@@ -64,20 +64,20 @@ app.get('/metrics', async (req, res) => {
 });
 
 // ============================================================
-//  ŸÜŸÇÿ∑ÿ© GET ŸÑÿ™ŸÜÿ∏ŸäŸÅ ÿßŸÑÿ∑ŸÑÿ®ÿßÿ™ ÿßŸÑŸÖÿ≠ÿ∏Ÿàÿ±ÿ© Ÿàÿ•ÿ®ŸÇÿßÿ° ÿßŸÑÿÆÿßÿØŸÖ ŸÖÿ≥ÿ™ŸäŸÇÿ∏Ÿãÿß
+//  ‰ﬁÿ… GET · ‰ŸÌ› «·ÿ·»«  «·„ÕŸÊ—… Ê≈»ﬁ«¡ «·Œ«œ„ „” ÌﬁŸ«
 // ============================================================
 app.get('/api/retention-config', (req, res) => {
-  const { RETENTION } = require('./retention');
+  const { RETENTION } = require('./lib/retention');
   res.json({ success: true, retention: RETENTION });
 });
 
 app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ‚è∞ External ping ‚Äî running fast cleanup...`);
+  console.log(`[${new Date().toISOString()}] ? External ping ó running fast cleanup...`);
   try {
     await runFastCleanup(prismaForCleanup);
     res.json({ success: true });
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] ‚ùå Cleanup failed:`, err.message);
+    console.error(`[${new Date().toISOString()}] ? Cleanup failed:`, err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -88,33 +88,33 @@ app.get('/api/cleanup-now', async (req, res) => {
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const DAILY_RETENTION_MS  = 24 * 60 * 60 * 1000;
 
-// prisma ŸÖÿ¥ÿ™ÿ±ŸÉ ŸÑŸÄ FastCleanup ŸÅŸÇÿ∑ (Ÿäÿ®ŸÇŸâ ŸÖŸÅÿ™Ÿàÿ≠ÿßŸã ÿ∑ŸàŸÑ ÿπŸÖÿ± ÿßŸÑÿÆÿßÿØŸÖ)
+// prisma „‘ —ﬂ ·‹ FastCleanup ›ﬁÿ (Ì»ﬁÏ „› ÊÕ« ÿÊ· ⁄„— «·Œ«œ„)
 const { PrismaClient } = require('@prisma/client');
 const prismaForCleanup = new PrismaClient();
 
 app.listen(PORT, () => {
-  console.log(`üöÄ Server running on http://localhost:${PORT}`);
+  console.log(`?? Server running on http://localhost:${PORT}`);
 
-  // ‚îÄ‚îÄ 1) Fast cleanup (every 10 min) ‚Äî blocked orders, expired blacklist, stale pending
+  // ?? 1) Fast cleanup (every 10 min) ó blocked orders, expired blacklist, stale pending
   setTimeout(() => {
-    console.log(`[${new Date().toISOString()}] üîÑ Fast cleanup scheduler started (every 10 min)`);
+    console.log(`[${new Date().toISOString()}] ?? Fast cleanup scheduler started (every 10 min)`);
     setInterval(() => runFastCleanup(prismaForCleanup), CLEANUP_INTERVAL_MS);
   }, 30 * 1000);
 
-  // ‚îÄ‚îÄ 2) Daily retention (every 24h) ‚Äî full data retention policy
+  // ?? 2) Daily retention (every 24h) ó full data retention policy
   setTimeout(() => {
-    const { RETENTION } = require('./retention');
-    console.log(`[${new Date().toISOString()}] üóìÔ∏è  Daily retention scheduler started (every 24h)`);
-    console.log(`[${new Date().toISOString()}] üìã Retention config (days):`, RETENTION);
+    const { RETENTION } = require('./lib/retention');
+    console.log(`[${new Date().toISOString()}] ???  Daily retention scheduler started (every 24h)`);
+    console.log(`[${new Date().toISOString()}] ?? Retention config (days):`, RETENTION);
     runDailyRetention();
     setInterval(runDailyRetention, DAILY_RETENTION_MS);
-  }, 5 * 60 * 1000); // ÿ®ÿπÿØ 5 ÿØŸÇÿßÿ¶ŸÇ ŸÖŸÜ ÿ®ÿØÿ° ÿßŸÑÿÆÿßÿØŸÖ (ŸäŸÖŸÜÿ≠ ÿßŸÑÿÆÿßÿØŸÖ ŸàŸÇÿ™ ŸÑŸÑÿßÿ≥ÿ™ŸÇÿ±ÿßÿ±)
+  }, 5 * 60 * 1000); // »⁄œ 5 œﬁ«∆ﬁ „‰ »œ¡ «·Œ«œ„ (Ì„‰Õ «·Œ«œ„ Êﬁ  ··«” ﬁ—«—)
 
-  // ‚îÄ‚îÄ 3) Keep-alive self-ping (every 14 min) ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ‚îÄ
-  // Render Free tier ŸäŸÜÿßŸÖ ÿ®ÿπÿØ 15 ÿØŸÇŸäŸÇÿ© ŸÖŸÜ ÿ∫Ÿäÿßÿ® HTTP requests ÿÆÿßÿ±ÿ¨Ÿäÿ©.
-  // Ÿáÿ∞ÿß ÿßŸÑŸÄ ping Ÿäÿ±ÿ≥ŸÑ request ÿ≠ŸÇŸäŸÇŸä ŸÖŸÜ ÿßŸÑÿÆÿßÿØŸÖ ŸÑŸÜŸÅÿ≥Ÿá ÿπÿ®ÿ± ÿßŸÑÿ¥ÿ®ŸÉÿ©
-  // ÿ≠ÿ™Ÿâ ÿ™ÿ≥ÿ¨ŸëŸÑŸá Render ŸÉŸÄ activity Ÿàÿ™ŸÖŸÜÿπ ÿßŸÑŸÄ cold start.
-  // ŸÑÿß ŸÜÿ≥ÿ™ÿÆÿØŸÖ ÿ£Ÿä ŸÖŸÉÿ™ÿ®ÿ© ÿÆÿßÿ±ÿ¨Ÿäÿ© ‚Äî http/https ÿßŸÑŸÇŸäÿßÿ≥Ÿä ŸÅŸÇÿ∑.
+  // ?? 3) Keep-alive self-ping (every 14 min) ????????????????????
+  // Render Free tier Ì‰«„ »⁄œ 15 œﬁÌﬁ… „‰ €Ì«» HTTP requests Œ«—ÃÌ….
+  // Â–« «·‹ ping Ì—”· request ÕﬁÌﬁÌ „‰ «·Œ«œ„ ·‰›”Â ⁄»— «·‘»ﬂ…
+  // Õ Ï  ”Ã¯·Â Render ﬂ‹ activity Ê „‰⁄ «·‹ cold start.
+  // ·« ‰” Œœ„ √Ì „ﬂ »… Œ«—ÃÌ… ó http/https «·ﬁÌ«”Ì ›ﬁÿ.
   const KEEP_ALIVE_MS = 14 * 60 * 1000;
   const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
@@ -124,19 +124,19 @@ app.listen(PORT, () => {
     const selfPing = () => {
       const targetUrl = `${RENDER_URL}/health`;
       const req = httpModule.get(targetUrl, (res) => {
-        console.log(`[${new Date().toISOString()}] üíì Keep-alive ping ‚Üí ${res.statusCode} OK`);
+        console.log(`[${new Date().toISOString()}] ?? Keep-alive ping ? ${res.statusCode} OK`);
         res.resume();
       });
       req.on('error', (err) => {
-        console.warn(`[${new Date().toISOString()}] ‚ö†Ô∏è Keep-alive ping failed: ${err.message}`);
+        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping failed: ${err.message}`);
       });
       req.setTimeout(10000, () => {
-        console.warn(`[${new Date().toISOString()}] ‚ö†Ô∏è Keep-alive ping timeout ‚Äî destroying request`);
+        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping timeout ó destroying request`);
         req.destroy();
       });
     };
 
     setInterval(selfPing, KEEP_ALIVE_MS);
-    console.log(`[${new Date().toISOString()}] üíì Keep-alive started ‚Äî pinging ${RENDER_URL}/health every 14 min`);
+    console.log(`[${new Date().toISOString()}] ?? Keep-alive started ó pinging ${RENDER_URL}/health every 14 min`);
   }, 60 * 1000);
 });
