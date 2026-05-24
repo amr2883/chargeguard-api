@@ -15,9 +15,10 @@ model Tenant {
   apiKey        String   @unique
   webhookSecret String?
   plan          String   @default("early_access")
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  isActive      Boolean   @default(true)
+  keyRotatedAt  DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
 
   // ربط المستأجر بملفات التاجر
   profiles         MerchantProfile[]  @relation("TenantProfiles")

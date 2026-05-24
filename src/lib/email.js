@@ -104,4 +104,36 @@ async function sendApiKeyEmail(email, apiKey) {
   console.log('[Email] ✅ Sent successfully to:', email);
 }
 
-module.exports = { sendApiKeyEmail };
+async function sendRotatedKeyEmail(email, newApiKey) {
+  console.log('[Email] Sending rotated API key to:', email);
+  await transporter.sendMail({
+    from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+    to: email,
+    subject: '🔑 Your ChargeGuard API Key Has Been Rotated',
+    html: `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+        <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+          <span style="font-size:20px;font-weight:700;color:#ffffff;">Charge<span style="color:#f97316;">Guard</span></span>
+        </div>
+        <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+          <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">API Key Rotated 🔄</h2>
+          <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your API key has been successfully rotated. Your old key is now invalid.</p>
+          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
+            <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your New API Key</p>
+            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${newApiKey}</p>
+          </div>
+          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
+            <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Action required:</strong> Update your plugin settings immediately with this new key to maintain protection.</p>
+          </div>
+          <p style="font-size:13px;color:#64748b;">If you didn't request this rotation, contact support immediately.</p>
+        </div>
+        <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+          <p style="font-size:12px;color:#94a3b8;margin:0;">ChargeGuard Security Team</p>
+        </div>
+      </div>
+    `
+  });
+  console.log('[Email] ✅ Rotation email sent to:', email);
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail };
