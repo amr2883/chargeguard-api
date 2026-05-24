@@ -26,8 +26,12 @@ class ChargeGuard_Admin_Settings {
         register_setting('chargeguard_settings', 'chargeguard_stripe_webhook_secret', 'sanitize_text_field');
         register_setting('chargeguard_settings', 'chargeguard_enable_firewall', 'intval');
         register_setting('chargeguard_settings', 'chargeguard_firewall_block_duration', 'intval');
-    }
 
+        // Trust Badge options
+        register_setting( 'chargeguard_settings', 'chargeguard_badge_enabled',  'sanitize_text_field' );
+        register_setting( 'chargeguard_settings', 'chargeguard_badge_location', 'sanitize_text_field' );
+        register_setting( 'chargeguard_settings', 'chargeguard_badge_color',    'sanitize_text_field' );
+    }
     public function ajax_connect() {
         check_ajax_referer('chargeguard_connect_nonce', 'nonce');
 
@@ -44,7 +48,10 @@ class ChargeGuard_Admin_Settings {
 
         $response = wp_remote_post('https://chargeguard-api.onrender.com/api/auth/connect', [
             'timeout' => 15,
-            'headers' => ['Content-Type' => 'application/json'],
+            'headers' => [
+                'Content-Type'   => 'application/json',
+                'x-store-domain' => wp_parse_url( home_url(), PHP_URL_HOST ),
+            ],
             'body'    => json_encode([
                 'email'   => $email,
                 'siteUrl' => $site_url,
@@ -123,7 +130,10 @@ class ChargeGuard_Admin_Settings {
         $is_connected = (bool) get_option('chargeguard_api_key');
         $connected_email = get_option('chargeguard_connected_email', '');
         $firewall_enabled = get_option('chargeguard_enable_firewall', 1);
-        $block_duration = get_option('chargeguard_firewall_block_duration', 24);
+        $block_duration   = get_option( 'chargeguard_firewall_block_duration', 24 );
+        $badge_enabled    = get_option( 'chargeguard_badge_enabled', '1' );
+        $badge_location   = get_option( 'chargeguard_badge_location', 'footer' );
+        $badge_color      = get_option( 'chargeguard_badge_color', 'light' );
         $nonce = wp_create_nonce('chargeguard_connect_nonce');
         ?>
         <div class="wrap" id="chargeguard-wrap">
@@ -214,9 +224,58 @@ class ChargeGuard_Admin_Settings {
             .cg-info-label { color: #666; }
             .cg-info-value { font-weight: 600; color: #111; }
             .cg-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; border-radius: 50%; animation: cg-spin 0.7s linear infinite; }
-            @keyframes cg-spin { to { transform: rotate(360deg); } }
-        </style>
+           @keyframes cg-spin { to { transform: rotate(360deg); } }
 
+            /* Trust Badge Section */
+            .cg-badge-preview-wrap {
+                background: #f8fafc;
+                border: 1px dashed #cbd5e1;
+                border-radius: 8px;
+                padding: 16px;
+                text-align: center;
+                margin-top: 12px;
+            }
+            .cg-badge-preview-label {
+                font-size: 11px;
+                color: #94a3b8;
+                margin-bottom: 8px;
+                text-transform: uppercase;
+                letter-spacing: 0.5px;
+            }
+            .cg-select {
+                padding: 7px 10px;
+                border: 1px solid #ddd;
+                border-radius: 6px;
+                font-size: 13px;
+                background: #fff;
+            }
+            .cg-toggle-wrap {
+                display: flex;
+                align-items: center;
+                gap: 10px;
+            }
+            .cg-toggle {
+                width: 36px; height: 20px;
+                appearance: none;
+                background: #cbd5e1;
+                border-radius: 10px;
+                cursor: pointer;
+                position: relative;
+                transition: background 0.2s;
+            }
+            .cg-toggle:checked { background: #16a34a; }
+            .cg-toggle::after {
+                content: '';
+                position: absolute;
+                width: 14px; height: 14px;
+                background: #fff;
+                border-radius: 50%;
+                top: 3px; left: 3px;
+                transition: left 0.2s;
+                box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+            }
+            .cg-toggle:checked::after { left: 19px; }
+        </style>
         <h1 style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
             <span style="font-size:24px;">🛡️</span> ChargeGuard
         </h1>
@@ -306,10 +365,74 @@ class ChargeGuard_Admin_Settings {
             </form>
         </div>
 
+        <!-- Trust Badge Settings -->
+        <div class="cg-card">
+            <h3 style="margin:0 0 4px;font-size:15px;">🛡️ <?php esc_html_e( 'Trust Badge', 'chargeguard-woocommerce' ); ?></h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'Show your visitors that your store is protected. The badge increases buyer trust and helps spread ChargeGuard — enabled by default.', 'chargeguard-woocommerce' ); ?>
+            </p>
+
+            <form method="post" action="options.php">
+                <?php settings_fields( 'chargeguard_settings' ); ?>
+
+                <!-- تفعيل/تعطيل -->
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Show Badge', 'chargeguard-woocommerce' ); ?></span>
+                    <div class="cg-toggle-wrap">
+                        <input
+                            type="checkbox"
+                            class="cg-toggle"
+                            name="chargeguard_badge_enabled"
+                            id="cg-badge-toggle"
+                            value="1"
+                            <?php checked( '1', $badge_enabled ); ?>
+                        />
+                        <label for="cg-badge-toggle" style="font-size:12px;color:#64748b;">
+                            <?php esc_html_e( 'Enabled', 'chargeguard-woocommerce' ); ?>
+                        </label>
+                    </div>
+                </div>
+
+                <!-- الموقع -->
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Badge Location', 'chargeguard-woocommerce' ); ?></span>
+                    <select name="chargeguard_badge_location" class="cg-select">
+                        <option value="footer"   <?php selected( $badge_location, 'footer' ); ?>>
+                            <?php esc_html_e( 'Footer only', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                        <option value="checkout" <?php selected( $badge_location, 'checkout' ); ?>>
+                            <?php esc_html_e( 'Checkout only', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                        <option value="both"     <?php selected( $badge_location, 'both' ); ?>>
+                            <?php esc_html_e( 'Footer & Checkout', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                    </select>
+                </div>
+
+                <!-- نظام الألوان -->
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Color Scheme', 'chargeguard-woocommerce' ); ?></span>
+                    <select name="chargeguard_badge_color" class="cg-select">
+                        <option value="light" <?php selected( $badge_color, 'light' ); ?>>
+                            <?php esc_html_e( 'Light (white background)', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                        <option value="dark"  <?php selected( $badge_color, 'dark' ); ?>>
+                            <?php esc_html_e( 'Dark (for dark themes)', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                    </select>
+                </div>
+
+                <?php submit_button( __( 'Save Badge Settings', 'chargeguard-woocommerce' ), 'secondary', 'submit', false, array( 'style' => 'margin-top:14px;' ) ); ?>
+            </form>
+
+            <!-- معاينة حية -->
+            <div class="cg-badge-preview-wrap" style="margin-top:16px;">
+                <div class="cg-badge-preview-label"><?php esc_html_e( 'Badge Preview', 'chargeguard-woocommerce' ); ?></div>
+                <?php echo chargeguard_get_badge_html(); // phpcs:ignore WordPress.Security.EscapeOutput ?>
+            </div>
         </div>
 
-        <script>
-        (function($) {
+        <script>        (function($) {
             const nonce = '<?php echo esc_js($nonce); ?>';
 
             // ── Connect ──────────────────────────────────────────────
