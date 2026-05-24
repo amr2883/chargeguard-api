@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+ï»¿const crypto = require('crypto');
 
 // ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
 const hashIp = (ip) => {
@@ -25,7 +25,7 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'API key is required' });
   }
 
-  // ÇáÈÍË Úä ãÝÊÇÍ API Ýí ÌÏæá Tenant
+  // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ API ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ Tenant
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
     select: { id: true, email: true, isActive: true }
@@ -35,7 +35,7 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'Invalid or inactive API key' });
   }
 
-  // ÅÑÝÇÞ ãÚáæãÇÊ ÇáãÓÊÃÌÑ ÈÇáØáÈ áÇÓÊÎÏÇãåÇ áÇÍÞðÇ
+  // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   req.tenant = { id: tenant.id, email: tenant.email };
   next();
 };
@@ -66,21 +66,21 @@ const apiKeyAuth = async (req, res, next) => {
  */
 router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
-    // ÇÓÊÎÑÇÌ ÇáÈíÇäÇÊ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
     const merchantId = bodyMerchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-        // Idempotency: ÇáÊÍÞÞ ãä ÇáØáÈÇÊ ÇáãßÑÑÉ ÎáÇá ÂÎÑ 5 ÏÞÇÆÞ
-    const idempotencyWindow = 5 * 60 * 1000; // 5 ÏÞÇÆÞ
+        // Idempotency: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ 5 ï¿½ï¿½ï¿½ï¿½ï¿½
+    const idempotencyWindow = 5 * 60 * 1000; // 5 ï¿½ï¿½ï¿½ï¿½ï¿½
     const existingOrder = await db.order.findUnique({
       where: { orderId },
       select: { decision: true, riskScore: true, connectedRisk: true, signalsSnapshot: true, createdAt: true }
     });
     if (existingOrder && (Date.now() - new Date(existingOrder.createdAt).getTime()) < idempotencyWindow) {
-      // ÅÚÇÏÉ ÇáÑÏ ÇáãÎÒä
+      // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       const oldSnapshot = existingOrder.signalsSnapshot ? JSON.parse(existingOrder.signalsSnapshot) : {};
       prometheus.recordIdempotencyHit();
       return res.json({
@@ -95,7 +95,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
     logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
 
-    // 0. ÝÍÕ ÇáÞÇÆãÉ ÇáÓæÏÇÁ
+    // 0. ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const blacklistCheck = await db.blacklistEntry.findFirst({
       where: {
         merchantId,
@@ -122,7 +122,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     }
 
 
-    // 1. ÝÍÕ ÇáÓÑÚÉ (Velocity Check)
+    // 1. ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (Velocity Check)
     const velocityCheck = checkVelocity({ ip: ipAddress, deviceFingerprint });
     if (velocityCheck.blocked) {
       return res.status(403).json({
@@ -145,7 +145,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       }
     }
 
-    // 1. ÈäÇÁ ßÇÆä order
+    // 1. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ order
     const order = {
       id: orderId,
       email: email,
@@ -167,11 +167,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       isNewCustomer: isNewCustomer || false,
     };
 
-    // 2. ÊÌåíÒ ÇáÈíÇäÇÊ ÇáãÓÇÚÏÉ
+    // 2. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    // ÌáÈ ÇáØáÈÇÊ ÇáÓÇÈÞÉ ãä ÞÇÚÏÉ ÇáÈíÇäÇÊ
-    // ÌáÈ ÂÎÑ 200 ØáÈ ÝÞØ áÍÓÇÈ ÇáãÊæÓØÇÊ (ÃÝÖá ÃÏÇÁ)
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ 200 ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
     const recentOrders = await db.order.findMany({
       where: { merchantId, createdAt: { gte: last7days } },
       orderBy: { createdAt: 'desc' },
@@ -189,7 +189,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       riskLevel: o.riskLevel,
     }));
 
-    // ÍÓÇÈ ÇáÜ velocity counts ÈÇÓÊÎÏÇã ÇÓÊÚáÇãÇÊ ãäÝÕáÉ (ÃÓÑÚ)
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ velocity counts ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½)
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -206,10 +206,10 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       where: { merchantId, email, createdAt: { gte: last6h } }
     }) : 0;
 
-    // ÅÖÇÝÉ åÐå ÇáÞíã Åáì computedSignals (íãßä ÊãÑíÑåÇ Åáì riskScoring áÇÍÞÇð)
-    // áßääÇ ÓäÓÊÎÏãåÇ ãÈÇÔÑÉ Ýí signalsSnapshot
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ computedSignals (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ riskScoring ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ signalsSnapshot
 
-    // ÌáÈ ÇáäÒÇÚÇÊ ÇáÓÇÈÞÉ (ÂÎÑ 90 íæã)
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ 90 ï¿½ï¿½ï¿½)
     const disputes = await db.disputeOutcome.findMany({
       where: {
         merchantId,
@@ -225,7 +225,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     });
     const blacklist = [];
 
-    // 3. ÈäÇÁ ÇáÑÓã ÇáÈíÇäí ááåæíÉ ÃæáÇð
+    // 3. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     const orderForGraph = {
       deviceFingerprint: deviceFingerprint,
       deviceId: deviceFingerprint,
@@ -242,7 +242,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     }
         const evaluateStart = Date.now();
 
-    // 4. ÇÓÊÏÚÇÁ ãÍÑß ÇáÊÞííã (ãÚ ÊãÑíÑ velocityCounts)
+    // 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ velocityCounts)
     const riskResult = await calculateRiskScore(
       order,
       formattedOrders,
@@ -253,7 +253,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount }  // velocity counts
     );
 
-    // 5. ÈäÇÁ ÇáÇÓÊÌÇÈÉ
+    // 5. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const response = {
       orderId: orderId,
       score: riskResult.score,
@@ -263,20 +263,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       connectedRisk: 0,
     };
 
-     // ÇÓÊÎÏÇã connectedRisk ãÈÇÔÑÉ ãä äÊíÌÉ Identity Graph
+     // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ connectedRisk ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
-    // ÊÓÌíá ÇáãÍÇæáÉ ÇáÝÇÔáÉ Ýí ØÈÞÉ ÇáÓÑÚÉ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (response.decision === 'block') {
       recordFailedAttempt({ ip: ipAddress, deviceFingerprint });
     }
 
-    // 6. ÍÝÙ ÇáØáÈ Ýí ÞÇÚÏÉ ÇáÈíÇäÇÊ
+    // 6. ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (orderId) {
         const computed = riskResult.computedSignals || {};
-      // ÇÓÊÎÏÇã ÇáÞíã ÇáãÍÓæÈÉ ãÓÈÞÇð ãä externalVelocity (ÇáãæÌæÏÉ Ýí ÇáäØÇÞ)
-      const deviceVelocityCountFinal = deviceVelocityCount;   // ãä ÃÚáì ÇáÏÇáÉ
-      const ipVelocityCountFinal = ipVelocityCount;           // ãä ÃÚáì ÇáÏÇáÉ
-      const emailVelocityCountFinal = emailVelocityCount;     // ãä ÃÚáì ÇáÏÇáÉ
+      // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ externalVelocity (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+      const deviceVelocityCountFinal = deviceVelocityCount;   // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+      const ipVelocityCountFinal = ipVelocityCount;           // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+      const emailVelocityCountFinal = emailVelocityCount;     // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       const isNewCustomerComputed = computed.isNewCustomer || false;
       const amountAnomaly = (computed.orderMultiple || 0) >= 3;
 
@@ -338,7 +338,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
         },
       });
 
-      // ÍÝÙ RiskEvaluation ÅÐÇ ßÇä ÇáÞÑÇÑ block Ãæ review
+      // ï¿½ï¿½ï¿½ RiskEvaluation ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ block ï¿½ï¿½ review
       if (response.decision === 'block' || response.decision === 'review') {
         await db.riskEvaluation.upsert({
         where: { orderId: savedOrder.id },
@@ -370,7 +370,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     res.status(500).json({ error: error.message, stack: error.stack });
   }
 });
-// äÞØÉ äåÇíÉ ãÄÞÊÉ áæÖÚ ÚáÇãÉ ÇÍÊíÇá Úáì ÌåÇÒ (áÃÛÑÇÖ ÇáÇÎÊÈÇÑ ÝÞØ)
+// ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½)
 /**
  * @swagger
  * /risk/mark-fraud:
@@ -397,7 +397,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
  *         description: Internal error
  */
 router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
-  // ãäÚ ÇáæÕæá Ýí ÈíÆÉ ÇáÅäÊÇÌ
+  // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
   }
@@ -430,8 +430,8 @@ router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
-// äÞØÉ äåÇíÉ ááÊÚáã ãä äÊÇÆÌ ÇáÍÙÑ (Feedback Loop)
-// ÊÓÊÞÈá orderId æ isFraud (true = ÇáÍÙÑ ßÇä ÕÍíÍðÇ, false = ÇáÍÙÑ ßÇä ÎÇØÆðÇ)
+// ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ (Feedback Loop)
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ orderId ï¿½ isFraud (true = ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½, false = ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
 const { processFeedback } = require('../lib/feedbackLoop');
 /**
  * @swagger
@@ -467,8 +467,8 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'isFraud is required (true/false)' });
     }
 
-    // ÇÓÊÏÚÇÁ ãÍÑß ÇáÊÚáã
-    // äãÑÑ isFraud ßäÊíÌÉ (true = lost, false = won)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ï¿½ï¿½ï¿½ï¿½ isFraud ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (true = lost, false = won)
     await processFeedback(orderId, isFraud ? 'lost' : 'won');
 
     res.json({ success: true, message: 'Feedback recorded successfully' });
@@ -478,7 +478,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
   }
 });
 
-// äÞØÉ äåÇíÉ ãÄÞÊÉ áÇÎÊÈÇÑ buildGraphFromOrder
+// ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ buildGraphFromOrder
 /**
  * @swagger
  * /risk/test-graph:
@@ -505,7 +505,7 @@ router.post('/feedback', apiKeyAuth, async (req, res) => {
  *         description: Internal error
  */
 router.post('/test-graph', apiKeyAuth, async (req, res) => {
-  // ãäÚ ÇáæÕæá Ýí ÈíÆÉ ÇáÅäÊÇÌ
+  // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
   }
@@ -539,7 +539,7 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
   }
 });
 // ========== Blacklist Management Endpoints ==========
-// ÅÖÇÝÉ ÚäÕÑ Åáì ÇáÞÇÆãÉ ÇáÓæÏÇÁ
+// ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist:
@@ -571,7 +571,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
     if (!merchantId || !type || !value) {
       return res.status(400).json({ error: 'merchantId, type, and value are required' });
     }
-    // ÇáÊÍÞÞ ãä ÕÍÉ ÇáäæÚ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
@@ -594,7 +594,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
   }
 });
 
-// ÍÐÝ ÚäÕÑ ãä ÇáÞÇÆãÉ ÇáÓæÏÇÁ
+// ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist/{id}:
@@ -628,7 +628,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-    // ÇáÊÃßÏ ãä Ãä ÇáÚäÕÑ íäÊãí Åáì äÝÓ ÇáÊÇÌÑ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -644,7 +644,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
   }
 });
 // ========== GET Blacklist (Query) ==========
-// ÇÓÊÚÑÇÖ ÇáÞÇÆãÉ ÇáÓæÏÇÁ ááÊÇÌÑ ÇáÍÇáí
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist:
@@ -682,7 +682,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
     const { type, includeExpired } = req.query;
     const where = { merchantId };
 
-    // ÊÕÝíÉ ÍÓÈ ÇáäæÚ (ÇÎÊíÇÑí)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
     if (type) {
       const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
       if (!validTypes.includes(type)) {
@@ -691,7 +691,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
       where.type = type;
     }
 
-    // ÊÕÝíÉ ÇáÕáÇÍíÉ: ÈÔßá ÇÝÊÑÇÖí äÚÑÖ ÝÞØ ÇáÚäÇÕÑ ÇáÓÇÑíÉ (ÛíÑ ãäÊåíÉ Ãæ expiresAt null)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ expiresAt null)
     if (includeExpired !== 'true') {
       where.OR = [
         { expiresAt: null },
@@ -747,7 +747,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'merchantId is required' });
     }
 
-    // ÇáÊÍÞÞ ãä ãáßíÉ ÇáÚäÕÑ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -784,7 +784,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Raw body missing' });
     }
 
-    // 2. Parse raw body to JSON (äÍÏÏ parsedBody ÇáÃæá)
+    // 2. Parse raw body to JSON (ï¿½ï¿½ï¿½ï¿½ parsedBody ï¿½ï¿½ï¿½ï¿½ï¿½)
     let parsedBody;
     try {
       parsedBody = JSON.parse(rawBody.toString());
@@ -793,7 +793,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Invalid JSON payload' });
     }
 
-    // 3. ÇÓÊÎÑÇÌ merchantId (ÈÚÏíä äÓÊÎÏã parsedBody)
+    // 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ merchantId (ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ parsedBody)
     let merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
     if (!merchantId) {
       merchantId = 'test_merchant_001'; // default for testing
@@ -807,7 +807,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const { verifyWebhookSignature } = require('../lib/woocommerce');
       const expected = crypto.createHmac('sha256', wcSecret).update(rawBody).digest('base64');
       
-      // ÓÌá ãÚáæãÇÊ ÇáãÞÇÑäÉ (ÈÏæä ÇáãÝÊÇÍ Ãæ ÇáÈíÇäÇÊ ÇáßÇãáÉ)
+      // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
       logger.warn({
         module: 'risk',
         receivedSignatureLength: signature.length,
@@ -823,7 +823,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
         // return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
       }
     } else if (wcSecret && !signature) {
-      // Secret configured but signature missing – reject
+      // Secret configured but signature missing ï¿½ reject
       return res.status(401).json({ error: 'Missing signature' });
     }
     // If no secret configured, skip signature verification (not recommended for production)
@@ -847,7 +847,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       // Return cached response (within reasonable time window, e.g., 24h)
       const ageHours = (Date.now() - new Date(existingOrder.createdAt).getTime()) / (1000 * 60 * 60);
       if (ageHours < 24) {
-        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request – returning cached result');
+        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request ï¿½ returning cached result');
         return res.json({
           orderId: extracted.orderId,
           score: existingOrder.riskScore,
@@ -861,7 +861,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const riskRequest = buildRiskEvaluationRequest(extracted);
     riskRequest.merchantId = merchantId;
 
-    // ÇÓÊÎÑÇÌ ÈÕãÉ ÇáÌåÇÒ ãä Webhook (ÅÐÇ æÌÏÊ)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ Webhook (ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
     let deviceFingerprint = parsedBody.device_fingerprint || null;
     if (!deviceFingerprint && parsedBody.meta_data) {
         const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
@@ -1059,7 +1059,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
   }
 });
 // ========== Check Device Endpoint ==========
-// íõÓÊÎÏã ÈæÇÓØÉ ÌÏÇÑ ÇáÍãÇíÉ ÇáÏíäÇãíßí Ýí Çáãßæøä ÇáÅÖÇÝí
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { fingerprint } = req.body;
@@ -1072,7 +1072,7 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
-    // 1. ÇáÈÍË Úä ÈÕãÉ ÇáÌåÇÒ Ýí Identity Graph
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ Identity Graph
     const { getConnectedRisk } = require('../lib/identityGraph');
     const mockOrder = {
       deviceFingerprint: fingerprint,
@@ -1084,17 +1084,17 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
 
     try {
       const graphResult = await getConnectedRisk(mockOrder, merchantId);
-      // ÅÐÇ ßÇä connectedRisk >= 80 äÚÊÈÑå ÊåÏíÏÇð ÚÇáíÇð æäãäÚå
+      // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ connectedRisk >= 80 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       if (graphResult.connectedRisk >= 45) {
         blocked = true;
         reason = 'Device fingerprint linked to high-risk network';
       }
     } catch (err) {
       logger.error({ module: 'risk', endpoint: 'check-device', err }, 'Graph lookup error');
-      // ÝÔá Âãä: áÇ äãäÚ ÇáãÓÊÎÏã ÅÐÇ ÝÔá ÇáÝÍÕ
+      // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½: ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     }
 
-    // 2. (ÇÎÊíÇÑí) ÇáÈÍË Ýí ÇáÞÇÆãÉ ÇáÓæÏÇÁ ÇáãÑßÒíÉ
+    // 2. (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½) ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (!blocked) {
       const blacklisted = await db.blacklistEntry.findFirst({
         where: {
@@ -1116,13 +1116,13 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
     res.json({ blocked, reason });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'check-device', error: error.message }, 'Check-device error');
-    // Ýí ÍÇáÉ ÇáÎØÃ¡ äÚíÏ blocked: false áãäÚ ÇáÅíÌÇÈíÇÊ ÇáÎÇØÆÉ
+    // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½Ã¡ ï¿½ï¿½ï¿½ï¿½ blocked: false ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     res.status(500).json({ blocked: false, error: error.message });
   }
 });
 
 // ========== Enrich Endpoint ==========
-// íõÓÊÎÏã áÅËÑÇÁ ÇáØáÈ ÈÈíÇäÇÊ BIN ãä ÈæÇÈÇÊ ÇáÏÝÚ ÇáÎÇÑÌíÉ (ãËá Stripe)
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ BIN ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ Stripe)
 router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
     const { 
@@ -1179,7 +1179,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       });
     }
 
-    // 1. ÇáÈÍË Úä ÇáØáÈ ÇáÃÓÇÓí
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existingOrder = await db.order.findUnique({
       where: { orderId },
       select: { 
@@ -1202,7 +1202,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       }
     });
 
-    // 2. ÅÐÇ áã íæÌÏ ÇáØáÈ¡ äÎÒä pending enrichment
+    // 2. ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½È¡ ï¿½ï¿½ï¿½ï¿½ pending enrichment
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
@@ -1219,20 +1219,20 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       });
     }
 
-    // 3. ÇáÊÍÞÞ ãä ãáßíÉ ÇáÊÇÌÑ
+    // 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (existingOrder.merchantId !== merchantId) {
       return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
     }
 
 
 
-    // 5. ÊÍÏíË ÇáØáÈ ÈÈíÇäÇÊ enrichment
+    // 5. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ enrichment
     let snapshot = {};
     try {
       snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}');
     } catch {}
 
-    // äÖíÝ Ãæ äÍÏË ÈíÇäÇÊ ÇáÈØÇÞÉ Ýí snapshot
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ snapshot
     snapshot.bin = bin;
     if (cardBrand) snapshot.cardBrand = cardBrand;
     if (cardCountry) snapshot.cardIssuerCountry = cardCountry;
@@ -1241,7 +1241,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     snapshot.enrichedAt = new Date().toISOString();
     snapshot.enrichmentSource = 'stripe'; // or other gateway
 
-    // 6. ÊÍÖíÑ ÇáØáÈ áÅÚÇÏÉ ÇáÍÓÇÈ
+    // 6. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const enrichedOrder = {
       id: existingOrder.id,
       orderId: existingOrder.orderId,
@@ -1267,7 +1267,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       isNewCustomer: false,
     };
 
-    // ÊÍãíá ÇáÈíÇäÇÊ ÇáãÓÇÚÏÉ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentOrders = await db.order.findMany({
       where: { merchantId, createdAt: { gte: last7days } },
@@ -1290,7 +1290,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     });
     const blacklist = [];
 
-    // 7. ÅÚÇÏÉ ÍÓÇÈ ÇáãÎÇØÑ
+    // 7. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const { calculateRiskScore } = require('../lib/riskScoring');
     const riskResult = await calculateRiskScore(
       enrichedOrder,
@@ -1298,12 +1298,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       disputes,
       blacklist,
       merchantId,
-      false, // áÇ ÊÍÝÙ ÊÞííãðÇ ÊáÞÇÆíðÇ ÍÊì áÇ ÊÊßÑÑ
+      false, // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
       null,
-      cardHashRecord   // ? ÅÖÇÝÉ ãÚÇãá cardHashRecord
+      cardHashRecord   // ? ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ cardHashRecord
     );
 
-    // 8. ÍÝÙ ÇáäÊíÌÉ ÇáÌÏíÏÉ
+    // 8. ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const updatedSnapshot = {
       ...snapshot,
       ipIntel: riskResult.ipIntel || null,
@@ -1319,12 +1319,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
         riskScore: riskResult.score,
         riskLevel: riskResult.riskLevel,
         decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        cardHash: cardHashRecord?.cardHash ?? null,   // <-- ÇáÓØÑ ÇáãÖÇÝ
+        cardHash: cardHashRecord?.cardHash ?? null,   // <-- ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
         signalsSnapshot: JSON.stringify(updatedSnapshot),
       }
     });
 
-    // 9. ÍÝÙ RiskEvaluation ááÍÏË (upsert áÊÌäÈ ÊßÑÇÑ orderId)
+    // 9. ï¿½ï¿½ï¿½ RiskEvaluation ï¿½ï¿½ï¿½ï¿½ï¿½ (upsert ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ orderId)
     await db.riskEvaluation.upsert({
       where: { orderId: existingOrder.id },
       create: {
@@ -1345,12 +1345,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       },
     });
 
-    // 10. ãÚÇáÌÉ Ãí pending enrichments (ÅÐÇ æÌÏÊ áåÐÇ ÇáØáÈ) - ÍÐÝåÇ áÃäåÇ ØÈÞÊ
+    // 10. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ pending enrichments (ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½) - ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
     await db.pendingEnrichment.deleteMany({
       where: { orderId, status: 'pending' }
     });
 
-    // ÇáÇÓÊÌÇÈÉ ÇáäåÇÆíÉ
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     res.json({
       success: true,
       orderId,
@@ -1426,7 +1426,7 @@ router.post('/tenants/register', async (req, res) => {
   } catch (rateLimitErr) {
     logger.error(
       { module: 'risk', endpoint: 'register', error: rateLimitErr.message },
-      'Rate limiter DB error — failing open'
+      'Rate limiter DB error ï¿½ failing open'
     );
   }
   // ?? End Rate Limiting ?????????????????????????????????????????????????????
@@ -1478,7 +1478,7 @@ router.post('/tenants/register', async (req, res) => {
     // Generate a unique API key
     const apiKey = crypto.randomBytes(32).toString('base64');
 
-    // ÇÓÊÎÑÇÌ ÇáÏæãíä ãä storeUrl æÊÎÒíäå Ýí allowedDomains
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ storeUrl ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ allowedDomains
     const allowedDomains = [];
     if (storeUrl) {
       const normalizedDomain = normalizeDomain(storeUrl);
@@ -1499,7 +1499,7 @@ router.post('/tenants/register', async (req, res) => {
 
     logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
 
-    // ÅÑÓÇá ÇáÅíãíá — fire-and-forget (áÇ íæÞÝ ÇáÊÓÌíá áæ ÝÔá)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ fire-and-forget (ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½)
     const { sendApiKeyEmail } = require('../lib/email');
     sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
       logger.error({ module: 'email', error: err.message }, 'Failed to send API key email');
@@ -1524,7 +1524,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
       return res.status(400).json({ error: 'x-merchant-id header is required' });
     }
 
-    // ÇáÈÍË Úä ÇáØáÈÇÊ ÇáãÍÙæÑÉ (decision = 'block')
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (decision = 'block')
     const blockedOrders = await db.order.findMany({
       where: { merchantId, decision: 'block' },
       select: { id: true, orderId: true }
@@ -1534,7 +1534,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
       return res.json({ success: true, cleanedCount: 0, message: 'No blocked orders to clean' });
     }
 
-    // ÍÐÝ ÇáØáÈÇÊ ÇáãÍÙæÑÉ
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const deleteResult = await db.order.deleteMany({
       where: { merchantId, decision: 'block' }
     });
@@ -1557,8 +1557,8 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
 });
 
 // ========== GET /risk/verify-key ==========
-// íõÓÊÎÏã ÈæÇÓØÉ ÒÑ "ÊÍÞÞ ãä ÇáãÝÊÇÍ" Ýí ÅÖÇÝÉ WooCommerce
-// áÇ íÓÊÎÏã domainAuthMiddleware ÚãÏÇð — ÇáÊÇÌÑ ÞÏ íÊÍÞÞ ÞÈá ÊÓÌíá Ïæãíäå
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ "ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½" ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ WooCommerce
+// ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ domainAuthMiddleware ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/verify-key:
@@ -1587,7 +1587,7 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
  */
 router.get('/verify-key', async (req, res) => {
   try {
-    // 1. ÇáÊÍÞÞ ãä æÌæÏ ÇáÜ header
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ header
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
       return res.status(400).json({
@@ -1596,17 +1596,17 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 2. ÇáÈÍË Ýí ÞÇÚÏÉ ÇáÈíÇäÇÊ
+    // 2. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const tenant = await db.tenant.findUnique({
       where: { apiKey },
       select: {
         id: true,
         isActive: true,
-        // ÚãÏÇð áÇ äÌáÈ email Ãæ Ãí ÈíÇäÇÊ ÍÓÇÓÉ
+        // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ email ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
       }
     });
 
-    // 3. ãÝÊÇÍ ÛíÑ ãæÌæÏ Ãæ ÛíÑ äÔØ
+    // 3. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½
     if (!tenant || !tenant.isActive) {
       return res.status(401).json({
         valid: false,
@@ -1614,12 +1614,12 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 4. ÇáÊÍÞÞ ÇáÇÎÊíÇÑí ãä ÇáÏæãíä
-    //    íõØÈóøÞ ÝÞØ ÅÐÇ ßÇä ÇáÊÇÌÑ áÏíå allowedDomains ãÓÌáÉ
-    //    (ááÍÝÇÙ Úáì ÇáÊæÇÝÞ ãÚ ÇáÊÌÇÑ ÇáÞÏÇãì ÇáÐíä áíÓ áÏíåã Ïæãíä ãÓÌá)
-    // TODO: ÅÖÇÝÉ ÇáÊÍÞÞ ãä ÇáÏæãíä ÚäÏ ÊæÝÑ ÍÞá allowedDomains
+    // 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    //    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ allowedDomains ï¿½ï¿½ï¿½ï¿½ï¿½
+    //    (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
+    // TODO: ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ allowedDomains
 
-    // 5. ßá ÔíÁ ÕÍíÍ
+    // 5. ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½
     return res.status(200).json({
       valid: true,
       message: 'API key is valid'
@@ -1636,6 +1636,17 @@ router.get('/verify-key', async (req, res) => {
     });
   }
 });
+
+// â”€â”€ Temp Debug Endpoint â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+router.get('/debug-ip', (req, res) => {
+  res.json({
+    ip: req.ip,
+    ips: req.ips,
+    xForwardedFor: req.headers['x-forwarded-for'],
+    xRealIp: req.headers['x-real-ip'],
+  });
+});
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 module.exports = router;
 
