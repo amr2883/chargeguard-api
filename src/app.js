@@ -27,7 +27,9 @@ try {
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use(express.json());
-app.use(morgan('dev'));
+app.use(morgan('dev', {
+  skip: (req) => req.skipMorgan === true,
+}));
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
     return next(err);
@@ -36,10 +38,16 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
-const riskRoutes = require('./routes/risk');
-const authRoutes = require('./routes/auth');
-app.use('/api/risk', riskRoutes);
-app.use('/api/auth', authRoutes);
+const riskRoutes  = require('./routes/risk');
+const authRoutes  = require('./routes/auth');
+const adminRoutes = require('./routes/admin');
+app.use('/api/risk',  riskRoutes);
+app.use('/api/auth',  authRoutes);
+// Morgan معطّل لـ /admin لمنع تسجيل الـ secret في اللوغ
+app.use('/admin', (req, res, next) => {
+  req.skipMorgan = true;
+  next();
+}, adminRoutes);
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
