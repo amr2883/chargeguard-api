@@ -1418,7 +1418,21 @@ router.post('/tenants/register', async (req, res) => {
     ]);
 
     if (recentCount >= MAX_ATTEMPTS) {
-      return res.status(429).json({ error: 'Too many registration attempts. Please try again later.' });
+      const oldestAttempt = await db.registrationAttempt.findFirst({
+        where: { ipHash, createdAt: { gte: oneHourAgo } },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true }
+      });
+      const resetAt = oldestAttempt
+        ? new Date(oldestAttempt.createdAt).getTime() + 60 * 60 * 1000
+        : Date.now() + 60 * 60 * 1000;
+      const retryAfterSecs = Math.ceil((resetAt - Date.now()) / 1000);
+      const retryAfterMins = Math.ceil(retryAfterSecs / 60);
+      res.set('Retry-After', String(retryAfterSecs));
+      return res.status(429).json({
+        error: `Too many registration attempts. Please try again in ${retryAfterMins} minute(s).`,
+        retryAfter: retryAfterSecs
+      });
     }
 
     await db.registrationAttempt.create({ data: { ipHash } });
