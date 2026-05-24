@@ -7,14 +7,22 @@ function verifyHmacSignature(req, res, next) {
   const signature  = req.headers['x-chargeguard-signature'];
   const timestamp  = req.headers['x-chargeguard-timestamp'];
 
-  // Legacy mode: Plugin قديم لا يرسل الهيدرات الجديدة
-  if (!signature && !timestamp) {
+// Legacy mode: Plugin قديم لا يرسل الهيدرات الجديدة
+if (!signature && !timestamp) {
     logger.warn(
       { tenantId: req.tenant?.id, path: req.path },
       'HMAC_LEGACY_REQUEST — no signature headers, allowing through'
     );
+    // تحليل Buffer → JSON للطلبات القديمة
+    if (req.body instanceof Buffer) {
+        try {
+            req.body = JSON.parse(req.body.toString('utf8'));
+        } catch (_) {
+            return res.status(400).json({ error: 'Invalid JSON body' });
+        }
+    }
     return next();
-  }
+}
 
   // إذا أرسل أحد الهيدرين فقط، هذا خطأ
   if (!signature || !timestamp) {
