@@ -38,11 +38,13 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal server error', details: err.message });
 });
 
-const riskRoutes  = require('./routes/risk');
-const authRoutes  = require('./routes/auth');
-const adminRoutes = require('./routes/admin');
+const riskRoutes      = require('./routes/risk');
+const authRoutes      = require('./routes/auth');
+const adminRoutes     = require('./routes/admin');
+const dashboardRoutes = require('./routes/dashboard');
 app.use('/api/risk',  riskRoutes);
 app.use('/api/auth',  authRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 // Morgan معطّل لـ /admin لمنع تسجيل الـ secret في اللوغ
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
