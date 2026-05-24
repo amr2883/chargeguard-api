@@ -30,13 +30,6 @@ app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
 }));
-app.use((err, req, res, next) => {
-  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
-    return next(err);
-  }
-  console.error('🚨 Global error handler caught:', err.stack || err.message || err);
-  res.status(500).json({ error: 'Internal server error', details: err.message });
-});
 
 const riskRoutes      = require('./routes/risk');
 const authRoutes      = require('./routes/auth');
@@ -50,6 +43,15 @@ app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
 }, adminRoutes);
+
+// ── Global error handler — MUST be after all routes ──────────
+app.use((err, req, res, next) => {
+  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    return next(err);
+  }
+  console.error('🚨 Global error handler caught:', err.stack || err.message || err);
+  res.status(500).json({ error: 'Internal server error', details: err.message });
+});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
