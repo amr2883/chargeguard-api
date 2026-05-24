@@ -1651,5 +1651,98 @@ router.get('/verify-key', async (req, res) => {
   }
 });
 
+// ========== POST /risk/blocked-attempt ==========
+// Receives blocked card-testing events from the WooCommerce Plugin.
+// Stores them in BlockedAttempt table for the user dashboard.
+//
+// Auth:     X-Api-Key header (same apiKeyAuth middleware)
+// Privacy:  Only ipHash (SHA-256) is accepted — real IP is never stored
+// Reliability: Fire-and-forget from plugin side; failures are silent
+
+const BLOCKED_ATTEMPT_RATE = new Map(); // keyed on apiKey, not IP
+const BA_MAX_REQ   = 60;
+const BA_WINDOW_MS = 60 * 1000;
+
+const blockedAttemptRateLimit = (req, res, next) => {
+  const key = req.headers['x-api-key'] || req.ip || 'unknown';
+  const now = Date.now();
+  const rec = BLOCKED_ATTEMPT_RATE.get(key);
+  if (rec) {
+    if (now - rec.firstAt > BA_WINDOW_MS) {
+      BLOCKED_ATTEMPT_RATE.delete(key);
+    } else if (rec.count >= BA_MAX_REQ) {
+      return res.status(429).json({ error: 'Too Many Requests' });
+    } else {
+      rec.count++;
+    }
+  } else {
+    BLOCKED_ATTEMPT_RATE.set(key, { count: 1, firstAt: now });
+  }
+  next();
+};
+
+const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern']);
+const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
+
+router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, async (req, res) => {
+  try {
+    const { cardBin, cardType, reason, ipHash, amountAttempted } = req.body;
+
+    if (!reason || !VALID_REASONS.has(reason)) {
+      return res.status(400).json({
+        error: `Invalid or missing 'reason'. Allowed: ${[...VALID_REASONS].join(', ')}`,
+      });
+    }
+
+    // cardBin: accept only 6 numeric digits
+    let safeBin = null;
+    if (cardBin != null) {
+      const b = String(cardBin).replace(/\D/g, '').slice(0, 6);
+      if (b.length === 6) safeBin = b;
+    }
+
+    // cardType: normalise to lowercase, fallback to 'unknown'
+    let safeCardType = null;
+    if (cardType != null) {
+      const ct = String(cardType).toLowerCase().trim();
+      safeCardType = VALID_CARD_TYPES.has(ct) ? ct : 'unknown';
+    }
+
+    // ipHash: must be 64-char hex (SHA-256)
+    let safeIpHash = null;
+    if (ipHash != null) {
+      const h = String(ipHash).toLowerCase().trim();
+      if (/^[0-9a-f]{64}$/.test(h)) safeIpHash = h;
+    }
+
+    // amountAttempted: positive number, sanity-capped at $999,999
+    let safeAmount = null;
+    if (amountAttempted != null) {
+      const amt = parseFloat(amountAttempted);
+      if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) safeAmount = amt;
+    }
+
+    await db.blockedAttempt.create({
+      data: {
+        tenantId:        req.tenant.id,
+        cardBin:         safeBin,
+        cardType:        safeCardType,
+        reason:          reason,
+        ipHash:          safeIpHash,
+        amountAttempted: safeAmount,
+      },
+    });
+
+    return res.status(200).json({ success: true });
+
+  } catch (err) {
+    logger.error(
+      { module: 'risk', endpoint: 'blocked-attempt', error: err.message },
+      'Failed to record blocked attempt'
+    );
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 module.exports = router;
 
