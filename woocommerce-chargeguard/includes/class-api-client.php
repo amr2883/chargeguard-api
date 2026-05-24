@@ -38,16 +38,19 @@ class ChargeGuard_API_Client {
     public function send_enrich($data) {
         $endpoint = '/risk/enrich';
         $url      = $this->base_url . $endpoint;
-        $body     = json_encode($data);
-        $signature = $this->generate_hmac($body);
+        $body      = json_encode($data);
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac($body, $timestamp);
 
         $args = [
             'method'  => 'POST',
             'headers' => [
-                'Content-Type'           => 'application/json',
-                'X-API-Key'              => $this->api_key,
-                'X-Merchant-Id'          => $this->merchant_id,
-                'X-WC-Webhook-Signature' => $signature,
+                'Content-Type'              => 'application/json',
+                'X-API-Key'                 => $this->api_key,
+                'X-Merchant-Id'             => $this->merchant_id,
+                'X-WC-Webhook-Signature'    => $signature,
+                'X-ChargeGuard-Signature'   => $signature,
+                'X-ChargeGuard-Timestamp'   => $timestamp,
             ],
             'body'    => $body,
             'timeout' => 5,
@@ -84,16 +87,19 @@ class ChargeGuard_API_Client {
     public function check_device($fingerprint) {
         $endpoint = '/risk/check-device';
         $url      = $this->base_url . $endpoint;
-        $body     = json_encode(['fingerprint' => $fingerprint]);
-        $signature = $this->generate_hmac($body);
+        $body      = json_encode(['fingerprint' => $fingerprint]);
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac($body, $timestamp);
 
         $args = [
             'method'  => 'POST',
             'headers' => [
-                'Content-Type'           => 'application/json',
-                'X-API-Key'              => $this->api_key,
-                'X-Merchant-Id'          => $this->merchant_id,
-                'X-WC-Webhook-Signature' => $signature,
+                'Content-Type'              => 'application/json',
+                'X-API-Key'                 => $this->api_key,
+                'X-Merchant-Id'             => $this->merchant_id,
+                'X-WC-Webhook-Signature'    => $signature,
+                'X-ChargeGuard-Signature'   => $signature,
+                'X-ChargeGuard-Timestamp'   => $timestamp,
             ],
             'body'    => $body,
             'timeout' => 3,
@@ -127,8 +133,9 @@ class ChargeGuard_API_Client {
      * @param string $raw_body الجسم الخام للطلب.
      * @return string التوقيع بصيغة base64.
      */
-    private function generate_hmac($raw_body) {
-        return base64_encode(hash_hmac('sha256', $raw_body, $this->webhook_secret, true));
+    private function generate_hmac($raw_body, $timestamp) {
+        $signed_string = $timestamp . '.' . $raw_body;
+        return 'v1=' . hash_hmac('sha256', $signed_string, $this->webhook_secret);
     }
 
     /**
@@ -140,16 +147,19 @@ class ChargeGuard_API_Client {
     public function evaluate_risk($data) {
         $endpoint = '/risk/evaluate';
         $url      = $this->base_url . $endpoint;
-        $body     = json_encode($data);
-        $signature = $this->generate_hmac($body);
+        $body      = json_encode($data);
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac($body, $timestamp);
 
         $args = [
             'method'  => 'POST',
             'headers' => [
-                'Content-Type'           => 'application/json',
-                'X-API-Key'              => $this->api_key,
-                'X-Merchant-Id'          => $this->merchant_id,
-                'X-WC-Webhook-Signature' => $signature,
+                'Content-Type'              => 'application/json',
+                'X-API-Key'                 => $this->api_key,
+                'X-Merchant-Id'             => $this->merchant_id,
+                'X-WC-Webhook-Signature'    => $signature,
+                'X-ChargeGuard-Signature'   => $signature,
+                'X-ChargeGuard-Timestamp'   => $timestamp,
             ],
             'body'    => $body,
             'timeout' => 5,
