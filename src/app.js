@@ -26,6 +26,7 @@ try {
   console.warn('⚠️ Swagger UI not available:', e.message);
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
+app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
