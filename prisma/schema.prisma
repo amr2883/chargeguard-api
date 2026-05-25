@@ -23,6 +23,7 @@ model Tenant {
   // ربط المستأجر بملفات التاجر
   profiles         MerchantProfile[]  @relation("TenantProfiles")
   blockedAttempts  BlockedAttempt[]   @relation("TenantBlockedAttempts")
+  alertLogs        AlertLog[]         @relation("TenantAlerts")
 }
 
 // ========== Merchant Profile ==========
@@ -363,4 +364,17 @@ model RegistrationAttempt {
   createdAt DateTime @default(now())
 
   @@index([ipHash, createdAt])
+}
+
+// ========== Attack Alert Log ==========
+model AlertLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation("TenantAlerts", fields: [tenantId], references: [id], onDelete: Cascade)
+  alertType  String   @default("attack_detected")
+  attackCount Int
+  savedAmount Float
+  sentAt     DateTime @default(now())
+
+  @@index([tenantId, sentAt])
 }
