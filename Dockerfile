@@ -1,5 +1,6 @@
 ﻿# ------ مرحلة البناء (Builder) ------
 FROM node:20-alpine AS builder
+RUN apk add --no-cache openssl
 
 WORKDIR /app
 
@@ -15,6 +16,7 @@ RUN npx prisma generate
 FROM node:20-alpine
 
 # إنشاء مستخدم غير جذر لأمان أعلى
+RUN apk add --no-cache openssl
 RUN addgroup -g 1001 -S nodejs && adduser -S nodejs -u 1001
 
 WORKDIR /app
