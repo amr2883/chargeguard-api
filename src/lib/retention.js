@@ -30,6 +30,7 @@ const RETENTION = {
   COMPUTED_RISK_DAYS:       Number(process.env.RETENTION_COMPUTED_RISK_DAYS)        || 90,
   CARD_HASH_DAYS:           Number(process.env.RETENTION_CARD_HASH_DAYS)            || 365,
   PENDING_ENRICHMENT_HOURS: Number(process.env.RETENTION_PENDING_ENRICHMENT_HOURS)  || 24,
+  UNVERIFIED_TENANT_DAYS:   Number(process.env.RETENTION_UNVERIFIED_TENANT_DAYS)    || 30,
 
   // إعدادات الأداء — الحذف التدريجي لتجنب قفل الجداول
   BATCH_SIZE:     Number(process.env.CLEANUP_BATCH_SIZE)     || 500,
@@ -236,6 +237,16 @@ async function runDailyRetention() {
       { lastSeenAt: { lt: daysAgo(RETENTION.CARD_HASH_DAYS) } }
     ));
 
+    // ── 8. Tenants غير مؤكدين > 30 يوم ──────────────────────────────────
+    // مستخدمون سجّلوا بإيميلات وهمية أو لم يكملوا التأكيد خلال شهر كامل
+    await safeClean('unverifiedTenant', () => batchDelete(
+      prisma, 'tenant',
+      {
+        emailVerified: false,
+        createdAt: { lt: daysAgo(RETENTION.UNVERIFIED_TENANT_DAYS) },
+      }
+    ));
+
     // ── طباعة الملخص النهائي (سطر واحد لكل جدول) ─────────────────────────
     const durationMs = Date.now() - startedAt.getTime();
     const endTag     = `[${new Date().toISOString()}]`;
@@ -251,7 +262,8 @@ async function runDailyRetention() {
       `  • CardTestAttempt:      ${fmt(results.cardTestAttempt)}\n` +
       `  • BlockedAttempt:       ${fmt(results.blockedAttempt)}\n` +
       `  • Order:                ${fmt(results.order)}\n` +
-      `  • CardHash:             ${fmt(results.cardHash)}`
+      `  • CardHash:             ${fmt(results.cardHash)}\n` +
+      `  • UnverifiedTenant:     ${fmt(results.unverifiedTenant)}`
     );
 
   } catch (err) {
