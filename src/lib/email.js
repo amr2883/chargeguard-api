@@ -528,4 +528,107 @@ async function sendWeeklySummaryEmail({
   throw lastError;
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail };
+async function sendConfirmationEmail(email, confirmUrl) {
+  console.log('[Email] Sending confirmation email to:', email);
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[Confirmation] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
+      await transporter.sendMail({
+        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+        to: email,
+        subject: '✉️ Confirm your ChargeGuard account',
+        html: `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+            <!-- Header -->
+            <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+              <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+                <td style="vertical-align:middle;">
+                  <table cellpadding="0" cellspacing="0"><tr>
+                    <td style="padding-right:10px;vertical-align:middle;">
+                      <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                          <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                        </svg>
+                      </div>
+                    </td>
+                    <td style="vertical-align:middle;">
+                      <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+                    </td>
+                  </tr></table>
+                </td>
+                <td style="text-align:right;vertical-align:middle;">
+                  <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Email Verification</span>
+                </td>
+              </tr></table>
+            </div>
+
+            <!-- Banner -->
+            <div style="background:linear-gradient(135deg,#0f172a,#1e1b4b);padding:28px 32px;border-left:1px solid #312e81;border-right:1px solid #312e81;">
+              <p style="font-size:13px;letter-spacing:0.1em;text-transform:uppercase;color:#a5b4fc;margin:0 0 8px;font-weight:600;">✉️ One step away</p>
+              <h1 style="font-size:26px;font-weight:800;color:#ffffff;margin:0 0 8px;line-height:1.2;">Confirm your email address</h1>
+              <p style="font-size:15px;color:#c7d2fe;margin:0;">to activate your ChargeGuard account</p>
+            </div>
+
+            <!-- Body -->
+            <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+              <p style="font-size:15px;color:#475569;margin:0 0 28px;line-height:1.6;">
+                Thanks for signing up. Click the button below to verify your email and receive your API key.
+              </p>
+
+              <!-- CTA Button -->
+              <div style="text-align:center;margin-bottom:28px;">
+                <a href="${confirmUrl}"
+                   style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+                  Verify Email Address →
+                </a>
+              </div>
+
+              <!-- Expiry warning -->
+              <div style="background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:12px 16px;margin-bottom:24px;">
+                <p style="font-size:13px;color:#92400e;margin:0;">⏰ <strong>This link expires in 24 hours.</strong> If it expires, you can request a new one from the confirmation page.</p>
+              </div>
+
+              <!-- Fallback link -->
+              <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+                If the button doesn't work, copy and paste this link into your browser:<br/>
+                <span style="color:#6366f1;word-break:break-all;">${confirmUrl}</span>
+              </p>
+            </div>
+
+            <!-- Footer -->
+            <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+              <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+                You received this because you registered for ChargeGuard Early Access. If you didn't sign up, you can safely ignore this email.
+              </p>
+            </div>
+
+          </div>
+        `
+      });
+      console.log(`[Confirmation] ✅ Sent successfully to: ${email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err.code || err.responseCode || 'UNKNOWN';
+      console.error(`[Confirmation] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      console.log(`[Confirmation] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+async function sendWelcomeWithKeyEmail(email, apiKey) {
+  console.log('[Email] Sending welcome+key email after verification to:', email);
+  await sendApiKeyEmail(email, apiKey);
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail };

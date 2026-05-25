@@ -25,17 +25,25 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'API key is required' });
   }
 
-  // ����� �� ����� API �� ���� Tenant
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
-    select: { id: true, email: true, isActive: true, webhookSecret: true }
+    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true }
   });
 
   if (!tenant || !tenant.isActive) {
     return res.status(401).json({ error: 'Invalid or inactive API key' });
   }
 
-  // ����� ������� �������� ������ ���������� ������
+  if (!tenant.emailVerified) {
+    // Allow in development mode
+    if (process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
+      return res.status(403).json({
+        error: 'Email not verified. Please check your inbox and click the confirmation link.',
+        code: 'EMAIL_NOT_VERIFIED'
+      });
+    }
+  }
+
   req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret };
   next();
 };
@@ -1492,7 +1500,11 @@ router.post('/tenants/register', async (req, res) => {
     // Generate a unique API key
     const apiKey = crypto.randomBytes(32).toString('base64');
 
-    // ������� ������� �� storeUrl ������� �� allowedDomains
+    // Generate email verification token
+    const emailVerifyToken = crypto.randomBytes(32).toString('hex');
+    const emailVerifyExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    // Normalize storeUrl domain
     const allowedDomains = [];
     if (storeUrl) {
       const normalizedDomain = normalizeDomain(storeUrl);
@@ -1501,6 +1513,9 @@ router.post('/tenants/register', async (req, res) => {
       }
     }
 
+    // In development mode, skip email verification
+    const skipVerification = process.env.EMAIL_VERIFICATION_DISABLED === 'true';
+
     const tenant = await db.tenant.create({
       data: {
         email,
@@ -1508,22 +1523,44 @@ router.post('/tenants/register', async (req, res) => {
         apiKey,
         plan: 'early_access',
         isActive: true,
+        emailVerified: skipVerification,
+        emailVerifyToken: skipVerification ? null : emailVerifyToken,
+        emailVerifyExpiresAt: skipVerification ? null : emailVerifyExpiresAt,
       }
     });
 
     logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
 
-    // ����� ������� � fire-and-forget (�� ���� ������� �� ���)
-    const { sendApiKeyEmail } = require('../lib/email');
-    sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
-      logger.error({ module: 'email', error: err.message }, 'Failed to send API key email');
+    if (skipVerification) {
+      // Dev mode — send API key immediately as before
+      const { sendApiKeyEmail } = require('../lib/email');
+      sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
+        logger.error({ module: 'email', error: err.message }, 'Failed to send API key email (dev mode)');
+      });
+
+      return res.status(201).json({
+        email: tenant.email,
+        plan: tenant.plan,
+        verified: true,
+        message: 'Welcome to ChargeGuard Early Access! Check your email for your API key.'
+      });
+    }
+
+    // Production — send confirmation email, withhold API key
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
+    const confirmUrl = `${baseUrl}/api/auth/verify-email?token=${emailVerifyToken}`;
+
+    const { sendConfirmationEmail } = require('../lib/email');
+    sendConfirmationEmail(tenant.email, confirmUrl).catch(err => {
+      logger.error({ module: 'email', error: err.message }, 'Failed to send confirmation email');
     });
 
     res.status(201).json({
-      apiKey: tenant.apiKey,
       email: tenant.email,
       plan: tenant.plan,
-      message: 'Welcome to ChargeGuard Early Access! Use this API key in your plugin settings.'
+      verified: false,
+      requiresVerification: true,
+      message: 'Almost there! We sent a confirmation link to your email. Click it to activate your account and receive your API key.'
     });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'register', error: error.message }, 'Registration error');
@@ -1610,21 +1647,29 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 2. ����� �� ����� ��������
+    // 2. Find tenant by API key
     const tenant = await db.tenant.findUnique({
       where: { apiKey },
       select: {
         id: true,
         isActive: true,
-        // ����� �� ���� email �� �� ������ �����
+        emailVerified: true,
       }
     });
 
-    // 3. ����� ��� ����� �� ��� ���
+    // 2. Validate tenant
     if (!tenant || !tenant.isActive) {
       return res.status(401).json({
         valid: false,
         message: 'Invalid or inactive API key'
+      });
+    }
+
+    if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
+      return res.status(403).json({
+        valid: false,
+        message: 'Email not verified. Please check your inbox and click the confirmation link.',
+        code: 'EMAIL_NOT_VERIFIED'
       });
     }
 
