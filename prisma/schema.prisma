@@ -16,8 +16,11 @@ model Tenant {
   apiKey        String   @unique
   webhookSecret String?
   plan          String   @default("early_access")
-  isActive      Boolean   @default(true)
-  keyRotatedAt  DateTime?
+  isActive             Boolean   @default(true)
+  emailVerified        Boolean   @default(false)
+  emailVerifyToken     String?   @unique
+  emailVerifyExpiresAt DateTime?
+  keyRotatedAt         DateTime?
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
