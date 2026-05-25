@@ -41,4 +41,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD node -
 
 # تشغيل التطبيق (صيغة JSON array الصحيحة)
 # تشغيل مزامنة قاعدة البيانات ثم بدء التطبيق
-CMD sh -c "npx prisma db push --skip-generate && node src/app.js"
+CMD sh -c "npx prisma db push --skip-generate --accept-data-loss && node src/app.js"
