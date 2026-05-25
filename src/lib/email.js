@@ -274,4 +274,258 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
   throw lastError;
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail };
+async function sendWeeklySummaryEmail({
+  tenant,
+  thisWeekCount,
+  savedAmount,
+  prevWeekCount,
+  weekOverWeekPct,
+  topReason,
+  reasonBreakdown,
+  weekStart,
+  historicalTotal,
+}) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const savedFormatted = savedAmount.toLocaleString('en-US', {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 2,
+  });
+
+  const weekLabel = weekStart.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', timeZone: 'UTC',
+  });
+
+  // ── Week-over-week badge ────────────────────────────────────────────────
+  let wowBadge = '';
+  if (weekOverWeekPct === null) {
+    wowBadge = `<span style="font-size:12px;color:#64748b;">First active week</span>`;
+  } else if (weekOverWeekPct > 0) {
+    wowBadge = `<span style="font-size:12px;color:#dc2626;font-weight:600;">↑ ${weekOverWeekPct}% vs last week</span>`;
+  } else if (weekOverWeekPct < 0) {
+    wowBadge = `<span style="font-size:12px;color:#16a34a;font-weight:600;">↓ ${Math.abs(weekOverWeekPct)}% vs last week</span>`;
+  } else {
+    wowBadge = `<span style="font-size:12px;color:#64748b;">Same as last week</span>`;
+  }
+
+  // ── Contextual tip by topReason ─────────────────────────────────────────
+  const TIPS = {
+    velocity:     'Most attacks this week were Velocity Abuse. Consider enabling CAPTCHA on your checkout page to slow down automated attempts.',
+    card_testing: 'Card Testing bots were active. Avoid free-shipping offers — they lower the cost barrier for bots running test transactions.',
+    blacklist:    'ChargeGuard blocked attempts from addresses already on your blacklist. Your rules are working efficiently.',
+    pattern:      'Advanced attack patterns were detected and neutralised. The adaptive protection system is running at full capacity.',
+  };
+  const tip = topReason && TIPS[topReason]
+    ? TIPS[topReason]
+    : 'Your store was quiet this week. ChargeGuard is monitoring 24/7 — the moment threats appear, they will be stopped.';
+
+  // ── Reason breakdown bars (HTML table — no Unicode blocks) ─────────────
+  const reasonLabels = {
+    velocity:     'Velocity Abuse',
+    card_testing: 'Card Testing',
+    blacklist:    'Blacklist Match',
+    pattern:      'Pattern Match',
+  };
+
+  const barsHtml = reasonBreakdown.length > 0
+    ? reasonBreakdown.map(({ reason, count, pct }) => `
+        <tr>
+          <td style="padding-bottom:10px;">
+            <table cellpadding="0" cellspacing="0" style="width:100%;">
+              <tr>
+                <td style="width:130px;font-size:13px;color:#334155;padding-right:10px;white-space:nowrap;">
+                  ${reasonLabels[reason] || reason}
+                </td>
+                <td style="padding-right:10px;">
+                  <div style="background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden;">
+                    <div style="background:#f97316;width:${pct}%;height:8px;border-radius:4px;"></div>
+                  </div>
+                </td>
+                <td style="width:40px;font-size:12px;color:#64748b;text-align:right;white-space:nowrap;">
+                  ${pct}%
+                </td>
+              </tr>
+            </table>
+          </td>
+        </tr>
+      `).join('')
+    : '';
+
+  // ── Shared header HTML (same as other emails) ──────────────────────────
+  const headerHtml = `
+    <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+      <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+        <td style="vertical-align:middle;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td style="padding-right:10px;vertical-align:middle;">
+              <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                  <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                </svg>
+              </div>
+            </td>
+            <td style="vertical-align:middle;">
+              <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+            </td>
+          </tr></table>
+        </td>
+        <td style="text-align:right;vertical-align:middle;">
+          <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Weekly Report — ${weekLabel}</span>
+        </td>
+      </tr></table>
+    </div>`;
+
+  // ── Shared footer HTML ──────────────────────────────────────────────────
+  const footerHtml = `
+    <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+      <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+        You're receiving this weekly summary because your store is protected by ChargeGuard.
+        Reports are sent every Sunday at 09:00 UTC.
+      </p>
+    </div>`;
+
+  // ── Build HTML for active week vs quiet week ────────────────────────────
+  let bodyHtml;
+
+  if (thisWeekCount > 0) {
+    // ── Full weekly summary (active week) ─────────────────────────────────
+    bodyHtml = `
+      <!-- Victory Banner -->
+      <div style="background:linear-gradient(135deg,#052e16,#14532d);padding:28px 32px;border-left:1px solid #166534;border-right:1px solid #166534;">
+        <p style="font-size:13px;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;font-weight:600;">🛡️ Weekly Protection Report</p>
+        <h1 style="font-size:36px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">${thisWeekCount}</h1>
+        <p style="font-size:16px;color:#86efac;margin:0 0 12px;">attacks blocked on <strong>${storeDisplay}</strong> this week</p>
+        ${wowBadge}
+      </div>
+
+      <!-- Savings stat -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;padding:20px 32px;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr>
+            <td style="width:50%;padding-right:12px;">
+              <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;">
+                <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Attacks Blocked</p>
+                <p style="font-size:28px;font-weight:800;color:#0f172a;margin:0;line-height:1;">${thisWeekCount}</p>
+                <p style="font-size:12px;color:#64748b;margin:4px 0 0;">this week</p>
+              </div>
+            </td>
+            <td style="width:50%;padding-left:12px;">
+              <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;">
+                <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Estimated Savings</p>
+                <p style="font-size:28px;font-weight:800;color:#16a34a;margin:0;line-height:1;">${savedFormatted}</p>
+                <p style="font-size:12px;color:#64748b;margin:4px 0 0;">in dispute fees</p>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Reason breakdown -->
+      ${barsHtml ? `
+      <div style="padding:24px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h3 style="font-size:14px;font-weight:600;color:#0f172a;margin:0 0 16px;letter-spacing:0.02em;text-transform:uppercase;">Top Threats This Week</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">${barsHtml}</table>
+      </div>` : ''}
+
+      <!-- Contextual tip -->
+      <div style="padding:20px 32px;background:#f0fdf4;border:1px solid #bbf7d0;border-top:none;">
+        <p style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#16a34a;margin:0 0 6px;">💡 Tip of the Week</p>
+        <p style="font-size:14px;color:#166534;line-height:1.7;margin:0;">${tip}</p>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:20px 32px 28px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+        <a href="https://chargeguard-api.onrender.com/api/dashboard/page"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          View Full Dashboard →
+        </a>
+      </div>`;
+
+  } else {
+    // ── Quiet week email ──────────────────────────────────────────────────
+    const histAttacks = historicalTotal ? historicalTotal.attacks.toLocaleString('en-US') : '—';
+    const histSaved   = historicalTotal
+      ? historicalTotal.saved.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
+      : '—';
+
+    bodyHtml = `
+      <!-- Quiet banner -->
+      <div style="background:#f0fdf4;padding:28px 32px;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0;border-top:none;text-align:center;">
+        <p style="font-size:32px;margin:0 0 8px;">✅</p>
+        <h1 style="font-size:22px;font-weight:700;color:#14532d;margin:0 0 8px;">Quiet week on ${storeDisplay}</h1>
+        <p style="font-size:15px;color:#166534;margin:0;">No attacks detected — ChargeGuard is monitoring 24/7</p>
+      </div>
+
+      <!-- Historical totals -->
+      <div style="padding:24px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h3 style="font-size:14px;font-weight:600;color:#0f172a;margin:0 0 16px;">Your Protection Since Day One</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr>
+            <td style="width:50%;padding-right:12px;">
+              <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;">
+                <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Total Blocked</p>
+                <p style="font-size:26px;font-weight:800;color:#0f172a;margin:0;">${histAttacks}</p>
+                <p style="font-size:12px;color:#64748b;margin:4px 0 0;">attacks since you joined</p>
+              </div>
+            </td>
+            <td style="width:50%;padding-left:12px;">
+              <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px 20px;">
+                <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Total Saved</p>
+                <p style="font-size:26px;font-weight:800;color:#16a34a;margin:0;">${histSaved}</p>
+                <p style="font-size:12px;color:#64748b;margin:4px 0 0;">in dispute fees prevented</p>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Tip -->
+      <div style="padding:20px 32px 28px;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;">
+        <p style="font-size:12px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;margin:0 0 6px;">💡 Stay Protected</p>
+        <p style="font-size:14px;color:#475569;line-height:1.7;margin:0;">${tip}</p>
+      </div>`;
+  }
+
+  // ── Assemble full email ─────────────────────────────────────────────────
+  const fullHtml = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+      ${headerHtml}
+      ${bodyHtml}
+      ${footerHtml}
+    </div>`;
+
+  const subject = thisWeekCount > 0
+    ? `🛡️ ChargeGuard blocked ${thisWeekCount} attacks on ${storeDisplay} this week`
+    : `✅ Quiet week for ${storeDisplay} — ChargeGuard report`;
+
+  // ── Send with retry (same pattern as sendAttackAlertEmail) ──────────────
+  const RETRIES          = 3;
+  const RETRY_DELAY_MS   = 5000;
+  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[WeeklySummary] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
+      await transporter.sendMail({
+        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+        to:   tenant.email,
+        subject,
+        html: fullHtml,
+      });
+      console.log(`[WeeklySummary] ✅ Sent to ${tenant.email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err.code || err.responseCode || 'UNKNOWN';
+      console.error(`[WeeklySummary] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      console.log(`[WeeklySummary] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail };
