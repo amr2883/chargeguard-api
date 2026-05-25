@@ -1,11 +1,17 @@
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 587,
+  secure: false,
+  requireTLS: true,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
   },
+  connectionTimeout: 15000,
+  greetingTimeout: 10000,
+  socketTimeout: 30000,
 });
 
 async function sendApiKeyEmail(email, apiKey) {
@@ -154,10 +160,18 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
     timeZone: 'UTC', timeZoneName: 'short',
   });
 
-  await transporter.sendMail({
-    from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
-    to: tenant.email,
-    subject: `🛡️ ChargeGuard blocked ${attackCount} attacks on ${storeDisplay}`,
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[AttackAlert] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
+      await transporter.sendMail({
+        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+        to: tenant.email,
+        subject: `🛡️ ChargeGuard blocked ${attackCount} attacks on ${storeDisplay}`,
     html: `
       <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
 
@@ -247,6 +261,17 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
   });
 
   console.log(`[AttackAlert] ✅ Alert sent to ${tenant.email} — ${attackCount} attacks, ${savedFormatted} saved`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err.code || err.responseCode || 'UNKNOWN';
+      console.error(`[AttackAlert] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      console.log(`[AttackAlert] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
 }
 
 module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail };
