@@ -242,7 +242,7 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
 
         <!-- CTA -->
         <div style="padding:20px 32px 28px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
-          <a href="https://chargeguard-woocommerce-backend.onrender.com/api/dashboard"
+          <a href="https://chargeguard-api.onrender.com/api/dashboard/page"
              style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
             View Full Attack Report →
           </a>
