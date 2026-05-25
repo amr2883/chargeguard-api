@@ -1,26 +1,41 @@
 const nodemailer = require('nodemailer');
+const MailComposer = require('nodemailer/lib/mail-composer');
+const { google } = require('googleapis');
 
-const transporter = nodemailer.createTransport({
-  host: '173.194.202.108',
-  port: 587,
-  secure: false,
-  requireTLS: true,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-  connectionTimeout: 15000,
-  greetingTimeout: 10000,
-  socketTimeout: 30000,
-  socketOptions: { family: 4 },
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GMAIL_OAUTH_CLIENT_ID,
+  process.env.GMAIL_OAUTH_CLIENT_SECRET,
+  'https://developers.google.com/oauthplayground'
+);
+oauth2Client.setCredentials({
+  refresh_token: process.env.GMAIL_OAUTH_REFRESH_TOKEN,
 });
+const gmailClient = google.gmail({ version: 'v1', auth: oauth2Client });
+
+async function sendViaGmail({ from, to, subject, html }) {
+  const mail = new MailComposer({ from, to, subject, html, encoding: 'UTF-8' });
+  const rawBuffer = await new Promise((resolve, reject) => {
+    mail.compile().build((err, msg) => {
+      if (err) return reject(err);
+      resolve(msg);
+    });
+  });
+  const raw = rawBuffer
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+  await gmailClient.users.messages.send({
+    userId: 'me',
+    requestBody: { raw },
+  });
+}
 
 async function sendApiKeyEmail(email, apiKey) {
   console.log('[Email] Attempting to send API key email to:', email);
-  console.log('[Email] GMAIL_USER exists:', !!process.env.GMAIL_USER);
 
-  await transporter.sendMail({
-    from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+  await sendViaGmail({
+    from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
     to: email,
     subject: '🔑 Your ChargeGuard API Key',
     html: `
@@ -113,8 +128,8 @@ async function sendApiKeyEmail(email, apiKey) {
 
 async function sendRotatedKeyEmail(email, newApiKey) {
   console.log('[Email] Sending rotated API key to:', email);
-  await transporter.sendMail({
-    from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+  await sendViaGmail({
+    from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
     to: email,
     subject: '🔑 Your ChargeGuard API Key Has Been Rotated',
     html: `
@@ -163,14 +178,14 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
 
   const RETRIES = 3;
   const RETRY_DELAY_MS = 5000;
-  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
 
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[AttackAlert] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
-      await transporter.sendMail({
-        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+      console.log(`[AttackAlert] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
         subject: `🛡️ ChargeGuard blocked ${attackCount} attacks on ${storeDisplay}`,
     html: `
@@ -265,9 +280,9 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
       return;
     } catch (err) {
       lastError = err;
-      const code = err.code || err.responseCode || 'UNKNOWN';
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
       console.error(`[AttackAlert] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
-      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
       console.log(`[AttackAlert] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
@@ -503,14 +518,14 @@ async function sendWeeklySummaryEmail({
   // ── Send with retry (same pattern as sendAttackAlertEmail) ──────────────
   const RETRIES          = 3;
   const RETRY_DELAY_MS   = 5000;
-  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
 
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[WeeklySummary] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
-      await transporter.sendMail({
-        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+      console.log(`[WeeklySummary] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to:   tenant.email,
         subject,
         html: fullHtml,
@@ -519,9 +534,9 @@ async function sendWeeklySummaryEmail({
       return;
     } catch (err) {
       lastError = err;
-      const code = err.code || err.responseCode || 'UNKNOWN';
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
       console.error(`[WeeklySummary] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
-      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
       console.log(`[WeeklySummary] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
@@ -534,14 +549,14 @@ async function sendConfirmationEmail(email, confirmUrl) {
 
   const RETRIES = 3;
   const RETRY_DELAY_MS = 5000;
-  const RETRYABLE_ERRORS = ['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'ESOCKET', 'ENOTFOUND'];
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
 
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[Confirmation] 📡 Attempt ${attempt}/${RETRIES} — connecting to smtp.gmail.com:587`);
-      await transporter.sendMail({
-        from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+      console.log(`[Confirmation] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
         subject: '✉️ Confirm your ChargeGuard account',
         html: `
@@ -617,9 +632,9 @@ async function sendConfirmationEmail(email, confirmUrl) {
       return;
     } catch (err) {
       lastError = err;
-      const code = err.code || err.responseCode || 'UNKNOWN';
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
       console.error(`[Confirmation] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
-      if (!RETRYABLE_ERRORS.includes(code) || attempt === RETRIES) break;
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
       console.log(`[Confirmation] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
