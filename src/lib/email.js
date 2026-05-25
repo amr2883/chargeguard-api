@@ -12,6 +12,7 @@ const transporter = nodemailer.createTransport({
   connectionTimeout: 15000,
   greetingTimeout: 10000,
   socketTimeout: 30000,
+  socketOptions: { family: 4 },
 });
 
 async function sendApiKeyEmail(email, apiKey) {
