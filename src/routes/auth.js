@@ -77,4 +77,33 @@ router.post('/connect', async (req, res) => {
   }
 });
 
+/**
+ * GET /api/auth/verify
+ * Plugin يتحقق إن الـ API Key لا يزال صالحاً
+ */
+router.get('/verify', async (req, res) => {
+  try {
+    const apiKey = req.headers['x-api-key'];
+
+    if (!apiKey) {
+      return res.status(401).json({ error: 'Missing x-api-key header' });
+    }
+
+    const tenant = await db.tenant.findUnique({
+      where:  { apiKey },
+      select: { id: true, isActive: true },
+    });
+
+    if (!tenant || !tenant.isActive) {
+      return res.status(401).json({ error: 'Invalid API key' });
+    }
+
+    return res.status(200).json({ valid: true });
+
+  } catch (err) {
+    logger.error('Auth verify error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 module.exports = router;

@@ -6,6 +6,7 @@ class ChargeGuard_Admin_Settings {
         add_action('admin_init', [$this, 'register_settings']);
         add_action('wp_ajax_chargeguard_connect', [$this, 'ajax_connect']);
         add_action('wp_ajax_chargeguard_disconnect', [$this, 'ajax_disconnect']);
+        add_action('wp_ajax_chargeguard_verify_key',  [$this, 'ajax_verify_key']);
     }
 
     public function add_admin_menu() {
@@ -20,18 +21,43 @@ class ChargeGuard_Admin_Settings {
     }
 
     public function register_settings() {
-        register_setting('chargeguard_settings', 'chargeguard_api_key', 'sanitize_text_field');
-        register_setting('chargeguard_settings', 'chargeguard_merchant_id', 'sanitize_text_field');
-        register_setting('chargeguard_settings', 'chargeguard_webhook_secret', 'sanitize_text_field');
-        register_setting('chargeguard_settings', 'chargeguard_stripe_webhook_secret', 'sanitize_text_field');
-        register_setting('chargeguard_settings', 'chargeguard_enable_firewall', 'intval');
-        register_setting('chargeguard_settings', 'chargeguard_firewall_block_duration', 'intval');
-
+        register_setting('chargeguard_firewall_settings', 'chargeguard_enable_firewall', 'intval');
+        register_setting('chargeguard_firewall_settings', 'chargeguard_firewall_block_duration', 'intval');
         // Trust Badge options
-        register_setting( 'chargeguard_settings', 'chargeguard_badge_enabled',  'sanitize_text_field' );
-        register_setting( 'chargeguard_settings', 'chargeguard_badge_location', 'sanitize_text_field' );
-        register_setting( 'chargeguard_settings', 'chargeguard_badge_color',    'sanitize_text_field' );
+        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_enabled',  'sanitize_text_field' );
+        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_location', 'sanitize_text_field' );
+        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_color',    'sanitize_text_field' );
     }
+    public function ajax_verify_key() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+
+        $api_key = get_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'No API key found.']);
+        }
+
+        $response = wp_remote_get('https://chargeguard-api.onrender.com/api/auth/verify', [
+            'timeout' => 15,
+            'headers' => ['x-api-key' => $api_key],
+        ]);
+
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+
+        if ($code === 200) {
+            wp_send_json_success(['message' => '✓ API key is valid.']);
+        } else {
+            wp_send_json_error(['message' => 'Invalid API key. Please reconnect your store.']);
+        }
+    }
+
     public function ajax_connect() {
         check_ajax_referer('chargeguard_connect_nonce', 'nonce');
 
@@ -284,10 +310,16 @@ class ChargeGuard_Admin_Settings {
 
             <!-- ✅ Connected State -->
             <div class="cg-card">
-                <div class="cg-status-badge connected">
-                    <div class="cg-dot green"></div>
-                    Active — Your store is protected
+                <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+                    <div class="cg-status-badge connected" style="margin-bottom:0;">
+                        <div class="cg-dot green"></div>
+                        Active — Your store is protected
+                    </div>
+                    <button type="button" id="cg-verify-key-btn" class="button">
+                        <?php esc_html_e( 'Verify Key', 'chargeguard-woocommerce' ); ?>
+                    </button>
                 </div>
+                <div id="cg-key-status" style="display:none;font-size:12px;padding:6px 10px;border-radius:6px;margin-bottom:10px;"></div>
                 <div class="cg-info-row">
                     <span class="cg-info-label">Connected Account</span>
                     <span class="cg-info-value"><?php echo esc_html($connected_email); ?></span>
@@ -352,7 +384,7 @@ class ChargeGuard_Admin_Settings {
         <div class="cg-card">
             <h3 style="margin:0 0 16px;font-size:15px;">⚙️ Firewall Settings</h3>
             <form method="post" action="options.php">
-                <?php settings_fields('chargeguard_settings'); ?>
+                <?php settings_fields('chargeguard_firewall_settings'); ?>
                 <div class="cg-info-row">
                     <span class="cg-info-label">Enable Firewall</span>
                     <input type="checkbox" name="chargeguard_enable_firewall" value="1" <?php checked(1, $firewall_enabled); ?> />
@@ -373,7 +405,7 @@ class ChargeGuard_Admin_Settings {
             </p>
 
             <form method="post" action="options.php">
-                <?php settings_fields( 'chargeguard_settings' ); ?>
+                <?php settings_fields( 'chargeguard_badge_settings' ); ?>
 
                 <!-- تفعيل/تعطيل -->
                 <div class="cg-info-row">
@@ -477,7 +509,43 @@ class ChargeGuard_Admin_Settings {
                 });
             });
 
-            // ── Disconnect ───────────────────────────────────────────
+            // ── Verify Key ───────────────────────────────────────────────
+            $('#cg-verify-key-btn').on('click', function() {
+                const $btn    = $(this);
+                const $status = $('#cg-key-status');
+
+                $btn.prop('disabled', true).text('Verifying…');
+                $status.hide().css({ background: '', border: '', color: '' });
+
+                $.post(ajaxurl, {
+                    action: 'chargeguard_verify_key',
+                    nonce:  nonce,
+                }, function(res) {
+                    if (res.success) {
+                        $status.css({
+                            background: '#f0fdf4',
+                            border:     '1px solid #bbf7d0',
+                            color:      '#16a34a',
+                        }).text('✓ API key is valid and active.').show();
+                    } else {
+                        $status.css({
+                            background: '#fef2f2',
+                            border:     '1px solid #fecaca',
+                            color:      '#dc2626',
+                        }).text('✗ ' + (res.data.message || 'Invalid API key. Please reconnect.')).show();
+                    }
+                }).fail(function() {
+                    $status.css({
+                        background: '#fef2f2',
+                        border:     '1px solid #fecaca',
+                        color:      '#dc2626',
+                    }).text('✗ Could not reach server. Try again.').show();
+                }).always(function() {
+                    $btn.prop('disabled', false).text('Verify Key');
+                });
+            });
+
+            // ── Disconnect ───────────────────────────────────────────────
             $('#cg-disconnect-btn').on('click', function() {
                 if (!confirm('Are you sure you want to disconnect ChargeGuard?')) return;
                 const $btn = $(this);
