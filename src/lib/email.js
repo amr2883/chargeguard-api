@@ -136,4 +136,117 @@ async function sendRotatedKeyEmail(email, newApiKey) {
   console.log('[Email] ✅ Rotation email sent to:', email);
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail };
+async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinutes = 10) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const savedFormatted = savedAmount.toLocaleString('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    minimumFractionDigits: 2,
+  });
+
+  const now = new Date();
+  const timeStr = now.toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    timeZone: 'UTC', timeZoneName: 'short',
+  });
+
+  await transporter.sendMail({
+    from: `"ChargeGuard" <${process.env.GMAIL_USER}>`,
+    to: tenant.email,
+    subject: `🛡️ ChargeGuard blocked ${attackCount} attacks on ${storeDisplay}`,
+    html: `
+      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+        <!-- Header -->
+        <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+          <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+            <td style="vertical-align:middle;">
+              <table cellpadding="0" cellspacing="0"><tr>
+                <td style="padding-right:10px;vertical-align:middle;">
+                  <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                      <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                    </svg>
+                  </div>
+                </td>
+                <td style="vertical-align:middle;">
+                  <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+                </td>
+              </tr></table>
+            </td>
+            <td style="text-align:right;vertical-align:middle;">
+              <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">${timeStr}</span>
+            </td>
+          </tr></table>
+        </div>
+
+        <!-- Victory Banner -->
+        <div style="background:linear-gradient(135deg,#052e16,#14532d);padding:28px 32px;border-left:1px solid #166534;border-right:1px solid #166534;">
+          <p style="font-size:13px;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 8px;font-weight:600;">⚔️ Attack Neutralized</p>
+          <h1 style="font-size:32px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">
+            ${attackCount} attacks blocked
+          </h1>
+          <p style="font-size:15px;color:#86efac;margin:0;">on <strong>${storeDisplay}</strong> in the last ${windowMinutes} minutes</p>
+        </div>
+
+        <!-- Stats Row -->
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;padding:24px 32px;">
+          <table cellpadding="0" cellspacing="0" style="width:100%;">
+            <tr>
+              <td style="width:50%;padding-right:12px;">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;">
+                  <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 6px;">Attacks Blocked</p>
+                  <p style="font-size:28px;font-weight:800;color:#0f172a;margin:0;line-height:1;">${attackCount}</p>
+                  <p style="font-size:12px;color:#64748b;margin:4px 0 0;">card testing attempts</p>
+                </div>
+              </td>
+              <td style="width:50%;padding-left:12px;">
+                <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:18px 20px;">
+                  <p style="font-size:11px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 6px;">Estimated Savings</p>
+                  <p style="font-size:28px;font-weight:800;color:#16a34a;margin:0;line-height:1;">${savedFormatted}</p>
+                  <p style="font-size:12px;color:#64748b;margin:4px 0 0;">in dispute fees prevented</p>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- What happened -->
+        <div style="padding:24px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+          <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 12px;">What just happened?</h3>
+          <p style="font-size:14px;color:#475569;line-height:1.7;margin:0 0 16px;">
+            A bot attempted to test stolen card numbers on your store. ChargeGuard's firewall detected the pattern and blocked all <strong>${attackCount} attempts</strong> before any transaction could go through.
+          </p>
+          <p style="font-size:14px;color:#475569;line-height:1.7;margin:0;">
+            Your customers' checkout experience was <strong>not affected</strong>. Only the fraudulent requests were blocked.
+          </p>
+        </div>
+
+        <!-- CTA -->
+        <div style="padding:20px 32px 28px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+          <a href="https://chargeguard-woocommerce-backend.onrender.com/api/dashboard"
+             style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+            View Full Attack Report →
+          </a>
+        </div>
+
+        <!-- Footer -->
+        <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+          <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+            You're receiving this because ChargeGuard detected an active attack on your store.
+            Alerts are sent at most once every 6 hours to avoid inbox flooding.
+          </p>
+        </div>
+
+      </div>
+    `,
+  });
+
+  console.log(`[AttackAlert] ✅ Alert sent to ${tenant.email} — ${attackCount} attacks, ${savedFormatted} saved`);
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail };

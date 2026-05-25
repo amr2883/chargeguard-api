@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { runFastCleanup, runDailyRetention } = require('./lib/retention');
+const { startAttackAlertScheduler } = require('./lib/attackAlertScheduler');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -40,13 +41,13 @@ const dashboardRoutes = require('./routes/dashboard');
 app.use('/api/risk',  riskRoutes);
 app.use('/api/auth',  authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
-// Morgan ãÚØøá áÜ /admin áãäÚ ÊÓÌíá ÇáÜ secret Ýí ÇááæÛ
+// Morgan ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ /admin ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ secret ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
 }, adminRoutes);
 
-// ?? Global error handler — MUST be after all routes ??????????
+// ?? Global error handler ï¿½ MUST be after all routes ??????????
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
     return next(err);
@@ -64,7 +65,7 @@ app.get('/metrics', async (req, res) => {
 });
 
 // ============================================================
-//  äÞØÉ GET áÊäÙíÝ ÇáØáÈÇÊ ÇáãÍÙæÑÉ æÅÈÞÇÁ ÇáÎÇÏã ãÓÊíÞÙðÇ
+//  ï¿½ï¿½ï¿½ï¿½ GET ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 // ============================================================
 app.get('/api/retention-config', (req, res) => {
   const { RETENTION } = require('./lib/retention');
@@ -72,7 +73,7 @@ app.get('/api/retention-config', (req, res) => {
 });
 
 app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ? External ping — running fast cleanup...`);
+  console.log(`[${new Date().toISOString()}] ? External ping ï¿½ running fast cleanup...`);
   try {
     await runFastCleanup(prismaForCleanup);
     res.json({ success: true });
@@ -88,33 +89,33 @@ app.get('/api/cleanup-now', async (req, res) => {
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const DAILY_RETENTION_MS  = 24 * 60 * 60 * 1000;
 
-// prisma ãÔÊÑß áÜ FastCleanup ÝÞØ (íÈÞì ãÝÊæÍÇð Øæá ÚãÑ ÇáÎÇÏã)
+// prisma ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ FastCleanup ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
 const { PrismaClient } = require('@prisma/client');
 const prismaForCleanup = new PrismaClient();
 
 app.listen(PORT, () => {
   console.log(`?? Server running on http://localhost:${PORT}`);
 
-  // ?? 1) Fast cleanup (every 10 min) — blocked orders, expired blacklist, stale pending
+  // ?? 1) Fast cleanup (every 10 min) ï¿½ blocked orders, expired blacklist, stale pending
   setTimeout(() => {
     console.log(`[${new Date().toISOString()}] ?? Fast cleanup scheduler started (every 10 min)`);
     setInterval(() => runFastCleanup(prismaForCleanup), CLEANUP_INTERVAL_MS);
   }, 30 * 1000);
 
-  // ?? 2) Daily retention (every 24h) — full data retention policy
+  // ?? 2) Daily retention (every 24h) ï¿½ full data retention policy
   setTimeout(() => {
     const { RETENTION } = require('./lib/retention');
     console.log(`[${new Date().toISOString()}] ???  Daily retention scheduler started (every 24h)`);
     console.log(`[${new Date().toISOString()}] ?? Retention config (days):`, RETENTION);
     runDailyRetention();
     setInterval(runDailyRetention, DAILY_RETENTION_MS);
-  }, 5 * 60 * 1000); // ÈÚÏ 5 ÏÞÇÆÞ ãä ÈÏÁ ÇáÎÇÏã (íãäÍ ÇáÎÇÏã æÞÊ ááÇÓÊÞÑÇÑ)
+  }, 5 * 60 * 1000); // ï¿½ï¿½ï¿½ 5 ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
 
   // ?? 3) Keep-alive self-ping (every 14 min) ????????????????????
-  // Render Free tier íäÇã ÈÚÏ 15 ÏÞíÞÉ ãä ÛíÇÈ HTTP requests ÎÇÑÌíÉ.
-  // åÐÇ ÇáÜ ping íÑÓá request ÍÞíÞí ãä ÇáÎÇÏã áäÝÓå ÚÈÑ ÇáÔÈßÉ
-  // ÍÊì ÊÓÌøáå Render ßÜ activity æÊãäÚ ÇáÜ cold start.
-  // áÇ äÓÊÎÏã Ãí ãßÊÈÉ ÎÇÑÌíÉ — http/https ÇáÞíÇÓí ÝÞØ.
+  // Render Free tier ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ 15 ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ HTTP requests ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½.
+  // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ping ï¿½ï¿½ï¿½ï¿½ request ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+  // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ Render ï¿½ï¿½ activity ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ cold start.
+  // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ http/https ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½.
   const KEEP_ALIVE_MS = 14 * 60 * 1000;
   const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
 
@@ -131,12 +132,14 @@ app.listen(PORT, () => {
         console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping failed: ${err.message}`);
       });
       req.setTimeout(10000, () => {
-        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping timeout — destroying request`);
+        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping timeout ï¿½ destroying request`);
         req.destroy();
       });
     };
 
     setInterval(selfPing, KEEP_ALIVE_MS);
-    console.log(`[${new Date().toISOString()}] ?? Keep-alive started — pinging ${RENDER_URL}/health every 14 min`);
+    console.log(`[${new Date().toISOString()}] ?? Keep-alive started ï¿½ pinging ${RENDER_URL}/health every 14 min`);
   }, 60 * 1000);
+    // ðŸš¨ 4) Attack Alert Scheduler (every 2 min)
+  startAttackAlertScheduler(prismaForCleanup);
 });
