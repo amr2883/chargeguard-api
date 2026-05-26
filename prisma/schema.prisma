@@ -310,6 +310,7 @@ model BlockedAttempt {
   reason      String   // card_testing, velocity, blacklist, pattern
   ipHash      String?  // SHA-256 للـ IP — لا نخزن IP الكامل (GDPR)
   amountAttempted Float?
+  riskScore       Int?
 
   @@index([tenantId, blockedAt])
 }

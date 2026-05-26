@@ -1943,6 +1943,13 @@ router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, verifyHmacS
       if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) safeAmount = amt;
     }
 
+    // riskScore: integer 0-100, nullable for legacy data
+    let safeRiskScore = null;
+    if (req.body.riskScore != null) {
+      const rs = parseInt(req.body.riskScore, 10);
+      if (!isNaN(rs) && rs >= 0 && rs <= 100) safeRiskScore = rs;
+    }
+
     await db.blockedAttempt.create({
       data: {
         tenantId:        req.tenant.id,
@@ -1951,6 +1958,7 @@ router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, verifyHmacS
         reason:          reason,
         ipHash:          safeIpHash,
         amountAttempted: safeAmount,
+        riskScore:       safeRiskScore,
       },
     });
 
