@@ -13,6 +13,9 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_blacklist_get',    [$this, 'ajax_blacklist_get']);
         add_action('wp_ajax_chargeguard_blacklist_add',    [$this, 'ajax_blacklist_add']);
         add_action('wp_ajax_chargeguard_blacklist_delete', [$this, 'ajax_blacklist_delete']);
+        add_action('wp_ajax_chargeguard_webhook_save',     [$this, 'ajax_webhook_save']);
+        add_action('wp_ajax_chargeguard_webhook_test',     [$this, 'ajax_webhook_test']);
+        add_action('wp_ajax_chargeguard_webhook_status',   [$this, 'ajax_webhook_status']);
     }
 
     public function add_admin_menu() {
@@ -327,6 +330,96 @@ class ChargeGuard_Admin_Settings {
             wp_send_json_success();
         } else {
             wp_send_json_error(['message' => 'Failed to delete entry.']);
+        }
+    }
+
+    public function ajax_webhook_save() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $webhook_url  = sanitize_text_field(wp_unslash($_POST['webhook_url']  ?? ''));
+        $webhook_type = sanitize_text_field(wp_unslash($_POST['webhook_type'] ?? 'custom'));
+        if (!in_array($webhook_type, ['slack', 'discord', 'custom'])) {
+            $webhook_type = 'custom';
+        }
+        $response = wp_remote_post(
+            'https://chargeguard-api.onrender.com/api/settings/webhook',
+            [
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode(['webhookUrl' => $webhook_url, 'webhookType' => $webhook_type]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code === 200) {
+            wp_send_json_success();
+        } else {
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to save webhook settings.']);
+        }
+    }
+
+    public function ajax_webhook_test() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_post(
+            'https://chargeguard-api.onrender.com/api/settings/webhook/test',
+            [
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode([]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code === 200) {
+            wp_send_json_success();
+        } else {
+            $body = json_decode(wp_remote_retrieve_body($response), true);
+            wp_send_json_error(['message' => $body['error'] ?? 'Test failed. Check your webhook URL.']);
+        }
+    }
+
+    public function ajax_webhook_status() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_get(
+            'https://chargeguard-api.onrender.com/api/settings/webhook',
+            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if (!empty($body['success'])) {
+            wp_send_json_success(['webhookUrl' => $body['webhookUrl'] ?? '', 'webhookType' => $body['webhookType'] ?? '', 'webhookLastStatus' => $body['webhookLastStatus'] ?? '', 'webhookLastSentAt' => $body['webhookLastSentAt'] ?? '', 'webhookFailureCount' => $body['webhookFailureCount'] ?? 0]);
+        } else {
+            wp_send_json_error(['message' => 'Failed to fetch webhook status.']);
         }
     }
 
@@ -777,6 +870,65 @@ class ChargeGuard_Admin_Settings {
             </div>
         </div>
 
+        <!-- Notification Channels -->
+        <?php if ($is_connected): ?>
+        <div class="cg-card" id="cg-notification-channels">
+            <h3 style="margin:0 0 4px;font-size:15px;">📢 Notification Channels</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Receive attack alerts in Slack or Discord alongside email notifications.
+            </p>
+
+            <div class="cg-info-row">
+                <span class="cg-info-label">Email Notifications</span>
+                <span class="cg-info-value" style="color:#16a34a;">✅ Always Active</span>
+            </div>
+
+            <div style="border-top:1px solid #f0f0f0;padding-top:14px;margin-top:4px;">
+                <label style="font-size:13px;font-weight:600;color:#333;">Webhook Platform</label>
+                <div style="display:flex;gap:0;margin:10px 0 16px;border:1px solid #ddd;border-radius:8px;overflow:hidden;">
+                    <button class="cg-webhook-tab cg-webhook-active" data-type="slack"
+                        style="flex:1;padding:10px;border:none;background:#f0fdf4;cursor:pointer;font-size:13px;font-weight:600;color:#16a34a;">
+                        Slack
+                    </button>
+                    <button class="cg-webhook-tab" data-type="discord"
+                        style="flex:1;padding:10px;border:none;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:#999;border-left:1px solid #ddd;">
+                        Discord
+                    </button>
+                    <button class="cg-webhook-tab" data-type="custom"
+                        style="flex:1;padding:10px;border:none;background:#fff;cursor:pointer;font-size:13px;font-weight:600;color:#999;border-left:1px solid #ddd;">
+                        Custom
+                    </button>
+                </div>
+                <p id="cg-webhook-guide" style="font-size:12px;color:#94a3b8;margin:0 0 12px;">
+                    Create an <strong>Incoming Webhook</strong> in Slack → paste the URL below.
+                </p>
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:100px;">Webhook URL</span>
+                <input type="url" id="cg-webhook-url" class="cg-input"
+                       placeholder="https://hooks.slack.com/services/..."
+                       style="flex:1;min-width:220px;margin:0;" />
+            </div>
+
+            <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap;">
+                <button id="cg-webhook-save" class="cg-btn cg-btn-primary" style="margin:0;">
+                    💾 Save Webhook
+                </button>
+                <button id="cg-webhook-test" class="cg-btn" style="margin:0;background:#fff;color:#f97316;border:1px solid #f97316;">
+                    📤 Send Test Notification
+                </button>
+                <div id="cg-webhook-status" style="font-size:12px;color:#94a3b8;display:flex;align-items:center;gap:6px;">
+                    <span id="cg-webhook-status-dot" style="display:none;width:8px;height:8px;border-radius:50%;"></span>
+                    <span id="cg-webhook-status-text">Not configured</span>
+                </div>
+            </div>
+            <div id="cg-webhook-message" class="cg-message" style="margin-top:10px;"></div>
+        </div>
+        <?php endif; ?>
+
+        </div>
+
         <script>        (function($) {
             const nonce          = '<?php echo esc_js($nonce); ?>';
             const cgCurrentIp    = '<?php echo esc_js($current_admin_ip); ?>';
@@ -1059,6 +1211,106 @@ class ChargeGuard_Admin_Settings {
                     nonce:  nonce,
                 }, function(res) {
                     if (res.success) location.reload();
+                });
+            });
+
+            // ── Webhook ────────────────────────────────────────────────
+            const $webhookUrl    = $('#cg-webhook-url');
+            const $webhookMsg    = $('#cg-webhook-message');
+            const $webhookStatus = $('#cg-webhook-status-text');
+            const $webhookDot    = $('#cg-webhook-status-dot');
+            let currentType      = 'slack';
+
+            // Tab switcher
+            $('.cg-webhook-tab').on('click', function() {
+                currentType = $(this).data('type');
+                $('.cg-webhook-tab').css({ background:'#fff', color:'#999' });
+                $(this).css({ background:'#f0fdf4', color:'#16a34a' });
+                // Update guide text
+                const guides = {
+                    slack:  'Create an <strong>Incoming Webhook</strong> in Slack → paste the URL below.',
+                    discord: 'Create an <strong>Incoming Webhook</strong> in Discord → paste the URL below.',
+                    custom: 'Enter any HTTPS URL that accepts JSON POST requests.'
+                };
+                $('#cg-webhook-guide').html(guides[currentType] || guides.custom);
+            });
+
+            // Load saved settings on page load
+            $.post(ajaxurl, { action: 'chargeguard_webhook_status', nonce }, function(res) {
+                if (res.success) {
+                    const d = res.data;
+                    if (d.webhookUrl) {
+                        $webhookUrl.val(d.webhookUrl);
+                        currentType = d.webhookType || 'custom';
+                        $('.cg-webhook-tab').css({ background:'#fff', color:'#999' });
+                        const $tab = $('.cg-webhook-tab[data-type="' + currentType + '"]');
+                        if ($tab.length) $tab.css({ background:'#f0fdf4', color:'#16a34a' });
+                        else { currentType = 'custom'; $('.cg-webhook-tab[data-type="custom"]').css({ background:'#f0fdf4', color:'#16a34a' }); }
+                    }
+                    if (d.webhookLastStatus === 'success') {
+                        $webhookStatus.text('Last test: successful');
+                        $webhookDot.css({ background:'#16a34a' }).show();
+                    } else if (d.webhookLastStatus === 'failed') {
+                        $webhookStatus.text('Last test: failed (' + (d.webhookFailureCount || 0) + ' attempts)');
+                        $webhookDot.css({ background:'#dc2626' }).show();
+                    } else if (d.webhookUrl) {
+                        $webhookStatus.text('Saved — not tested yet');
+                        $webhookDot.css({ background:'#f59e0b' }).show();
+                    }
+                }
+            });
+
+            // Save webhook
+            $('#cg-webhook-save').on('click', function() {
+                const url   = $webhookUrl.val().trim();
+                const $btn  = $(this);
+                if (!url) {
+                    $webhookMsg.removeClass('success').addClass('error').text('Please enter a webhook URL.').show();
+                    return;
+                }
+                if (!url.startsWith('https://')) {
+                    $webhookMsg.removeClass('success').addClass('error').text('Only HTTPS URLs are allowed.').show();
+                    return;
+                }
+                $btn.prop('disabled', true).text('Saving…');
+                $webhookMsg.hide().removeClass('error success');
+                $.post(ajaxurl, {
+                    action:       'chargeguard_webhook_save',
+                    nonce:        nonce,
+                    webhook_url:  url,
+                    webhook_type: currentType,
+                }, function(res) {
+                    if (res.success) {
+                        $webhookMsg.removeClass('error').addClass('success').text('✓ Webhook saved.').show();
+                        $webhookStatus.text('Saved — not tested yet');
+                        $webhookDot.css({ background:'#f59e0b' }).show();
+                        setTimeout(function() { $webhookMsg.fadeOut(); }, 3000);
+                    } else {
+                        $webhookMsg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to save.').show();
+                    }
+                    $btn.prop('disabled', false).text('💾 Save Webhook');
+                });
+            });
+
+            // Test webhook
+            $('#cg-webhook-test').on('click', function() {
+                const $btn = $(this);
+                $btn.prop('disabled', true).text('Testing…');
+                $webhookMsg.hide().removeClass('error success');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_webhook_test',
+                    nonce:  nonce,
+                }, function(res) {
+                    if (res.success) {
+                        $webhookMsg.removeClass('error').addClass('success').text('✓ Test notification sent! Check your channel.').show();
+                        $webhookStatus.text('Last test: successful');
+                        $webhookDot.css({ background:'#16a34a' }).show();
+                    } else {
+                        $webhookMsg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Test failed. Check your webhook URL.').show();
+                        $webhookStatus.text('Last test: failed');
+                        $webhookDot.css({ background:'#dc2626' }).show();
+                    }
+                    $btn.prop('disabled', false).text('📤 Send Test Notification');
                 });
             });
 
