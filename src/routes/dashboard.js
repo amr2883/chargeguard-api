@@ -172,6 +172,22 @@ const reasonColor = (r) => ({
   pattern:      { bg: '#0c1a2e', text: '#38bdf8', dot: '#0284c7' },
 }[r] ?? { bg: '#1e293b', text: '#94a3b8', dot: '#475569' });
 
+// ── Risk Score Badge ───────────────────────────────────────────
+const riskBadge = (score) => {
+  if (score === null || score === undefined) {
+    return '<span style="color:#334155;font-size:.7rem;">—</span>';
+  }
+  const color = score >= 75 ? '#f87171'
+              : score >= 60 ? '#fb923c'
+              : score >= 40 ? '#fbbf24'
+              :               '#4ade80';
+  const label = score >= 75 ? 'Critical'
+              : score >= 60 ? 'High'
+              : score >= 40 ? 'Medium'
+              :               'Low';
+  return `<span style="background:${color}18;color:${color};border:1px solid ${color}44;border-radius:6px;padding:.2rem .55rem;font-size:.7rem;font-weight:600;font-family:'DM Mono',monospace;white-space:nowrap;" title="Risk Score: ${score}/100 — ${label}">${score} · ${label}</span>`;
+};
+
 const statusColor = { green: '#22c55e', yellow: '#f59e0b', gray: '#64748b', red: '#ef4444' };
 const statusBg    = { green: '#052e16', yellow: '#1c1202', gray: '#0f172a', red: '#1c0202' };
 const statusBorder= { green: '#166534', yellow: '#713f12', gray: '#1e293b', red: '#7f1d1d' };
@@ -227,6 +243,7 @@ const buildDashboardHtml = (tenant, data) => {
         <td class="td-time">${escapeHtml(dateStr)}</td>
         <td>${escapeHtml(a.cardType ? a.cardType.charAt(0).toUpperCase() + a.cardType.slice(1) : '—')}</td>
         <td class="td-mono">${escapeHtml(a.cardBin || '—')}••••••</td>
+        <td class="td-risk">${riskBadge(a.riskScore)}</td>
         <td><span class="badge" style="background:${rc.bg};color:${rc.text}">
           <span class="badge-dot" style="background:${rc.dot}"></span>${reasonLabel(a.reason)}
         </span></td>
@@ -832,6 +849,7 @@ const buildDashboardHtml = (tenant, data) => {
           <th>Time (UTC)</th>
           <th>Card</th>
           <th>BIN</th>
+          <th>Risk Score</th>
           <th>Reason</th>
           <th>Amount</th>
         </tr>
