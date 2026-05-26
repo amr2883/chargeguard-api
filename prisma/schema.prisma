@@ -350,12 +350,27 @@ model PendingEnrichment {
 model BlacklistEntry {
   id         String    @id @default(cuid())
   merchantId String
-  type       String // EMAIL, IP, DEVICE_FINGERPRINT
+  type       String // EMAIL, IP, DEVICE_FINGERPRINT, BIN
   value      String // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة)
   reason     String? // سبب الإضافة
   expiresAt  DateTime? // تاريخ انتهاء الحظر (اختياري)
   createdAt  DateTime  @default(now())
   createdBy  String? // من أضافها (مثل admin@store.com)
+
+  @@unique([merchantId, type, value])
+  @@index([merchantId, type, expiresAt])
+}
+
+// ========== Whitelist (per merchant) ==========
+model WhitelistEntry {
+  id         String    @id @default(cuid())
+  merchantId String
+  type       String    // EMAIL, IP, BIN
+  value      String
+  reason     String?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  createdBy  String?
 
   @@unique([merchantId, type, value])
   @@index([merchantId, type, expiresAt])

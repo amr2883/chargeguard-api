@@ -103,7 +103,42 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
     logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
 
-    // 0. ��� ������� �������
+    // 0a. Whitelist Check — bypass all checks for trusted entities
+    const whitelistConditions = [];
+    if (email)             whitelistConditions.push({ type: 'EMAIL', value: email });
+    if (ipAddress)         whitelistConditions.push({ type: 'IP',    value: ipAddress });
+    if (bin)               whitelistConditions.push({ type: 'BIN',   value: String(bin).replace(/\D/g, '').slice(0, 6) });
+
+    if (whitelistConditions.length > 0) {
+      const whitelistCheck = await db.whitelistEntry.findFirst({
+        where: {
+          merchantId,
+          OR: whitelistConditions,
+          AND: [{ OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } }
+          ]}]
+        }
+      });
+
+      if (whitelistCheck) {
+        prometheus.recordWhitelistBypass(whitelistCheck.type);
+        logger.info(
+          { module: 'risk', merchantId, type: whitelistCheck.type, orderId },
+          'Request bypassed all checks — whitelisted'
+        );
+        return res.json({
+          orderId,
+          score: 0,
+          decision: 'approve',
+          flags:    [],
+          connectedRisk: 0,
+          whitelisted: true
+        });
+      }
+    }
+
+    // 0b. Blacklist Check
     const blacklistCheck = await db.blacklistEntry.findFirst({
       where: {
         merchantId,
@@ -595,6 +630,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
         createdBy: createdBy || null,
       },
     });
+    prometheus.recordAccessControlAction('add', 'blacklist');
     res.json({ success: true, entry: blacklistEntry });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message }, 'Error adding blacklist entry');
@@ -645,6 +681,7 @@ router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
     }
 
     await db.blacklistEntry.delete({ where: { id } });
+    prometheus.recordAccessControlAction('delete', 'blacklist');
     res.json({ success: true, message: 'Blacklist entry deleted' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
@@ -782,6 +819,109 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
   }
 });
 
+// ========== Whitelist Management Endpoints ==========
+
+router.post('/whitelist', apiKeyAuth, async (req, res) => {
+  try {
+    const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
+    if (!merchantId || !type || !value) {
+      return res.status(400).json({ error: 'merchantId, type, and value are required' });
+    }
+    const validTypes = ['EMAIL', 'IP', 'BIN'];
+    if (!validTypes.includes(type)) {
+      return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
+    }
+
+    const normalizedValue = type === 'BIN'
+      ? String(value).replace(/\D/g, '').slice(0, 6)
+      : value;
+
+    if (type === 'BIN' && normalizedValue.length !== 6) {
+      return res.status(400).json({ error: 'BIN must be exactly 6 digits' });
+    }
+
+    const whitelistEntry = await db.whitelistEntry.create({
+      data: {
+        merchantId,
+        type,
+        value: normalizedValue,
+        reason: reason || null,
+        expiresAt: expiresAt ? new Date(expiresAt) : null,
+        createdBy: createdBy || null,
+      },
+    });
+    prometheus.recordAccessControlAction('add', 'whitelist');
+    res.json({ success: true, entry: whitelistEntry });
+  } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({ error: 'This entry already exists in the whitelist' });
+    }
+    logger.error({ module: 'risk', endpoint: 'whitelist-add', error: error.message }, 'Error adding whitelist entry');
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/whitelist', apiKeyAuth, async (req, res) => {
+  try {
+    const merchantId = req.query.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required (as query param or header)' });
+    }
+
+    const { type, includeExpired } = req.query;
+    const where = { merchantId };
+
+    if (type) {
+      const validTypes = ['EMAIL', 'IP', 'BIN'];
+      if (!validTypes.includes(type)) {
+        return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
+      }
+      where.type = type;
+    }
+
+    if (includeExpired !== 'true') {
+      where.OR = [
+        { expiresAt: null },
+        { expiresAt: { gt: new Date() } }
+      ];
+    }
+
+    const whitelistEntries = await db.whitelistEntry.findMany({
+      where,
+      orderBy: { createdAt: 'desc' }
+    });
+
+    res.json({ success: true, entries: whitelistEntries });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'whitelist-get', error: error.message }, 'Error fetching whitelist');
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.delete('/whitelist/:id', apiKeyAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
+    if (!merchantId) {
+      return res.status(400).json({ error: 'merchantId is required' });
+    }
+
+    const existing = await db.whitelistEntry.findFirst({
+      where: { id, merchantId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Whitelist entry not found or not owned by this merchant' });
+    }
+
+    await db.whitelistEntry.delete({ where: { id } });
+    prometheus.recordAccessControlAction('delete', 'whitelist');
+    res.json({ success: true, message: 'Whitelist entry deleted' });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'whitelist-delete', error: error.message }, 'Error deleting whitelist entry');
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // WooCommerce webhook endpoint
 router.post('/woocommerce-webhook', async (req, res) => {
   try {
@@ -876,6 +1016,40 @@ router.post('/woocommerce-webhook', async (req, res) => {
         if (fpMeta) deviceFingerprint = fpMeta.value;
     }
     riskRequest.deviceFingerprint = deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+
+    // 7a. Whitelist Check
+    const webhookWhitelistConditions = [];
+    if (extracted.email)    webhookWhitelistConditions.push({ type: 'EMAIL', value: extracted.email });
+    if (extracted.ipAddress) webhookWhitelistConditions.push({ type: 'IP',   value: extracted.ipAddress });
+
+    if (webhookWhitelistConditions.length > 0) {
+      const webhookWhitelistCheck = await db.whitelistEntry.findFirst({
+        where: {
+          merchantId,
+          OR: webhookWhitelistConditions,
+          AND: [{ OR: [
+            { expiresAt: null },
+            { expiresAt: { gt: new Date() } }
+          ]}]
+        }
+      });
+
+      if (webhookWhitelistCheck) {
+        prometheus.recordWhitelistBypass(webhookWhitelistCheck.type);
+        logger.info(
+          { module: 'risk', merchantId, type: webhookWhitelistCheck.type, orderId: extracted.orderId },
+          'Webhook request bypassed all checks — whitelisted'
+        );
+        return res.json({
+          orderId: extracted.orderId,
+          score: 0,
+          decision: 'approve',
+          flags: [],
+          connectedRisk: 0,
+          whitelisted: true
+        });
+      }
+    }
 
     // 8. Load recent orders, disputes, blacklist for this merchant
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);

@@ -125,7 +125,14 @@ async function runFastCleanup(prisma) {
       },
     });
 
-    // 3. PendingEnrichment عالقة > 24 ساعة (لم تُعالج ولم تكتمل)
+    // 3. WhitelistEntry منتهية الصلاحية
+    const expiredWhitelist = await prisma.whitelistEntry.deleteMany({
+      where: {
+        expiresAt: { not: null, lt: new Date() },
+      },
+    });
+
+    // 4. PendingEnrichment عالقة > 24 ساعة (لم تُعالج ولم تكتمل)
     const stalePending = await prisma.pendingEnrichment.deleteMany({
       where: {
         createdAt: { lt: hoursAgo(RETENTION.PENDING_ENRICHMENT_HOURS) },
@@ -134,11 +141,12 @@ async function runFastCleanup(prisma) {
     });
 
     // سجّل فقط إذا حُذف شيء (لا نملأ logs بأسطر فارغة)
-    const total = blockedOrders.count + expiredBlacklist.count + stalePending.count;
+    const total = blockedOrders.count + expiredBlacklist.count + expiredWhitelist.count + stalePending.count;
     if (total > 0) {
       console.log(
         `${tag} ✅ FastCleanup — blocked orders: ${blockedOrders.count}, ` +
         `expired blacklist: ${expiredBlacklist.count}, ` +
+        `expired whitelist: ${expiredWhitelist.count}, ` +
         `stale pending: ${stalePending.count}`
       );
     }
@@ -237,7 +245,15 @@ async function runDailyRetention() {
       { lastSeenAt: { lt: daysAgo(RETENTION.CARD_HASH_DAYS) } }
     ));
 
-    // ── 8. Tenants غير مؤكدين > 30 يوم ──────────────────────────────────
+    // ── 8. WhitelistEntry منتهية الصلاحية (احتياطي إذا فاتت FastCleanup) ──
+    await safeClean('whitelistEntry', async () => {
+      const r = await prisma.whitelistEntry.deleteMany({
+        where: { expiresAt: { not: null, lt: new Date() } },
+      });
+      return { total: r.count, batches: 1 };
+    });
+
+    // ── 9. Tenants غير مؤكدين > 30 يوم ──────────────────────────────────
     // مستخدمون سجّلوا بإيميلات وهمية أو لم يكملوا التأكيد خلال شهر كامل
     await safeClean('unverifiedTenant', () => batchDelete(
       prisma, 'tenant',
@@ -263,6 +279,7 @@ async function runDailyRetention() {
       `  • BlockedAttempt:       ${fmt(results.blockedAttempt)}\n` +
       `  • Order:                ${fmt(results.order)}\n` +
       `  • CardHash:             ${fmt(results.cardHash)}\n` +
+      `  • WhitelistEntry:       ${fmt(results.whitelistEntry)}\n` +
       `  • UnverifiedTenant:     ${fmt(results.unverifiedTenant)}`
     );
 

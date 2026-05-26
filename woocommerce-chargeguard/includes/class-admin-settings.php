@@ -7,6 +7,12 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_connect', [$this, 'ajax_connect']);
         add_action('wp_ajax_chargeguard_disconnect', [$this, 'ajax_disconnect']);
         add_action('wp_ajax_chargeguard_verify_key',  [$this, 'ajax_verify_key']);
+        add_action('wp_ajax_chargeguard_whitelist_get',    [$this, 'ajax_whitelist_get']);
+        add_action('wp_ajax_chargeguard_whitelist_add',    [$this, 'ajax_whitelist_add']);
+        add_action('wp_ajax_chargeguard_whitelist_delete', [$this, 'ajax_whitelist_delete']);
+        add_action('wp_ajax_chargeguard_blacklist_get',    [$this, 'ajax_blacklist_get']);
+        add_action('wp_ajax_chargeguard_blacklist_add',    [$this, 'ajax_blacklist_add']);
+        add_action('wp_ajax_chargeguard_blacklist_delete', [$this, 'ajax_blacklist_delete']);
     }
 
     public function add_admin_menu() {
@@ -126,6 +132,204 @@ class ChargeGuard_Admin_Settings {
         wp_send_json_success();
     }
 
+    public function ajax_whitelist_get() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_get(
+            'https://chargeguard-api.onrender.com/api/risk/whitelist?merchantId=' . urlencode($merchant_id),
+            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if (!empty($body['success'])) {
+            wp_send_json_success(['entries' => $body['entries'] ?? []]);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch whitelist.']);
+        }
+    }
+
+    public function ajax_whitelist_add() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $type   = sanitize_text_field(wp_unslash($_POST['type']   ?? ''));
+        $value  = sanitize_text_field(wp_unslash($_POST['value']  ?? ''));
+        $reason = sanitize_text_field(wp_unslash($_POST['reason'] ?? ''));
+        if (!$type || !$value) {
+            wp_send_json_error(['message' => 'Type and value are required.']);
+        }
+        $response = wp_remote_post(
+            'https://chargeguard-api.onrender.com/api/risk/whitelist',
+            [
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode([
+                    'merchantId' => $merchant_id,
+                    'type'       => $type,
+                    'value'      => $value,
+                    'reason'     => $reason ?: null,
+                    'createdBy'  => get_option('chargeguard_connected_email'),
+                ]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code === 200 && !empty($body['success'])) {
+            wp_send_json_success(['entry' => $body['entry'] ?? []]);
+        } elseif ($code === 409) {
+            wp_send_json_error(['message' => 'This entry already exists in the safe list.']);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to add entry.']);
+        }
+    }
+
+    public function ajax_whitelist_delete() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        $id          = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$merchant_id || !$api_key || !$id) {
+            wp_send_json_error(['message' => 'Missing required data.']);
+        }
+        $response = wp_remote_request(
+            'https://chargeguard-api.onrender.com/api/risk/whitelist/' . rawurlencode($id),
+            [
+                'method'  => 'DELETE',
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode(['merchantId' => $merchant_id]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code === 200) {
+            wp_send_json_success();
+        } else {
+            wp_send_json_error(['message' => 'Failed to delete entry.']);
+        }
+    }
+
+    public function ajax_blacklist_get() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_get(
+            'https://chargeguard-api.onrender.com/api/risk/blacklist?merchantId=' . urlencode($merchant_id),
+            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if (!empty($body['success'])) {
+            wp_send_json_success(['entries' => $body['entries'] ?? []]);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch blacklist.']);
+        }
+    }
+
+    public function ajax_blacklist_add() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        if (!$merchant_id || !$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $type   = sanitize_text_field(wp_unslash($_POST['type']   ?? ''));
+        $value  = sanitize_text_field(wp_unslash($_POST['value']  ?? ''));
+        $reason = sanitize_text_field(wp_unslash($_POST['reason'] ?? ''));
+        if (!$type || !$value) {
+            wp_send_json_error(['message' => 'Type and value are required.']);
+        }
+        $response = wp_remote_post(
+            'https://chargeguard-api.onrender.com/api/risk/blacklist',
+            [
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode([
+                    'merchantId' => $merchant_id,
+                    'type'       => $type,
+                    'value'      => $value,
+                    'reason'     => $reason ?: null,
+                    'createdBy'  => get_option('chargeguard_connected_email'),
+                ]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code === 200 && !empty($body['success'])) {
+            wp_send_json_success(['entry' => $body['entry'] ?? []]);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to add entry.']);
+        }
+    }
+
+    public function ajax_blacklist_delete() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $merchant_id = get_option('chargeguard_merchant_id');
+        $api_key     = get_option('chargeguard_api_key');
+        $id          = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$merchant_id || !$api_key || !$id) {
+            wp_send_json_error(['message' => 'Missing required data.']);
+        }
+        $response = wp_remote_request(
+            'https://chargeguard-api.onrender.com/api/risk/blacklist/' . rawurlencode($id),
+            [
+                'method'  => 'DELETE',
+                'timeout' => 15,
+                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
+                'body'    => json_encode(['merchantId' => $merchant_id]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        if ($code === 200) {
+            wp_send_json_success();
+        } else {
+            wp_send_json_error(['message' => 'Failed to delete entry.']);
+        }
+    }
+
     private function register_woocommerce_webhook($secret) {
         $existing = get_option('chargeguard_webhook_id');
         if ($existing) return;
@@ -161,6 +365,15 @@ class ChargeGuard_Admin_Settings {
         $badge_location   = get_option( 'chargeguard_badge_location', 'footer' );
         $badge_color      = get_option( 'chargeguard_badge_color', 'light' );
         $nonce = wp_create_nonce('chargeguard_connect_nonce');
+
+        // IP المسؤول الحالي (مع دعم Proxies)
+        $current_admin_ip = '';
+        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $ips = explode(',', sanitize_text_field(wp_unslash($_SERVER['HTTP_X_FORWARDED_FOR'])));
+            $current_admin_ip = trim($ips[0]);
+        } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
+            $current_admin_ip = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+        }
         ?>
         <div class="wrap" id="chargeguard-wrap">
         <style>
@@ -380,6 +593,106 @@ class ChargeGuard_Admin_Settings {
 
         <?php endif; ?>
 
+        <?php if ($is_connected): ?>
+        <!-- Access Control -->
+        <div class="cg-card" id="cg-access-control">
+            <h3 style="margin:0 0 4px;font-size:15px;">🔐 Access Control</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Trusted visitors always bypass security checks. Blocked visitors are always rejected.
+            </p>
+
+            <!-- Tab Switcher -->
+            <div style="display:flex;gap:0;border-bottom:2px solid #e0e0e0;margin-bottom:20px;">
+                <button class="cg-ac-tab cg-ac-active" data-tab="whitelist"
+                    style="flex:1;padding:10px;border:none;background:none;cursor:pointer;
+                           font-size:13px;font-weight:600;color:#16a34a;
+                           border-bottom:2px solid #16a34a;margin-bottom:-2px;">
+                    ✅ Always Allow
+                </button>
+                <button class="cg-ac-tab" data-tab="blacklist"
+                    style="flex:1;padding:10px;border:none;background:none;cursor:pointer;
+                           font-size:13px;font-weight:600;color:#999;
+                           border-bottom:2px solid transparent;margin-bottom:-2px;">
+                    🚫 Always Block
+                </button>
+            </div>
+
+            <!-- Whitelist Panel -->
+            <div id="cg-tab-whitelist">
+                <!-- Onboarding Banner -->
+                <?php if ($current_admin_ip): ?>
+                <div id="cg-whitelist-onboarding"
+                     style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;
+                            padding:12px 16px;margin-bottom:16px;display:flex;
+                            align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px;">
+                    <span style="font-size:13px;color:#16a34a;">
+                        💡 <strong>Quick setup:</strong> Add your IP to never get blocked
+                        <span style="font-family:monospace;background:#dcfce7;padding:2px 6px;
+                                     border-radius:4px;font-size:12px;">
+                            <?php echo esc_html($current_admin_ip); ?>
+                        </span>
+                    </span>
+                    <button id="cg-add-my-ip" class="cg-btn cg-btn-primary"
+                            style="margin:0;padding:6px 14px;font-size:12px;">
+                        + Add My IP
+                    </button>
+                </div>
+                <?php endif; ?>
+
+                <!-- Add Form -->
+                <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-start;">
+                    <select id="cg-wl-type" class="cg-select" style="min-width:110px;">
+                        <option value="IP">IP Address</option>
+                        <option value="EMAIL">Email</option>
+                        <option value="BIN">Card BIN</option>
+                    </select>
+                    <input type="text" id="cg-wl-value" class="cg-input"
+                           placeholder="e.g. 197.12.34.56"
+                           style="flex:1;min-width:160px;margin:0;" />
+                    <input type="text" id="cg-wl-reason" class="cg-input"
+                           placeholder="Note (optional)"
+                           style="flex:1;min-width:120px;margin:0;" />
+                    <button id="cg-wl-add" class="cg-btn cg-btn-primary"
+                            style="margin:0;white-space:nowrap;">
+                        + Add to Safe List
+                    </button>
+                </div>
+                <div id="cg-wl-message" class="cg-message"></div>
+                <div id="cg-wl-table-wrap">
+                    <p style="color:#999;font-size:13px;">Loading…</p>
+                </div>
+            </div>
+
+            <!-- Blacklist Panel -->
+            <div id="cg-tab-blacklist" style="display:none;">
+                <!-- Add Form -->
+                <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-start;">
+                    <select id="cg-bl-type" class="cg-select" style="min-width:130px;">
+                        <option value="IP">IP Address</option>
+                        <option value="EMAIL">Email</option>
+                        <option value="BIN">Card BIN</option>
+                        <option value="DEVICE_FINGERPRINT">Device ID</option>
+                    </select>
+                    <input type="text" id="cg-bl-value" class="cg-input"
+                           placeholder="e.g. 45.33.32.156"
+                           style="flex:1;min-width:160px;margin:0;" />
+                    <input type="text" id="cg-bl-reason" class="cg-input"
+                           placeholder="Reason (optional)"
+                           style="flex:1;min-width:120px;margin:0;" />
+                    <button id="cg-bl-add" class="cg-btn"
+                            style="margin:0;background:#fef2f2;color:#dc2626;
+                                   border:1px solid #fecaca;white-space:nowrap;">
+                        🚫 Block This
+                    </button>
+                </div>
+                <div id="cg-bl-message" class="cg-message"></div>
+                <div id="cg-bl-table-wrap">
+                    <p style="color:#999;font-size:13px;">Loading…</p>
+                </div>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <!-- Firewall Settings -->
         <div class="cg-card">
             <h3 style="margin:0 0 16px;font-size:15px;">⚙️ Firewall Settings</h3>
@@ -465,7 +778,197 @@ class ChargeGuard_Admin_Settings {
         </div>
 
         <script>        (function($) {
-            const nonce = '<?php echo esc_js($nonce); ?>';
+            const nonce          = '<?php echo esc_js($nonce); ?>';
+            const cgCurrentIp    = '<?php echo esc_js($current_admin_ip); ?>';
+            const cgMerchantId   = '<?php echo esc_js(get_option("chargeguard_merchant_id")); ?>';
+
+            // ── Helper: HTML Escape ──────────────────────────────────
+            function escHtml(str) {
+                return String(str)
+                    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+                    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            }
+
+            // ── Helper: Render Table ─────────────────────────────────
+            function renderTable(entries, wrapId, listType) {
+                const $wrap = $('#' + wrapId);
+                if (!entries || entries.length === 0) {
+                    $wrap.html('<p style="color:#999;font-size:13px;text-align:center;padding:20px 0;">No entries yet.</p>');
+                    return;
+                }
+                let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+                    '<thead><tr style="border-bottom:2px solid #f0f0f0;">' +
+                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;width:80px;">Type</th>' +
+                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;">Value</th>' +
+                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;">Note</th>' +
+                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;width:90px;">Added</th>' +
+                    '<th style="width:32px;"></th></tr></thead><tbody>';
+
+                entries.forEach(function(e) {
+                    const isExpired = e.expiresAt && new Date(e.expiresAt) < new Date();
+                    const dateStr   = new Date(e.createdAt).toLocaleDateString('en-GB', { day:'2-digit', month:'short' });
+                    const valStyle  = isExpired ? 'color:#999;text-decoration:line-through;' : 'font-family:monospace;';
+                    html += '<tr style="border-bottom:1px solid #f8f8f8;">' +
+                        '<td style="padding:9px 4px;"><span style="background:#f1f5f9;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;color:#475569;">' + escHtml(e.type) + '</span></td>' +
+                        '<td style="padding:9px 4px;' + valStyle + '">' + escHtml(e.value) + (isExpired ? ' <span style="color:#f59e0b;font-size:11px;">(expired)</span>' : '') + '</td>' +
+                        '<td style="padding:9px 4px;color:#94a3b8;">' + (e.reason ? escHtml(e.reason) : '—') + '</td>' +
+                        '<td style="padding:9px 4px;color:#94a3b8;">' + dateStr + '</td>' +
+                        '<td style="padding:9px 4px;text-align:center;"><button class="cg-delete-entry" data-id="' + escHtml(e.id) + '" data-list="' + listType + '" title="Remove" style="background:none;border:none;cursor:pointer;color:#fca5a5;font-size:16px;padding:2px 6px;border-radius:4px;" onmouseover="this.style.background=\'#fef2f2\'" onmouseout="this.style.background=\'none\'">×</button></td>' +
+                        '</tr>';
+                });
+                html += '</tbody></table>';
+                $wrap.html(html);
+            }
+
+            // ── Load Whitelist ───────────────────────────────────────
+            function loadWhitelist() {
+                $('#cg-wl-table-wrap').html('<p style="color:#999;font-size:13px;">Loading…</p>');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_whitelist_get',
+                    nonce:  nonce,
+                    merchantId: cgMerchantId,
+                }, function(res) {
+                    if (res.success) {
+                        renderTable(res.data.entries, 'cg-wl-table-wrap', 'whitelist');
+                        if (res.data.entries && res.data.entries.length > 0) {
+                            $('#cg-whitelist-onboarding').hide();
+                        }
+                    }
+                });
+            }
+
+            // ── Load Blacklist ───────────────────────────────────────
+            function loadBlacklist() {
+                $('#cg-bl-table-wrap').html('<p style="color:#999;font-size:13px;">Loading…</p>');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_blacklist_get',
+                    nonce:  nonce,
+                    merchantId: cgMerchantId,
+                }, function(res) {
+                    if (res.success) {
+                        renderTable(res.data.entries, 'cg-bl-table-wrap', 'blacklist');
+                    }
+                });
+            }
+
+            // ── Tab Switcher ─────────────────────────────────────────
+            $(document).on('click', '.cg-ac-tab', function() {
+                const tab = $(this).data('tab');
+                $('.cg-ac-tab').css({ color:'#999', borderBottomColor:'transparent' });
+                $(this).css({
+                    color: tab === 'whitelist' ? '#16a34a' : '#dc2626',
+                    borderBottomColor: tab === 'whitelist' ? '#16a34a' : '#dc2626'
+                });
+                $('#cg-tab-whitelist, #cg-tab-blacklist').hide();
+                $('#cg-tab-' + tab).show();
+                if (tab === 'whitelist') loadWhitelist();
+                else loadBlacklist();
+            });
+
+            // ── Add My IP ────────────────────────────────────────────
+            $('#cg-add-my-ip').on('click', function() {
+                const $btn = $(this);
+                $btn.prop('disabled', true).text('Adding…');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_whitelist_add',
+                    nonce:  nonce,
+                    type:   'IP',
+                    value:  cgCurrentIp,
+                    reason: 'My admin IP — added automatically',
+                }, function(res) {
+                    if (res.success) {
+                        $('#cg-whitelist-onboarding').slideUp(300);
+                        loadWhitelist();
+                    } else {
+                        $btn.prop('disabled', false).text('+ Add My IP');
+                    }
+                });
+            });
+
+            // ── Dynamic Placeholder ──────────────────────────────────
+            const wlPlaceholders = { IP:'e.g. 197.12.34.56', EMAIL:'e.g. john@mystore.com', BIN:'e.g. 411111 (first 6 digits)' };
+            const blPlaceholders = { IP:'e.g. 45.33.32.156', EMAIL:'e.g. fraud@example.com', BIN:'e.g. 411111 (first 6 digits)', DEVICE_FINGERPRINT:'Device fingerprint ID' };
+            $('#cg-wl-type').on('change', function() { $('#cg-wl-value').attr('placeholder', wlPlaceholders[$(this).val()] || ''); });
+            $('#cg-bl-type').on('change', function() { $('#cg-bl-value').attr('placeholder', blPlaceholders[$(this).val()] || ''); });
+
+            // ── Add to Whitelist ─────────────────────────────────────
+            $('#cg-wl-add').on('click', function() {
+                const type   = $('#cg-wl-type').val();
+                const value  = $('#cg-wl-value').val().trim();
+                const reason = $('#cg-wl-reason').val().trim();
+                const $msg   = $('#cg-wl-message');
+                if (!value) {
+                    $msg.removeClass('success').addClass('error').text('Please enter a value.').show();
+                    return;
+                }
+                $(this).prop('disabled', true).text('Adding…');
+                $msg.hide().removeClass('error success');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_whitelist_add',
+                    nonce, type, value, reason,
+                }, function(res) {
+                    if (res.success) {
+                        $('#cg-wl-value, #cg-wl-reason').val('');
+                        $msg.removeClass('error').addClass('success').text('✓ Added to safe list.').show();
+                        loadWhitelist();
+                        setTimeout(function() { $msg.fadeOut(); }, 3000);
+                    } else {
+                        $msg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to add. Try again.').show();
+                    }
+                    $('#cg-wl-add').prop('disabled', false).text('+ Add to Safe List');
+                });
+            });
+
+            // ── Add to Blacklist ─────────────────────────────────────
+            $('#cg-bl-add').on('click', function() {
+                const type   = $('#cg-bl-type').val();
+                const value  = $('#cg-bl-value').val().trim();
+                const reason = $('#cg-bl-reason').val().trim();
+                const $msg   = $('#cg-bl-message');
+                if (!value) {
+                    $msg.removeClass('success').addClass('error').text('Please enter a value.').show();
+                    return;
+                }
+                if (type === 'IP' && value === cgCurrentIp) {
+                    if (!window.confirm('⚠️ Warning\n\nThis is your current admin IP address.\nBlocking it may disrupt your store\'s connection to ChargeGuard.\n\nAre you absolutely sure?')) return;
+                }
+                $(this).prop('disabled', true).text('Blocking…');
+                $msg.hide().removeClass('error success');
+                $.post(ajaxurl, {
+                    action: 'chargeguard_blacklist_add',
+                    nonce, type, value, reason,
+                }, function(res) {
+                    if (res.success) {
+                        $('#cg-bl-value, #cg-bl-reason').val('');
+                        $msg.removeClass('error').addClass('success').text('✓ Added to blocked list.').show();
+                        loadBlacklist();
+                        setTimeout(function() { $msg.fadeOut(); }, 3000);
+                    } else {
+                        $msg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to add. Try again.').show();
+                    }
+                    $('#cg-bl-add').prop('disabled', false).text('🚫 Block This');
+                });
+            });
+
+            // ── Delete Entry ─────────────────────────────────────────
+            $(document).on('click', '.cg-delete-entry', function() {
+                const id       = $(this).data('id');
+                const listType = $(this).data('list');
+                const action   = listType === 'whitelist' ? 'chargeguard_whitelist_delete' : 'chargeguard_blacklist_delete';
+                const $row     = $(this).closest('tr');
+                $row.fadeOut(200, function() { $(this).remove(); });
+                $.post(ajaxurl, { action, nonce, id }, function(res) {
+                    if (!res.success) {
+                        if (listType === 'whitelist') loadWhitelist();
+                        else loadBlacklist();
+                    }
+                });
+            });
+
+            // ── تحميل تلقائي عند فتح الصفحة ─────────────────────────
+            <?php if ($is_connected): ?>
+            loadWhitelist();
+            <?php endif; ?>
 
             // ── Connect ──────────────────────────────────────────────
             $('#cg-connect-btn').on('click', function() {
