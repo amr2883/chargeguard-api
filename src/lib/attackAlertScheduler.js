@@ -14,7 +14,7 @@
  */
 
 const db                      = require('./db');
-const { sendAttackAlertEmail } = require('./email');
+const { notifyTenant } = require('./notify');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const SCHEDULER_INTERVAL_MS = 2  * 60 * 1000;  // run every 2 minutes
@@ -39,7 +39,7 @@ async function runAttackAlertCheck(prisma) {
   try {
     tenants = await prisma.tenant.findMany({
       where: { isActive: true },
-      select: { id: true, email: true, storeUrl: true },
+      select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true },
     });
   } catch (err) {
     console.error(`${label} ❌ Failed to fetch tenants:`, err.message);
@@ -94,10 +94,10 @@ async function runAttackAlertCheck(prisma) {
         },
       });
 
-      // 5. Send email — fire-and-forget; never throws to the outer loop
-      sendAttackAlertEmail(tenant, attackCount, savedAmount)
+      // 5. Notify tenant via all configured channels (email + webhook)
+      notifyTenant(tenant, attackCount, savedAmount)
         .catch(err => {
-          console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
+          console.error(`${label} ❌ Notification failed for ${tenant.email}:`, err.message);
         });
 
       console.log(`${label} 🚨 Alert queued for ${tenant.email} — ${attackCount} attacks detected`);
