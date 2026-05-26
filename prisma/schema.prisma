@@ -21,6 +21,12 @@ model Tenant {
   emailVerifyToken     String?   @unique
   emailVerifyExpiresAt DateTime?
   keyRotatedAt         DateTime?
+  lastAlertSentAt      DateTime?
+  webhookUrl           String?
+  webhookType          String?
+  webhookLastStatus    String?
+  webhookLastSentAt    DateTime?
+  webhookFailureCount  Int       @default(0)
   createdAt     DateTime  @default(now())
   updatedAt     DateTime  @updatedAt
 
