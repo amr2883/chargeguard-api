@@ -96,6 +96,37 @@ function recordBINIntel(source, status = 'success') {
   binIntelRequests.labels(source, status).inc();
 }
 
+// Whitelist / Access Control metrics
+const whitelistBypasses = new client.Counter({
+  name: 'chargeguard_whitelist_bypasses_total',
+  help: 'Total number of requests bypassed via whitelist',
+  labelNames: ['type'] // EMAIL, IP, BIN
+});
+
+const manualBlacklistHits = new client.Counter({
+  name: 'chargeguard_manual_blacklist_hits_total',
+  help: 'Total hits from manually added blacklist entries',
+  labelNames: ['type'] // EMAIL, IP, BIN
+});
+
+const accessControlActions = new client.Counter({
+  name: 'chargeguard_access_control_actions_total',
+  help: 'Total whitelist/blacklist management actions',
+  labelNames: ['action', 'list_type'] // action: add, delete — list_type: whitelist, blacklist
+});
+
+function recordWhitelistBypass(type) {
+  whitelistBypasses.labels(type).inc();
+}
+
+function recordManualBlacklistHit(type) {
+  manualBlacklistHits.labels(type).inc();
+}
+
+function recordAccessControlAction(action, listType) {
+  accessControlActions.labels(action, listType).inc();
+}
+
 // Middleware to record HTTP metrics (to be used in app.js)
 const httpMetricsMiddleware = (req, res, next) => {
   const start = Date.now();
@@ -117,6 +148,9 @@ module.exports = {
   recordIPIntel,
   recordEmailIntel,
   recordBINIntel,
+  recordWhitelistBypass,
+  recordManualBlacklistHit,
+  recordAccessControlAction,
   // Export metrics for health check or manual inspection if needed
   registry: client.register,
 };
