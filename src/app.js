@@ -39,9 +39,11 @@ const riskRoutes      = require('./routes/risk');
 const authRoutes      = require('./routes/auth');
 const adminRoutes     = require('./routes/admin');
 const dashboardRoutes = require('./routes/dashboard');
-app.use('/api/risk',  riskRoutes);
-app.use('/api/auth',  authRoutes);
+const settingsRoutes  = require('./routes/settings');
+app.use('/api/risk',      riskRoutes);
+app.use('/api/auth',      authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/settings',  settingsRoutes);
 // Morgan ����� �� /admin ���� ����� ��� secret �� �����
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
