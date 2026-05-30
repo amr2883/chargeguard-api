@@ -15,7 +15,9 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_blacklist_delete', [$this, 'ajax_blacklist_delete']);
         add_action('wp_ajax_chargeguard_webhook_save',     [$this, 'ajax_webhook_save']);
         add_action('wp_ajax_chargeguard_webhook_test',     [$this, 'ajax_webhook_test']);
-        add_action('wp_ajax_chargeguard_webhook_status',   [$this, 'ajax_webhook_status']);
+        add_action('wp_ajax_chargeguard_webhook_status',        [$this, 'ajax_webhook_status']);
+        add_action('wp_ajax_chargeguard_geo_overrides_get',     [$this, 'ajax_geo_overrides_get']);
+        add_action('wp_ajax_chargeguard_geo_override_save',     [$this, 'ajax_geo_override_save']);
     }
 
     public function add_admin_menu() {
@@ -449,6 +451,89 @@ class ChargeGuard_Admin_Settings {
         delete_option('chargeguard_webhook_id');
     }
 
+    public function ajax_geo_overrides_get() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $api_key = get_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_get(
+            'https://chargeguard-api.onrender.com/api/settings/country-overrides',
+            [
+                'timeout' => 10,
+                'headers' => ['x-api-key' => $api_key],
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if (!empty($body['success'])) {
+            wp_send_json_success([
+                'countryOverrides'   => $body['countryOverrides']   ?? [],
+                'availableCountries' => $body['availableCountries'] ?? [],
+                'summary'            => $body['summary']            ?? [],
+            ]);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch geo settings.']);
+        }
+    }
+
+    public function ajax_geo_override_save() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $api_key = get_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $country_code = sanitize_text_field(wp_unslash($_POST['country_code'] ?? ''));
+        $override     = sanitize_text_field(wp_unslash($_POST['override']      ?? ''));
+        if (!$country_code || !$override) {
+            wp_send_json_error(['message' => 'country_code and override are required.']);
+        }
+        $allowed_overrides = ['allow', 'escalate', 'smart'];
+        if (!in_array($override, $allowed_overrides, true)) {
+            wp_send_json_error(['message' => 'Invalid override value.']);
+        }
+        $response = wp_remote_post(
+            'https://chargeguard-api.onrender.com/api/settings/country-overrides',
+            [
+                'method'  => 'PUT',
+                'timeout' => 10,
+                'headers' => [
+                    'Content-Type' => 'application/json',
+                    'x-api-key'    => $api_key,
+                ],
+                'body' => json_encode([
+                    'updates' => [
+                        [
+                            'countryCode' => strtoupper($country_code),
+                            'override'    => $override,
+                        ],
+                    ],
+                ]),
+            ]
+        );
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code === 200 && !empty($body['success'])) {
+            wp_send_json_success([
+                'countryOverrides' => $body['countryOverrides'] ?? [],
+                'warnings'         => $body['warnings']         ?? [],
+            ]);
+        } else {
+            wp_send_json_error(['message' => $body['error'] ?? 'Failed to save override.']);
+        }
+    }
+
     public function settings_page() {
         $is_connected = (bool) get_option('chargeguard_api_key');
         $connected_email = get_option('chargeguard_connected_email', '');
@@ -783,6 +868,54 @@ class ChargeGuard_Admin_Settings {
                     <p style="color:#999;font-size:13px;">Loading…</p>
                 </div>
             </div>
+        </div>
+        <?php endif; ?>
+
+        <?php if ($is_connected): ?>
+        <!-- Geo Risk Intelligence -->
+        <div class="cg-card" id="cg-geo-risk-controls">
+            <h3 style="margin:0 0 4px;font-size:15px;">🌍 Geo Risk Intelligence</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Fine-tune how ChargeGuard handles transactions from specific regions.
+                Smart defaults work for most stores — override only when you have specific business needs.
+            </p>
+
+            <!-- Summary Badge -->
+            <div id="cg-geo-summary"
+                 style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;
+                        padding:12px 16px;margin-bottom:20px;
+                        display:flex;align-items:center;justify-content:space-between;">
+                <span style="font-size:13px;color:#475569;">
+                    ✅ <strong>Smart Protection Active</strong> —
+                    <span id="cg-override-count">Loading...</span>
+                </span>
+                <span style="font-size:11px;color:#94a3b8;">10 regions monitored</span>
+            </div>
+
+            <!-- Tier Groups Container -->
+            <div id="cg-geo-tiers">
+                <p style="color:#999;font-size:13px;">Loading country data...</p>
+            </div>
+
+            <!-- Impact Preview -->
+            <div id="cg-geo-impact"
+                 style="display:none;margin-top:16px;padding:14px 16px;
+                        border-radius:8px;border:1px solid #fde68a;background:#fffbeb;">
+                <div id="cg-geo-impact-text" style="font-size:13px;color:#92400e;"></div>
+                <div style="display:flex;gap:8px;margin-top:10px;">
+                    <button id="cg-geo-confirm" class="cg-btn cg-btn-primary"
+                            style="margin:0;padding:7px 16px;font-size:13px;">
+                        ✓ Apply Change
+                    </button>
+                    <button id="cg-geo-cancel" class="cg-btn"
+                            style="margin:0;padding:7px 16px;font-size:13px;
+                                   background:#fff;border:1px solid #ddd;color:#666;">
+                        Cancel
+                    </button>
+                </div>
+            </div>
+
+            <div id="cg-geo-message" class="cg-message"></div>
         </div>
         <?php endif; ?>
 
@@ -1312,6 +1445,225 @@ class ChargeGuard_Admin_Settings {
                     }
                     $btn.prop('disabled', false).text('📤 Send Test Notification');
                 });
+            });
+
+        // ── Geo Risk Intelligence ─────────────────────────────────────
+            const TIER_CONFIG = {
+                critical: { emoji: '🛑', label: 'Extreme Risk',   color: '#dc2626', bg: '#fef2f2' },
+                high:     { emoji: '⚠️', label: 'High Risk',      color: '#ea580c', bg: '#fff7ed' },
+                medium:   { emoji: '🟡', label: 'Moderate Risk',  color: '#ca8a04', bg: '#fefce8' },
+                elevated: { emoji: '🔵', label: 'Monitored',      color: '#2563eb', bg: '#eff6ff' },
+            };
+
+            const OVERRIDE_CONFIG = {
+                smart:    { label: '● Smart',    color: '#16a34a', desc: 'Use ChargeGuard default' },
+                allow:    { label: '○ Allow',    color: '#2563eb', desc: 'Remove country penalty'  },
+                escalate: { label: '○ Escalate', color: '#ea580c', desc: 'Double country penalty'  },
+            };
+
+            let cgGeoCountries    = [];
+            let cgPendingChange   = null;
+
+            function cgGetEffectivePenalty(basePenalty, override) {
+                if (override === 'allow')    return 0;
+                if (override === 'escalate') return Math.min(basePenalty * 2, 20);
+                return basePenalty;
+            }
+
+            function cgBuildImpactText(change) {
+                const c        = change.country;
+                const tierConf = TIER_CONFIG[c.tier] || TIER_CONFIG.elevated;
+                const newPenalty = cgGetEffectivePenalty(c.basePenalty, change.newOverride);
+                const oldPenalty = cgGetEffectivePenalty(c.basePenalty, change.currentOverride);
+
+                if (change.newOverride === 'allow') {
+                    return tierConf.emoji + ' Removing the +' + c.basePenalty +
+                        ' pt risk penalty for <strong>' + escHtml(c.name) + '</strong>. ' +
+                        'All other fraud signals still apply.' +
+                        (c.tier === 'critical' ? ' <strong style="color:#dc2626;">⚠️ High-risk region — monitor chargebacks closely.</strong>' : '');
+                }
+                if (change.newOverride === 'escalate') {
+                    return '⬆️ Escalating <strong>' + escHtml(c.name) + '</strong> penalty from ' +
+                        oldPenalty + ' to <strong>' + newPenalty + ' pts</strong>. ' +
+                        'Transactions from this region will be scored more strictly.';
+                }
+                return '↩️ Restoring <strong>' + escHtml(c.name) +
+                    '</strong> to Smart default (' + c.basePenalty + ' pts).';
+            }
+
+            function cgRenderTierGroups(countries) {
+                const byTier = {};
+                countries.forEach(function(c) {
+                    if (!byTier[c.tier]) byTier[c.tier] = [];
+                    byTier[c.tier].push(c);
+                });
+
+                const tierOrder = ['critical', 'high', 'medium', 'elevated'];
+                let html = '';
+
+                tierOrder.forEach(function(tier) {
+                    if (!byTier[tier] || !byTier[tier].length) return;
+                    const tc = TIER_CONFIG[tier];
+                    html += '<div style="margin-bottom:16px;">';
+                    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">';
+                    html += '<span style="font-size:13px;font-weight:700;color:' + tc.color + ';">' +
+                            tc.emoji + ' ' + tc.label + '</span>';
+                    html += '</div>';
+
+                    byTier[tier].forEach(function(c) {
+                        const cur = c.currentOverride || 'smart';
+                        html += '<div style="display:flex;align-items:center;justify-content:space-between;' +
+                                'padding:10px 12px;border-radius:8px;background:' + tc.bg + ';' +
+                                'border:1px solid ' + tc.color + '22;margin-bottom:6px;flex-wrap:wrap;gap:8px;">';
+
+                        // اسم الدولة + penalty
+                        html += '<div style="display:flex;align-items:center;gap:8px;min-width:140px;">';
+                        html += '<span style="font-size:14px;">' + cgGetFlag(c.code) + '</span>';
+                        html += '<span style="font-size:13px;font-weight:600;color:#1e293b;">' +
+                                escHtml(c.name) + '</span>';
+                        html += '<span id="cg-penalty-' + c.code + '" ' +
+                                'style="font-size:11px;color:' + tc.color + ';background:' + tc.color + '15;' +
+                                'padding:2px 6px;border-radius:4px;font-weight:600;">' +
+                                '-' + cgGetEffectivePenalty(c.basePenalty, cur) + ' pts</span>';
+                        html += '</div>';
+
+                        // Radio buttons
+                        html += '<div style="display:flex;gap:6px;">';
+                        ['smart', 'allow', 'escalate'].forEach(function(ov) {
+                            const isActive = cur === ov;
+                            const ovConf   = OVERRIDE_CONFIG[ov];
+                            const btnColor = isActive ? ovConf.color : '#94a3b8';
+                            const btnBg    = isActive ? ovConf.color + '15' : '#fff';
+                            const border   = isActive ? ovConf.color : '#e2e8f0';
+                            html += '<button class="cg-geo-radio" ' +
+                                    'data-code="' + escHtml(c.code) + '" ' +
+                                    'data-override="' + ov + '" ' +
+                                    'title="' + escHtml(ovConf.desc) + '" ' +
+                                    'style="padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600;' +
+                                    'cursor:pointer;border:1px solid ' + border + ';' +
+                                    'background:' + btnBg + ';color:' + btnColor + ';">' +
+                                    (isActive ? '● ' : '○ ') + ov.charAt(0).toUpperCase() + ov.slice(1) +
+                                    '</button>';
+                        });
+                        html += '</div>';
+                        html += '</div>';
+                    });
+
+                    html += '</div>';
+                });
+
+                $('#cg-geo-tiers').html(html);
+            }
+
+            function cgGetFlag(code) {
+                try {
+                    return code.toUpperCase().replace(/./g, function(c) {
+                        return String.fromCodePoint(c.charCodeAt(0) + 127397);
+                    });
+                } catch(e) { return '🌐'; }
+            }
+
+            function cgUpdateSummary(countries) {
+                const modified = countries.filter(function(c) { return c.currentOverride !== 'smart'; }).length;
+                if (modified === 0) {
+                    $('#cg-override-count').text('All regions using Smart defaults');
+                } else {
+                    $('#cg-override-count').text(modified + ' region' + (modified > 1 ? 's' : '') + ' customized');
+                }
+            }
+
+            // تحميل البيانات
+            <?php if ($is_connected): ?>
+            $.post(ajaxurl, {
+                action: 'chargeguard_geo_overrides_get',
+                nonce:  nonce,
+            }, function(res) {
+                if (res.success) {
+                    cgGeoCountries = res.data.availableCountries || [];
+                    cgRenderTierGroups(cgGeoCountries);
+                    cgUpdateSummary(cgGeoCountries);
+                } else {
+                    $('#cg-geo-tiers').html('<p style="color:#dc2626;font-size:13px;">Failed to load geo settings.</p>');
+                }
+            });
+            <?php endif; ?>
+
+            // Radio button click
+            $(document).on('click', '.cg-geo-radio', function() {
+                const code        = $(this).data('code');
+                const newOverride = $(this).data('override');
+                const country     = cgGeoCountries.find(function(c) { return c.code === code; });
+                if (!country) return;
+
+                const currentOverride = country.currentOverride || 'smart';
+                if (currentOverride === newOverride) return;
+
+                cgPendingChange = { code, newOverride, currentOverride, country };
+
+                $('#cg-geo-impact-text').html(cgBuildImpactText(cgPendingChange));
+                $('#cg-geo-impact').show();
+                $('#cg-geo-message').hide().removeClass('error success');
+            });
+
+            // Apply Change
+            $('#cg-geo-confirm').on('click', function() {
+                if (!cgPendingChange) return;
+                const $btn = $(this);
+                $btn.prop('disabled', true).text('Saving…');
+
+                $.post(ajaxurl, {
+                    action:       'chargeguard_geo_override_save',
+                    nonce:        nonce,
+                    country_code: cgPendingChange.code,
+                    override:     cgPendingChange.newOverride,
+                }, function(res) {
+                    if (res.success) {
+                        // تحديث البيانات المحلية
+                        const country = cgGeoCountries.find(function(c) {
+                            return c.code === cgPendingChange.code;
+                        });
+                        if (country) {
+                            country.currentOverride  = cgPendingChange.newOverride;
+                            country.effectivePenalty = cgGetEffectivePenalty(
+                                country.basePenalty,
+                                cgPendingChange.newOverride
+                            );
+                        }
+
+                        // تحديث الـ UI
+                        cgRenderTierGroups(cgGeoCountries);
+                        cgUpdateSummary(cgGeoCountries);
+                        $('#cg-geo-impact').hide();
+                        cgPendingChange = null;
+
+                        // Warning لو وُجد
+                        const warnings = res.data.warnings || [];
+                        if (warnings.length > 0) {
+                            $('#cg-geo-message')
+                                .removeClass('error').addClass('success')
+                                .html('✓ Saved. ⚠️ ' + escHtml(warnings[0].message))
+                                .show();
+                        } else {
+                            $('#cg-geo-message')
+                                .removeClass('error').addClass('success')
+                                .text('✓ Override saved successfully.')
+                                .show();
+                        }
+                        setTimeout(function() { $('#cg-geo-message').fadeOut(); }, 4000);
+                    } else {
+                        $('#cg-geo-message')
+                            .removeClass('success').addClass('error')
+                            .text((res.data && res.data.message) || 'Failed to save. Try again.')
+                            .show();
+                    }
+                    $btn.prop('disabled', false).text('✓ Apply Change');
+                });
+            });
+
+            // Cancel
+            $('#cg-geo-cancel').on('click', function() {
+                cgPendingChange = null;
+                $('#cg-geo-impact').hide();
             });
 
         })(jQuery);
