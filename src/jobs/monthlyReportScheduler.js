@@ -29,7 +29,7 @@
 // buildMonthlyReportData → the data engine (accepts prisma externally ✓)
 // sendMonthlyReportEmail → the email builder/sender (fire-and-forget ✓)
 // We do NOT import db.js — prisma always comes from the caller (app.js).
-const { buildMonthlyReportData }  = require('./reportDataService');
+const { buildMonthlyReportData }  = require('../lib/reportDataService');
 const { sendMonthlyReportEmail }  = require('./email');
 
 // ─── Tuneable Constants ──────────────────────────────────────────────────────
