@@ -30,7 +30,7 @@
 // sendMonthlyReportEmail → the email builder/sender (fire-and-forget ✓)
 // We do NOT import db.js — prisma always comes from the caller (app.js).
 const { buildMonthlyReportData }  = require('../lib/reportDataService');
-const { sendMonthlyReportEmail }  = require('./email');
+const { sendMonthlyReportEmail }  = require('../lib/email');
 
 // ─── Tuneable Constants ──────────────────────────────────────────────────────
 // Thought: group every magic number here so ops can tune without reading logic.
