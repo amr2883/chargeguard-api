@@ -18,6 +18,8 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_webhook_status',        [$this, 'ajax_webhook_status']);
         add_action('wp_ajax_chargeguard_geo_overrides_get',     [$this, 'ajax_geo_overrides_get']);
         add_action('wp_ajax_chargeguard_geo_override_save',     [$this, 'ajax_geo_override_save']);
+        add_action('wp_ajax_chargeguard_paypal_save',           [$this, 'ajax_paypal_save']);
+        add_action('wp_ajax_chargeguard_paypal_test',           [$this, 'ajax_paypal_test']);
     }
 
     public function add_admin_menu() {
@@ -534,6 +536,78 @@ class ChargeGuard_Admin_Settings {
         }
     }
 
+    public function ajax_paypal_save() {
+        check_ajax_referer( 'chargeguard_connect_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'unauthorized' ], 403 );
+        }
+
+        $client_id     = sanitize_text_field( wp_unslash( $_post['client_id']     ?? '' ) );
+        $client_secret = sanitize_text_field( wp_unslash( $_post['client_secret'] ?? '' ) );
+        $webhook_id    = sanitize_text_field( wp_unslash( $_post['webhook_id']    ?? '' ) );
+        $mode          = sanitize_text_field( wp_unslash( $_post['mode']          ?? 'sandbox' ) );
+        $enabled       = sanitize_text_field( wp_unslash( $_post['enabled']       ?? '0' ) );
+
+        if ( ! in_array( $mode, [ 'sandbox', 'live' ], true ) ) {
+            $mode = 'sandbox';
+        }
+
+        update_option( 'chargeguard_paypal_client_id',  $client_id );
+        if ( ! empty( $client_secret ) ) {
+            update_option( 'chargeguard_paypal_client_secret', $client_secret );
+        }
+        update_option( 'chargeguard_paypal_webhook_id', $webhook_id );
+        update_option( 'chargeguard_paypal_mode',          $mode );
+        update_option( 'chargeguard_paypal_enabled',       $enabled === '1' ? '1' : '0' );
+
+        // مسح access token المخزّن لإجبار التجديد بالبيانات الجديدة
+        delete_transient( 'cg_paypal_access_token_' . md5( $client_id ) );
+
+        wp_send_json_success( [ 'message' => 'paypal settings saved.' ] );
+    }
+
+    public function ajax_paypal_test() {
+        check_ajax_referer( 'chargeguard_connect_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'unauthorized' ], 403 );
+        }
+
+        $client_id     = get_option( 'chargeguard_paypal_client_id' );
+        $client_secret = get_option( 'chargeguard_paypal_client_secret' );
+
+        if ( ! $client_id || ! $client_secret ) {
+            wp_send_json_error( [ 'message' => 'please save your paypal credentials first.' ] );
+        }
+
+        $mode    = get_option( 'chargeguard_paypal_mode', 'sandbox' );
+        $api_url = ( $mode === 'live' )
+            ? 'https://api-m.paypal.com/v1/oauth2/token'
+            : 'https://api-m.sandbox.paypal.com/v1/oauth2/token';
+
+        $response = wp_remote_post( $api_url, [
+            'timeout' => 10,
+            'headers' => [
+                'authorization' => 'basic ' . base64_encode( $client_id . ':' . $client_secret ),
+                'content-type'  => 'application/x-www-form-urlencoded',
+            ],
+            'body' => 'grant_type=client_credentials',
+        ] );
+
+        if ( is_wp_error( $response ) ) {
+            wp_send_json_error( [ 'message' => 'could not reach paypal servers.' ] );
+        }
+
+        $code = wp_remote_retrieve_response_code( $response );
+        $body = json_decode( wp_remote_retrieve_body( $response ), true );
+
+        if ( $code === 200 && ! empty( $body['access_token'] ) ) {
+            wp_send_json_success( [ 'message' => '✓ paypal credentials are valid.' ] );
+        } else {
+            $error = $body['error_description'] ?? 'invalid credentials.';
+            wp_send_json_error( [ 'message' => $error ] );
+        }
+    }
+
     public function settings_page() {
         $is_connected = (bool) get_option('chargeguard_api_key');
         $connected_email = get_option('chargeguard_connected_email', '');
@@ -1003,6 +1077,217 @@ class ChargeGuard_Admin_Settings {
             </div>
         </div>
 
+        <!-- PayPal Integration -->
+        <?php if ($is_connected): ?>
+        <?php
+        $pp_enabled    = get_option('chargeguard_paypal_enabled', '0');
+        $pp_client_id  = get_option('chargeguard_paypal_client_id', '');
+        $pp_webhook_id = get_option('chargeguard_paypal_webhook_id', '');
+        $pp_mode       = get_option('chargeguard_paypal_mode', 'sandbox');
+        $pp_webhook_url = str_replace( 'http://', 'https://', get_rest_url( null, 'chargeguard/v1/paypal-webhook' ) );
+        ?>
+        <div class="cg-card" id="cg-paypal-integration">
+            <h3 style="margin:0 0 4px;font-size:15px;">🅿️ PayPal Integration</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Extend ChargeGuard protection to payments made via PayPal.
+                Connect your PayPal app to monitor card testing attempts across all payment gateways.
+            </p>
+
+            <!-- Status Badge -->
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+                <div class="cg-status-badge <?php echo $pp_enabled === '1' ? 'connected' : 'disconnected'; ?>"
+                     style="margin-bottom:0;">
+                    <div class="cg-dot <?php echo $pp_enabled === '1' ? 'green' : 'gray'; ?>"></div>
+                    <?php echo $pp_enabled === '1' ? 'PayPal Protection Active' : 'Not Configured'; ?>
+                </div>
+                <?php if ($pp_enabled === '1'): ?>
+                <span style="font-size:11px;color:#94a3b8;background:#f8fafc;padding:3px 8px;border-radius:4px;border:1px solid #e2e8f0;">
+                    <?php echo $pp_mode === 'live' ? '🟢 Live' : '🟡 Sandbox'; ?>
+                </span>
+                <?php endif; ?>
+            </div>
+
+            <!-- Webhook URL (للتاجر لنسخه في PayPal Dashboard) -->
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin-bottom:20px;">
+                <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">
+                    Your Webhook URL
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <code style="flex:1;font-size:12px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;color:#1e293b;word-break:break-all;">
+                        <?php echo esc_html($pp_webhook_url); ?>
+                    </code>
+                    <button id="cg-pp-copy-url" class="button" title="Copy URL"
+                            style="flex-shrink:0;">
+                        📋 Copy
+                    </button>
+                </div>
+                <p style="font-size:11px;color:#94a3b8;margin:8px 0 0;">
+                    Paste this URL in your <strong>PayPal Developer Dashboard</strong> → Apps & Credentials → Webhooks.
+                </p>
+            </div>
+
+            <!-- Inline Setup Guide -->
+            <details id="cg-pp-guide" style="margin-bottom:20px;">
+                <summary style="cursor:pointer;font-size:13px;font-weight:600;color:#f97316;
+                                list-style:none;display:flex;align-items:center;gap:6px;
+                                padding:10px 14px;background:#fff7ed;border:1px solid #fed7aa;
+                                border-radius:8px;user-select:none;">
+                    <span id="cg-pp-guide-arrow" style="transition:transform 0.2s;display:inline-block;">▶</span>
+                    📖 How to get your PayPal credentials <span style="font-weight:400;color:#94a3b8;font-size:12px;margin-left:4px;">3 steps · ~2 min</span>
+                </summary>
+                <div style="border:1px solid #fed7aa;border-top:none;border-radius:0 0 8px 8px;
+                            padding:16px 18px;background:#fffbf7;">
+                    <div style="display:flex;flex-direction:column;gap:14px;">
+
+                        <!-- Step 1 -->
+                        <div style="display:flex;gap:12px;align-items:flex-start;">
+                            <div style="flex-shrink:0;width:24px;height:24px;border-radius:50%;
+                                        background:#f97316;color:#fff;font-size:12px;font-weight:700;
+                                        display:flex;align-items:center;justify-content:center;">1</div>
+                            <div>
+                                <div style="font-size:13px;font-weight:600;color:#1e293b;margin-bottom:3px;">
+                                    Create a PayPal App
+                                </div>
+                                <div style="font-size:12px;color:#64748b;line-height:1.5;">
+                                    Go to
+                                    <a href="https://developer.paypal.com/dashboard/applications" target="_blank"
+                                       style="color:#f97316;text-decoration:none;font-weight:600;">
+                                        PayPal Developer Dashboard ↗
+                                    </a>
+                                    → <strong>Apps & Credentials</strong> → <strong>Create App</strong>.
+                                    Choose <em>Merchant</em> as the app type.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Step 2 -->
+                        <div style="display:flex;gap:12px;align-items:flex-start;">
+                            <div style="flex-shrink:0;width:24px;height:24px;border-radius:50%;
+                                        background:#f97316;color:#fff;font-size:12px;font-weight:700;
+                                        display:flex;align-items:center;justify-content:center;">2</div>
+                            <div>
+                                <div style="font-size:13px;font-weight:600;color:#1e293b;margin-bottom:3px;">
+                                    Copy your Client ID & Secret
+                                </div>
+                                <div style="font-size:12px;color:#64748b;line-height:1.5;">
+                                    Inside your app page, copy the <strong>Client ID</strong> and
+                                    <strong>Secret</strong> from the credentials section.
+                                    Use <em>Sandbox</em> for testing, <em>Live</em> for production.
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Step 3 -->
+                        <div style="display:flex;gap:12px;align-items:flex-start;">
+                            <div style="flex-shrink:0;width:24px;height:24px;border-radius:50%;
+                                        background:#f97316;color:#fff;font-size:12px;font-weight:700;
+                                        display:flex;align-items:center;justify-content:center;">3</div>
+                            <div>
+                                <div style="font-size:13px;font-weight:600;color:#1e293b;margin-bottom:3px;">
+                                    Add a Webhook & get the Webhook ID
+                                </div>
+                                <div style="font-size:12px;color:#64748b;line-height:1.5;">
+                                    In the same app page → <strong>Webhooks</strong> → <strong>Add Webhook</strong>.
+                                    Paste your Webhook URL above, select these events:
+                                    <code style="background:#f1f5f9;padding:1px 5px;border-radius:3px;font-size:11px;">
+                                        PAYMENT.CAPTURE.COMPLETED
+                                    </code>
+                                    <code style="background:#f1f5f9;padding:1px 5px;border-radius:3px;font-size:11px;">
+                                        PAYMENT.CAPTURE.DENIED
+                                    </code>
+                                    <code style="background:#f1f5f9;padding:1px 5px;border-radius:3px;font-size:11px;">
+                                        CHECKOUT.ORDER.APPROVED
+                                    </code>
+                                    <code style="background:#f1f5f9;padding:1px 5px;border-radius:3px;font-size:11px;">
+                                        RISK.DISPUTE.CREATED
+                                    </code>.
+                                    After saving, copy the <strong>Webhook ID</strong> shown on the webhook page.
+                                </div>
+                            </div>
+                        </div>
+
+                    </div>
+                </div>
+            </details>
+
+            <!-- Fields -->
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Environment</span>
+                <div style="display:flex;gap:0;border:1px solid #ddd;border-radius:8px;overflow:hidden;">
+                    <button class="cg-pp-mode-btn <?php echo $pp_mode === 'sandbox' ? 'active' : ''; ?>"
+                            data-mode="sandbox"
+                            style="padding:7px 16px;border:none;cursor:pointer;font-size:13px;font-weight:600;
+                                   background:<?php echo $pp_mode === 'sandbox' ? '#f0fdf4' : '#fff'; ?>;
+                                   color:<?php echo $pp_mode === 'sandbox' ? '#16a34a' : '#999'; ?>;">
+                        Sandbox
+                    </button>
+                    <button class="cg-pp-mode-btn <?php echo $pp_mode === 'live' ? 'active' : ''; ?>"
+                            data-mode="live"
+                            style="padding:7px 16px;border:none;cursor:pointer;font-size:13px;font-weight:600;
+                                   background:<?php echo $pp_mode === 'live' ? '#f0fdf4' : '#fff'; ?>;
+                                   color:<?php echo $pp_mode === 'live' ? '#16a34a' : '#999'; ?>;
+                                   border-left:1px solid #ddd;">
+                        Live
+                    </button>
+                </div>
+                <input type="hidden" id="cg-pp-mode" value="<?php echo esc_attr($pp_mode); ?>" />
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Client ID</span>
+                <input type="text" id="cg-pp-client-id" class="cg-input"
+                       value="<?php echo esc_attr($pp_client_id); ?>"
+                       placeholder="AYour_PayPal_Client_ID"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <span style="font-size:11px;color:#94a3b8;width:100%;padding-left:138px;">
+                    Found in your PayPal App → Credentials
+                </span>
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Client Secret</span>
+                <input type="password" id="cg-pp-client-secret" class="cg-input"
+                       value=""
+                       placeholder="<?php echo $pp_client_id ? '••••••••••••••••' : 'EYour_PayPal_Client_Secret'; ?>"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <span style="font-size:11px;color:#94a3b8;width:100%;padding-left:138px;">
+                    <?php echo $pp_client_id ? 'Leave blank to keep your current secret' : 'Found in your PayPal App → Credentials'; ?>
+                </span>
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Webhook ID</span>
+                <input type="text" id="cg-pp-webhook-id" class="cg-input"
+                       value="<?php echo esc_attr($pp_webhook_id); ?>"
+                       placeholder="Get this from PayPal Developer Dashboard"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <span style="font-size:11px;color:#94a3b8;width:100%;padding-left:138px;">
+                    Found on your Webhook page after saving it in PayPal
+                </span>
+            </div>
+
+            <div class="cg-info-row">
+                <span class="cg-info-label">Enable Protection</span>
+                <div class="cg-toggle-wrap">
+                    <input type="checkbox" class="cg-toggle" id="cg-pp-enabled"
+                           <?php checked('1', $pp_enabled); ?> />
+                    <label for="cg-pp-enabled" style="font-size:12px;color:#64748b;">Active</label>
+                </div>
+            </div>
+
+            <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap;">
+                <button id="cg-pp-save" class="cg-btn cg-btn-primary" style="margin:0;">
+                    💾 Save PayPal Settings
+                </button>
+                <button id="cg-pp-test" class="cg-btn"
+                        style="margin:0;background:#fff;color:#f97316;border:1px solid #f97316;">
+                    🔗 Test Connection
+                </button>
+            </div>
+            <div id="cg-pp-message" class="cg-message" style="margin-top:10px;"></div>
+        </div>
+        <?php endif; ?>
+
         <!-- Notification Channels -->
         <?php if ($is_connected): ?>
         <div class="cg-card" id="cg-notification-channels">
@@ -1447,7 +1732,90 @@ class ChargeGuard_Admin_Settings {
                 });
             });
 
-        // ── Geo Risk Intelligence ─────────────────────────────────────
+        // ── PayPal Integration ────────────────────────────────────────
+            let cgPpMode = $('#cg-pp-mode').val() || 'sandbox';
+
+            // Guide arrow animation
+            $('#cg-pp-guide').on('toggle', function() {
+                $('#cg-pp-guide-arrow').css(
+                    'transform',
+                    this.open ? 'rotate(90deg)' : 'rotate(0deg)'
+                );
+            });
+
+            // Mode toggle
+            $(document).on('click', '.cg-pp-mode-btn', function() {
+                cgPpMode = $(this).data('mode');
+                $('#cg-pp-mode').val(cgPpMode);
+                $('.cg-pp-mode-btn').css({ background: '#fff', color: '#999' });
+                $(this).css({ background: '#f0fdf4', color: '#16a34a' });
+            });
+
+            // Copy Webhook URL
+            $('#cg-pp-copy-url').on('click', function() {
+                const url = $('code', '#cg-paypal-integration').first().text().trim();
+                navigator.clipboard.writeText(url).then(function() {
+                    $('#cg-pp-copy-url').text('✓ Copied!');
+                    setTimeout(function() { $('#cg-pp-copy-url').text('📋 Copy'); }, 2000);
+                });
+            });
+
+            // Save PayPal Settings
+            $('#cg-pp-save').on('click', function() {
+                const $btn    = $(this);
+                const $msg    = $('#cg-pp-message');
+                const secret  = $('#cg-pp-client-secret').val().trim();
+
+                $btn.prop('disabled', true).text('Saving…');
+                $msg.hide().removeClass('error success');
+
+                const postData = {
+                    action:        'chargeguard_paypal_save',
+                    nonce:         nonce,
+                    client_id:     $('#cg-pp-client-id').val().trim(),
+                    webhook_id:    $('#cg-pp-webhook-id').val().trim(),
+                    mode:          cgPpMode,
+                    enabled:       $('#cg-pp-enabled').is(':checked') ? '1' : '0',
+                };
+                if (secret) postData.client_secret = secret;
+
+                $.post(ajaxurl, postData, function(res) {
+                    if (res.success) {
+                        $msg.removeClass('error').addClass('success')
+                            .text('✓ PayPal settings saved.').show();
+                        $('#cg-pp-client-secret').val('').attr('placeholder', '••••••••••••••••');
+                        setTimeout(function() { $msg.fadeOut(); }, 3000);
+                    } else {
+                        $msg.removeClass('success').addClass('error')
+                            .text((res.data && res.data.message) || 'Failed to save.').show();
+                    }
+                    $btn.prop('disabled', false).text('💾 Save PayPal Settings');
+                });
+            });
+
+            // Test PayPal Connection
+            $('#cg-pp-test').on('click', function() {
+                const $btn = $(this);
+                const $msg = $('#cg-pp-message');
+                $btn.prop('disabled', true).text('Testing…');
+                $msg.hide().removeClass('error success');
+
+                $.post(ajaxurl, {
+                    action: 'chargeguard_paypal_test',
+                    nonce:  nonce,
+                }, function(res) {
+                    if (res.success) {
+                        $msg.removeClass('error').addClass('success')
+                            .text((res.data && res.data.message) || '✓ Connected.').show();
+                    } else {
+                        $msg.removeClass('success').addClass('error')
+                            .text((res.data && res.data.message) || 'Connection failed.').show();
+                    }
+                    $btn.prop('disabled', false).text('🔗 Test Connection');
+                });
+            });
+
+            // ── Geo Risk Intelligence ─────────────────────────────────────
             const TIER_CONFIG = {
                 critical: { emoji: '🛑', label: 'Extreme Risk',   color: '#dc2626', bg: '#fef2f2' },
                 high:     { emoji: '⚠️', label: 'High Risk',      color: '#ea580c', bg: '#fff7ed' },

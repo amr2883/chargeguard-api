@@ -1412,8 +1412,8 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     if (!orderId) {
       return res.status(400).json({ error: 'orderId is required' });
     }
-    if (!bin) {
-      return res.status(400).json({ error: 'bin is required' });
+    if (!bin && !last4) {
+      return res.status(400).json({ error: 'bin or last4 is required' });
     }
 
     const merchantId = req.headers['x-merchant-id'];
@@ -1508,7 +1508,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     if (funding) snapshot.cardFunding = funding;
     if (issuer) snapshot.cardIssuer = issuer;
     snapshot.enrichedAt = new Date().toISOString();
-    snapshot.enrichmentSource = 'stripe'; // or other gateway
+    snapshot.enrichmentSource = req.body.source || 'stripe';
 
     // 6. ����� ����� ������ ������
     const enrichedOrder = {
