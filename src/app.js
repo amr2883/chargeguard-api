@@ -2,7 +2,8 @@ require('dotenv').config();
 const { runFastCleanup, runDailyRetention } = require('./lib/retention');
 const { startAttackAlertScheduler } = require('./lib/attackAlertScheduler');
 const { startWeeklySummaryScheduler } = require('./jobs/weeklySummaryScheduler');
-const { startMonthlyReportScheduler } = require('./jobs/monthlyReportScheduler');
+const { startMonthlyReportScheduler }      = require('./jobs/monthlyReportScheduler');
+const { startPaypalWeeklyReportScheduler } = require('./jobs/paypalWeeklyReportScheduler');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -152,4 +153,7 @@ app.listen(PORT, () => {
 
   // 📊 6) Monthly Report Scheduler (checks hourly, runs on 1st of month 10:xx UTC)
   startMonthlyReportScheduler(prismaForCleanup);
+
+  // 🛡️ 7) PayPal Weekly Shield Scheduler (checks hourly, sends Sundays 09:30 UTC)
+  startPaypalWeeklyReportScheduler(prismaForCleanup);
 });

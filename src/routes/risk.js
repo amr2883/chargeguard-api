@@ -216,8 +216,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     }
 
 
-    // 1. ��� ������ (Velocity Check)
-    const velocityCheck = checkVelocity({ ip: ipAddress, deviceFingerprint });
+    // 1. فحص السرعة (Velocity Check)
+    const velocityCheck = await checkVelocity({ ip: ipAddress, deviceFingerprint, merchantId });
     if (velocityCheck.blocked) {
       return res.status(403).json({
         error: 'Request blocked due to suspicious activity',
@@ -371,9 +371,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
      // ������� connectedRisk ������ �� ����� Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
-    // ����� �������� ������� �� ���� ������
+   // تسجيل المحاولة الفاشلة عند block
     if (response.decision === 'block') {
-      recordFailedAttempt({ ip: ipAddress, deviceFingerprint });
+      recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, amount: amount || 0 });
     }
 
     // 6. ��� ����� �� ����� ��������
@@ -1619,13 +1619,49 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       where: { orderId, status: 'pending' }
     });
 
+    // ── 11. PayPal Alert (fire-and-forget) ───────────────────────────
+    const enrichSource   = req.body.source || null;
+    const enrichDecision = riskResult.decision.includes('Approve') ? 'approve'
+                         : riskResult.decision.includes('Review')  ? 'review'
+                         : 'block';
+
+    if (enrichSource === 'paypal' && riskResult.score >= 70) {
+      const { notifyPaypalAlert } = require('../lib/notify');
+
+      db.tenant.findUnique({
+        where:  { id: req.tenant.id },
+        select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true },
+      }).then(tenantFull => {
+        if (!tenantFull) return;
+
+        const estimatedSavings = req.body.amount
+          ? Math.round(Number(req.body.amount) * 0.15 * 100) / 100
+          : null;
+
+        return notifyPaypalAlert(tenantFull, {
+          paypalTxnId:     req.body.paypalTxnId   || null,
+          brand:           req.body.brand         || req.body.cardBrand || null,
+          last4:           req.body.last4          || null,
+          cardCountry:     req.body.cardCountry    || null,
+          amount:          req.body.amount         || null,
+          currency:        req.body.currency       || 'USD',
+          riskScore:       riskResult.score,
+          decision:        enrichDecision,
+          flags:           riskResult.flags        || [],
+          estimatedSavings,
+        });
+      }).catch(err =>
+        logger.error({ module: 'risk', endpoint: 'enrich', err: err.message }, 'PayPal alert failed')
+      );
+    }
+
     // ��������� ��������
     res.json({
       success: true,
       orderId,
       enriched: true,
       newRiskScore: riskResult.score,
-      newDecision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+      newDecision: enrichDecision,
       flags: riskResult.flags,
     });
 

@@ -170,36 +170,157 @@ function buildCustomPayload(tenant, attackCount, savedAmount, windowMinutes, isT
   };
 }
 
+// ── PayPal Slack Payload Builder ───────────────────────────────────────────
+
+function buildSlackPaypalPayload(tenant, ctx) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const txnDisplay    = ctx.paypalTxnId ? ctx.paypalTxnId.slice(-8).toUpperCase() : '—';
+  const amountDisplay = ctx.amount ? `$${Number(ctx.amount).toFixed(2)}` : '—';
+  const topFlag       = ctx.flags?.[0]?.text || null;
+  const decisionEmoji = ctx.decision === 'block' ? '🚫' : '⚠️';
+  const decisionLabel = ctx.decision === 'block' ? 'Blocked' : 'Flagged for Review';
+
+  const fields = [
+    { type: 'mrkdwn', text: `*Transaction*\n#${txnDisplay}` },
+    { type: 'mrkdwn', text: `*Amount*\n${amountDisplay}` },
+    { type: 'mrkdwn', text: `*Card Origin*\n${ctx.cardCountry || 'Unknown'}` },
+    { type: 'mrkdwn', text: `*Risk Score*\n${ctx.riskScore}/100` },
+  ];
+  if (topFlag) fields.push({ type: 'mrkdwn', text: `*Primary Reason*\n${topFlag}` });
+
+  return {
+    attachments: [{
+      color: ctx.decision === 'block' ? '#dc2626' : '#d97706',
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `🛡️ *ChargeGuard PayPal Shield* — Suspicious transaction intercepted on \`${storeDisplay}\``
+          }
+        },
+        { type: 'section', fields },
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: `${decisionEmoji} *Decision: ${decisionLabel}* — Your store is running normally. No action required.`
+          }
+        },
+        {
+          type: 'actions',
+          elements: [{
+            type: 'button',
+            text: { type: 'plain_text', text: 'View in Dashboard →' },
+            url: 'https://chargeguard-api.onrender.com/api/dashboard/page',
+            style: 'danger'
+          }]
+        }
+      ]
+    }]
+  };
+}
+
+// ── PayPal Discord Payload Builder ─────────────────────────────────────────
+
+function buildDiscordPaypalPayload(tenant, ctx) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const txnDisplay = ctx.paypalTxnId ? ctx.paypalTxnId.slice(-8).toUpperCase() : '—';
+  const topFlag    = ctx.flags?.[0]?.text || 'Suspicious activity pattern';
+  const embedColor = ctx.decision === 'block' ? 14423100 : 14263066;
+
+  return {
+    username: 'ChargeGuard',
+    embeds: [{
+      title: '🛡️ PayPal Shield — Transaction Intercepted',
+      description: `Suspicious PayPal transaction stopped on **${storeDisplay}** before processing.`,
+      color: embedColor,
+      fields: [
+        { name: 'Transaction',    value: `#${txnDisplay}`,                                    inline: true  },
+        { name: 'Amount',         value: ctx.amount ? `$${Number(ctx.amount).toFixed(2)}` : '—', inline: true },
+        { name: 'Card Origin',    value: ctx.cardCountry || 'Unknown',                        inline: true  },
+        { name: 'Risk Score',     value: `${ctx.riskScore}/100`,                              inline: true  },
+        { name: 'Decision',       value: ctx.decision === 'block' ? '🚫 Blocked' : '⚠️ Review', inline: true },
+        { name: 'Primary Reason', value: topFlag,                                             inline: false },
+      ],
+      footer:    { text: '✅ Your store is running normally. No action required.' },
+      timestamp: new Date().toISOString(),
+      url: 'https://chargeguard-api.onrender.com/api/dashboard/page'
+    }]
+  };
+}
+
+// ── PayPal Custom Payload Builder ──────────────────────────────────────────
+
+function buildCustomPaypalPayload(tenant, ctx) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  return {
+    event:     'paypal_suspicious_transaction',
+    timestamp: new Date().toISOString(),
+    store:     storeDisplay,
+    data: {
+      alertType:   'paypal_suspicious',
+      paypalTxnId: ctx.paypalTxnId  || null,
+      riskScore:   ctx.riskScore    || 0,
+      decision:    ctx.decision     || 'review',
+      cardCountry: ctx.cardCountry  || null,
+      amount:      ctx.amount       || null,
+      flags:       ctx.flags        || [],
+    }
+  };
+}
+
 // ── Main Dispatch Function ─────────────────────────────────────────────────
 
 /**
- * Sends a webhook notification for a detected attack.
+ * Sends a webhook notification for a detected attack or PayPal alert.
  * Fire-and-forget — failures are logged but never throw to the caller.
  *
- * @param {object}  tenant        - Tenant object (must have webhookUrl, webhookType, id)
- * @param {number}  attackCount   - Number of blocked attempts
- * @param {number}  savedAmount   - Estimated savings in USD
- * @param {number}  [windowMinutes=10] - Time window in minutes
- * @param {boolean} [isTest=false]     - If true, sends a test notification
+ * @param {object}          tenant         - Tenant (webhookUrl, webhookType, id)
+ * @param {number}          attackCount    - Blocked attempts (standard alerts)
+ * @param {number}          savedAmount    - Estimated savings USD (standard alerts)
+ * @param {number}          [windowMinutes=10]
+ * @param {boolean|object}  [extraContext=false] - true = test | object = PayPal context
  * @returns {Promise<void>}
  */
-async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes = 10, isTest = false) {
+async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes = 10, extraContext = false) {
   if (!tenant.webhookUrl) return;
 
-  const url = tenant.webhookUrl;
+  const url  = tenant.webhookUrl;
   const type = tenant.webhookType || 'custom';
 
-  // Build payload based on platform type
+  const isPaypal = extraContext !== null
+                && typeof extraContext === 'object'
+                && extraContext.alertType === 'paypal_suspicious';
+  const isTest   = extraContext === true;
+
   let payload;
-  switch (type) {
-    case 'slack':
-      payload = buildSlackPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
-      break;
-    case 'discord':
-      payload = buildDiscordPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
-      break;
-    default:
-      payload = buildCustomPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
+  if (isPaypal) {
+    switch (type) {
+      case 'slack':   payload = buildSlackPaypalPayload(tenant, extraContext);   break;
+      case 'discord': payload = buildDiscordPaypalPayload(tenant, extraContext); break;
+      default:        payload = buildCustomPaypalPayload(tenant, extraContext);  break;
+    }
+  } else {
+    switch (type) {
+      case 'slack':
+        payload = buildSlackPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
+        break;
+      case 'discord':
+        payload = buildDiscordPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
+        break;
+      default:
+        payload = buildCustomPayload(tenant, attackCount, savedAmount, windowMinutes, isTest);
+    }
   }
 
   const label = `[Webhook ${tenant.id.slice(0, 8)}]`;
