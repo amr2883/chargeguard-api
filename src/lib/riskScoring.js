@@ -2,7 +2,7 @@
 // Tier 1: Definitive | Tier 2: Strong | Tier 3: Contextual
 // v2: Integrated with Learning System (SignalWeights + RiskEvaluation)
 
-// const db = require("../db.server.js"); // معطل مؤقتًا
+const db = require('../lib/db');
 const { getWeightsForMerchant, getStaticWeight } = require('./signalWeights');
 const { getConnectedRisk } = require('./identityGraph');
 const { normalizeEmail } = require('../lib/utils');
@@ -972,9 +972,20 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   let merchantAdjustment = 0;
   let merchantAdjustmentReason = null;
   let cachedMerchantProfile = null;
-  // DB معطل مؤقتًا — نستخدم قيم افتراضية
-  cachedMerchantProfile = null;
-  merchantAdjustment = 0;
+  if (merchantId) {
+    try {
+      cachedMerchantProfile = await db.merchantProfile.findUnique({
+        where: { merchantId },
+      });
+      if (cachedMerchantProfile) {
+        const { adjustment, reason } = getMerchantAdjustment(cachedMerchantProfile);
+        merchantAdjustment = adjustment;
+        merchantAdjustmentReason = reason;
+      }
+    } catch (profileErr) {
+      logger.error({ module: 'riskScoring', err: profileErr }, 'Failed to load merchant profile, using defaults');
+    }
+  }
 
   // approve → تعديل كامل
   // review → تعديل أخف (0.7) علشان مش كل حاجة تتحول Review
