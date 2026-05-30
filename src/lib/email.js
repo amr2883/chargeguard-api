@@ -642,9 +642,254 @@ async function sendConfirmationEmail(email, confirmUrl) {
   throw lastError;
 }
 
+async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
+  const {
+    monthName, year, totalAttacks, totalProtected, totalFeesSaved,
+    securityScore, reasonBreakdown, threatOrigins,
+    prevMonthAttacks, monthOverMonthPct, historicalProtected,
+    totalTenants, biggestBINAttack,
+  } = reportData;
+
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const fmtUSD = (n) => n.toLocaleString('en-US', {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 0,
+  });
+
+  const isPro = tenant.plan !== 'early_access' && tenant.plan !== 'free';
+
+  // ── Week-over-month badge ──────────────────────────────────────────────
+  let momBadge = '';
+  if (monthOverMonthPct === null) {
+    momBadge = `<span style="font-size:12px;color:#64748b;">First month on record</span>`;
+  } else if (monthOverMonthPct > 0) {
+    momBadge = `<span style="font-size:12px;color:#dc2626;font-weight:600;">↑ ${monthOverMonthPct}% vs last month</span>`;
+  } else if (monthOverMonthPct < 0) {
+    momBadge = `<span style="font-size:12px;color:#16a34a;font-weight:600;">↓ ${Math.abs(monthOverMonthPct)}% vs last month</span>`;
+  } else {
+    momBadge = `<span style="font-size:12px;color:#64748b;">Same as last month</span>`;
+  }
+
+  // ── Reason bars (نفس pattern الـ Weekly Summary) ─────────────────────
+  const reasonLabels = {
+    velocity: 'Velocity Abuse', card_testing: 'Card Testing',
+    blacklist: 'Blacklist Match', pattern: 'Pattern Match',
+  };
+  const barsHtml = reasonBreakdown.slice(0, 4).map(({ reason, pct }) => `
+    <tr><td style="padding-bottom:10px;">
+      <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+        <td style="width:130px;font-size:13px;color:#334155;padding-right:10px;white-space:nowrap;">
+          ${reasonLabels[reason] || reason}
+        </td>
+        <td style="padding-right:10px;">
+          <div style="background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden;">
+            <div style="background:#f97316;width:${pct}%;height:8px;border-radius:4px;"></div>
+          </div>
+        </td>
+        <td style="width:40px;font-size:12px;color:#64748b;text-align:right;white-space:nowrap;">
+          ${pct}%
+        </td>
+      </tr></table>
+    </td></tr>`).join('');
+
+  // ── Country flags ─────────────────────────────────────────────────────
+  const flagEmoji = (code) => {
+    if (!code || code.length !== 2) return '🌐';
+    return code.toUpperCase().replace(/./g,
+      c => String.fromCodePoint(c.charCodeAt(0) + 127397));
+  };
+  const countriesHtml = threatOrigins.slice(0, 3).map(o =>
+    `<span style="margin-right:8px;">${flagEmoji(o.country)} ${o.country} (${o.count})</span>`
+  ).join('');
+
+  // ── BIN Attack Highlight ──────────────────────────────────────────────
+  const binHighlight = biggestBINAttack ? `
+    <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:14px 18px;margin-bottom:16px;">
+      <p style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#c2410c;margin:0 0 6px;">
+        ⚡ Biggest Attack This Month
+      </p>
+      <p style="font-size:14px;color:#7c2d12;margin:0;line-height:1.6;">
+        A coordinated BIN sequence attack on prefix
+        <strong>${biggestBINAttack.binPrefix}xx</strong> involved
+        <strong>${biggestBINAttack.cardsCount} cards</strong> and was fully contained.
+        Your customers noticed nothing.
+      </p>
+    </div>` : '';
+
+  // ── Social Proof ──────────────────────────────────────────────────────
+  const socialProof = totalTenants > 5 ? `
+    <p style="font-size:13px;color:#64748b;line-height:1.6;margin:0 0 20px;">
+      Your store is protected alongside
+      <strong style="color:#0f172a;">${totalTenants.toLocaleString('en-US')} merchants</strong>
+      in the ChargeGuard network. Threats we block for others protect you automatically.
+    </p>` : '';
+
+  // ── CTA section ───────────────────────────────────────────────────────
+  const ctaSection = `
+    <div style="text-align:center;margin-bottom:24px;">
+      <a href="${downloadUrl}"
+         style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);
+                color:#fff;font-size:14px;font-weight:700;padding:13px 32px;
+                border-radius:8px;text-decoration:none;letter-spacing:.01em;
+                margin-bottom:12px;">
+        ↓ Download Full PDF Report
+      </a>
+      ${!isPro ? `<br/><a href="mailto:support@chargeguard.io?subject=Upgrade to Pro"
+         style="display:inline-block;margin-top:10px;font-size:12px;color:#6366f1;
+                text-decoration:none;font-weight:600;">
+        🔓 Upgrade to Pro — Unlock Compliance Pack & Full Archive →
+      </a>` : ''}
+    </div>`;
+
+  const fullHtml = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+      <!-- Header — نفس pattern الـ email.js الحالي -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#fff;letter-spacing:-.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:.08em;text-transform:uppercase;">
+              ${monthName} ${year} Report
+            </span>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Hero — Peak Moment (Kahneman) -->
+      <div style="background:linear-gradient(135deg,#052e16,#14532d);padding:32px;border-left:1px solid #166534;border-right:1px solid #166534;">
+        <p style="font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:#4ade80;margin:0 0 8px;font-weight:600;">
+          🛡️ ${monthName} ${year} — Monthly Security Report
+        </p>
+        <h1 style="font-size:42px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1;letter-spacing:-.03em;">
+          ${fmtUSD(totalProtected)}
+        </h1>
+        <p style="font-size:15px;color:#86efac;margin:0 0 10px;">
+          in fraud value blocked from <strong>${storeDisplay}</strong> this month
+        </p>
+        ${momBadge}
+      </div>
+
+      <!-- Stats Row -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;padding:20px 32px;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="width:33%;padding-right:8px;">
+            <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+              <p style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Attacks Blocked</p>
+              <p style="font-size:26px;font-weight:800;color:#0f172a;margin:0;line-height:1;">${totalAttacks.toLocaleString('en-US')}</p>
+            </div>
+          </td>
+          <td style="width:33%;padding-right:8px;padding-left:4px;">
+            <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+              <p style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Fees Saved</p>
+              <p style="font-size:26px;font-weight:800;color:#16a34a;margin:0;line-height:1;">${fmtUSD(totalFeesSaved)}</p>
+            </div>
+          </td>
+          <td style="width:33%;padding-left:8px;">
+            <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+              <p style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Security Score</p>
+              <p style="font-size:26px;font-weight:800;color:#3b82f6;margin:0;line-height:1;">${securityScore}<span style="font-size:14px;color:#94a3b8;">/100</span></p>
+            </div>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Body Content -->
+      <div style="padding:24px 32px;background:#fff;border:1px solid #e2e8f0;border-top:none;">
+
+        ${binHighlight}
+
+        ${barsHtml ? `
+        <h3 style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 14px;letter-spacing:.04em;text-transform:uppercase;">
+          Attack Breakdown
+        </h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:20px;">${barsHtml}</table>` : ''}
+
+        ${countriesHtml ? `
+        <h3 style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 10px;letter-spacing:.04em;text-transform:uppercase;">
+          Top Threat Origins
+        </h3>
+        <div style="margin-bottom:20px;font-size:14px;color:#475569;">${countriesHtml}</div>` : ''}
+
+        ${socialProof}
+
+        <!-- Historical total — Endowment Effect -->
+        ${historicalProtected > totalProtected ? `
+        <div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
+          <p style="font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;color:#0369a1;margin:0 0 4px;">
+            📊 Since You Joined ChargeGuard
+          </p>
+          <p style="font-size:22px;font-weight:800;color:#0c4a6e;margin:0;">
+            ${fmtUSD(historicalProtected)}
+            <span style="font-size:13px;font-weight:400;color:#0369a1;"> total fraud value blocked</span>
+          </p>
+        </div>` : ''}
+
+        ${ctaSection}
+
+        <!-- End Rule — الجملة الأخيرة تبقى في الذاكرة -->
+        <div style="text-align:center;padding:16px 0 4px;">
+          <p style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 4px;">
+            ${storeDisplay} was safe every day in ${monthName}. ✓
+          </p>
+          <p style="font-size:13px;color:#64748b;margin:0;">
+            We'll be here in ${new Intl.DateTimeFormat('en-US',{month:'long'}).format(new Date(reportData.year, reportData.month, 1))} too.
+          </p>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your store is protected by ChargeGuard.
+          Monthly reports are generated on the 1st of each month.
+        </p>
+      </div>
+    </div>`;
+
+  // ── إرسال مع retry — نفس pattern الموجود في email.js ──────────────────
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      await sendViaGmail({
+        from:    `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to:      tenant.email,
+        subject: `📋 Your ${monthName} ${year} Security Report — ${storeDisplay}`,
+        html:    fullHtml,
+      });
+      console.log(`[MonthlyReport] ✅ Sent to ${tenant.email} — ${monthName} ${year}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || 'UNKNOWN';
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
 async function sendWelcomeWithKeyEmail(email, apiKey) {
   console.log('[Email] Sending welcome+key email after verification to:', email);
   await sendApiKeyEmail(email, apiKey);
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail };
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail };

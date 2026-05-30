@@ -8,7 +8,7 @@ const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
 const prisma = new PrismaClient();
 
 // ── Constants ─────────────────────────────────────────────────
-const FEES_PER_ATTEMPT = 0.30;
+const { SAVINGS_PER_ATTACK: FEES_PER_ATTEMPT } = require('../lib/constants');
 const DASHBOARD_RATE   = new Map();
 const MAX_REQ          = 30;
 const WINDOW_MS        = 60 * 1000;
@@ -223,7 +223,7 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
 // ── GET /api/dashboard  (JSON) ───────────────────────────────
 router.get('/', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+    const data = await getDashboardData(tenant.id, req.tenant.createdAt);
     res.json({
       tenant: {
         email:       req.tenant.email,
@@ -243,7 +243,7 @@ router.get('/', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/page  (HTML) ─────────────────────────
 router.get('/page', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+    const data = await getDashboardData(tenant.id, req.tenant.createdAt);
     res.setHeader('Content-Type',  'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag',  'noindex');
@@ -294,7 +294,7 @@ const statusBg    = { green: '#052e16', yellow: '#1c1202', gray: '#0f172a', red:
 const statusBorder= { green: '#166534', yellow: '#713f12', gray: '#1e293b', red: '#7f1d1d' };
 
 // ── Build HTML ────────────────────────────────────────────────
-const buildDashboardHtml = (tenant, data) => {
+const buildDashboardHtml = async (tenant, data) => {
   const { totalBlocked, feesSaved, chartData, recentEight, connectionStatus } = data;
   const maxChart  = Math.max(...chartData.map(d => d.count), 1);
   const isNew     = totalBlocked === 0;
@@ -1824,6 +1824,8 @@ const buildDashboardHtml = (tenant, data) => {
       <tbody>${recentRows}</tbody>
     </table>
   </div>
+  <!-- ── Monthly Reports Archive ── -->
+  ${await buildReportsArchiveSection(tenant.id, req.tenant.plan)}
 
   <!-- ── API Key Section ── -->
   <div class="tbl-wrap" style="margin-top:1.5rem;">
@@ -2051,7 +2053,148 @@ const buildDashboardHtml = (tenant, data) => {
 </html>`;
 };
 
+// ── monthly reports archive section ──────────────────────────────────────
+async function buildreportsarchivesection(tenantid, plan) {
+  const ispro = plan !== 'early_access' && plan !== 'free';
+
+  const reports = await prisma.monthlyreport.findmany({
+    where:   { tenantid, status: 'ready' },
+    orderby: [{ reportyear: 'desc' }, { reportmonth: 'desc' }],
+    take:    ispro ? 24 : 3,
+    select: {
+      id: true, reportmonth: true, reportyear: true,
+      totalattacks: true, totalprotected: true, totalfeessaved: true,
+    },
+  });
+
+  if (reports.length === 0) {
+    return '';
+  }
+
+  const monthnames = ['','jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  const fmtusd = (n) => n.tolocalestring('en-us', { style: 'currency', currency: 'usd', minimumfractiondigits: 0 });
+
+  const rows = reports.map((r, i) => {
+    const islocked  = !ispro && i > 0;
+    const monthlabel = `${monthnames[r.reportmonth]} ${r.reportyear}`;
+    const islatest   = i === 0;
+
+    return `
+      <div style="display:flex;align-items:center;gap:1rem;padding:.75rem 1.25rem;
+                  border-bottom:1px solid var(--border2);
+                  ${islocked ? 'filter:blur(2px);pointer-events:none;user-select:none;' : ''}
+                  transition:background .15s;"
+           ${!islocked ? 'onmouseover="this.style.background=\'rgba(255,255,255,.018)\'"' : ''}
+           ${!islocked ? 'onmouseout="this.style.background=\'transparent\'"' : ''}>
+
+        <div style="width:80px;flex-shrink:0;">
+          <div style="font-size:.82rem;font-weight:700;color:var(--text);">${monthlabel}</div>
+          ${islatest ? '<div style="font-size:.62rem;color:#60a5fa;font-weight:600;margin-top:.1rem;">latest</div>' : ''}
+        </div>
+
+        <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;">
+          <div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">attacks</div>
+            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'dm mono',monospace;">${r.totalattacks.tolocalestring('en-us')}</div>
+          </div>
+          <div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">protected</div>
+            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'dm mono',monospace;">${fmtusd(r.totalprotected)}</div>
+          </div>
+          <div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">fees saved</div>
+            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'dm mono',monospace;">${fmtusd(r.totalfeessaved)}</div>
+          </div>
+        </div>
+
+        ${!islocked ? `
+        <a href="/api/reports/monthly?month=${r.reportmonth}&year=${r.reportyear}"
+           style="flex-shrink:0;display:inline-flex;align-items:center;gap:.35rem;
+                  background:var(--surface2);border:1px solid var(--border);
+                  color:var(--text-sub);font-size:.72rem;font-weight:600;
+                  padding:.4rem .85rem;border-radius:6px;text-decoration:none;
+                  transition:border-color .15s;"
+           onmouseover="this.style.bordercolor='#3b82f6'"
+           onmouseout="this.style.bordercolor='var(--border)'">
+          ↓ pdf
+        </a>` : ''}
+      </div>`;
+  });
+
+  const upgradeoverlay = !ispro && reports.length > 1 ? `
+    <div style="position:absolute;bottom:0;left:0;right:0;height:60%;
+                background:linear-gradient(180deg,transparent,var(--surface) 60%);
+                display:flex;align-items:flex-end;justify-content:center;
+                padding-bottom:1rem;pointer-events:none;">
+      <a href="mailto:support@chargeguard.io?subject=upgrade to pro"
+         style="pointer-events:all;display:inline-flex;align-items:center;gap:.5rem;
+                background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;
+                font-size:.78rem;font-weight:600;padding:.55rem 1.25rem;
+                border-radius:20px;text-decoration:none;
+                box-shadow:0 4px 16px rgba(59,130,246,.3);">
+        🔓 access full archive — upgrade to pro
+      </a>
+    </div>` : '';
+
+  const totalhistoricalprotected = reports.reduce((s, r) => s + r.totalprotected, 0);
+  const summarybadge = totalhistoricalprotected > 0 ? `
+    <div style="font-size:.72rem;color:#4ade80;font-weight:600;
+                background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);
+                border-radius:20px;padding:.2rem .7rem;">
+      ${fmtusd(totalhistoricalprotected)} protected total
+    </div>` : '';
+
+  return `
+    <div class="tbl-wrap" style="margin-bottom:1.5rem;position:relative;">
+      <div class="tbl-header">
+        <span class="tbl-title">📋 monthly security reports</span>
+        <div style="display:flex;align-items:center;gap:.5rem;">
+          ${summarybadge}
+          <span class="tbl-count">${reports.length} report${reports.length !== 1 ? 's' : ''}</span>
+        </div>
+      </div>
+      ${rows.join('')}
+      ${upgradeoverlay}
+    </div>`;
+}
+
 // ── POST /api/dashboard/rotate-key ──────────────────────────────────────
+// ── GET /api/dashboard/monthly-report-preview ──────────────────────────
+router.get('/monthly-report-preview', rateLimit, authByApiKey, async (req, res) => {
+  try {
+    const latest = await prisma.monthlyReport.findFirst({
+      where:   { tenantId: req.tenant.id, status: 'ready' },
+      orderBy: [{ reportYear: 'desc' }, { reportMonth: 'desc' }],
+      select: {
+        reportMonth: true, reportYear: true,
+        totalAttacks: true, totalProtected: true,
+        totalFeesSaved: true, securityScore: true,
+        topCountry: true, topReason: true,
+        prevMonthAttacks: true,
+      },
+    });
+
+    if (!latest) {
+      return res.json({ available: false, message: 'First report generates on the 1st of next month.' });
+    }
+
+    const monthOverMonthPct = latest.prevMonthAttacks
+      ? Math.round(((latest.totalAttacks - latest.prevMonthAttacks) / latest.prevMonthAttacks) * 100)
+      : null;
+
+    res.json({
+      available: true,
+      ...latest,
+      monthOverMonthPct,
+      downloadUrl: `/api/reports/monthly?month=${latest.reportMonth}&year=${latest.reportYear}`,
+    });
+
+  } catch (err) {
+    console.error('[Dashboard] monthly-report-preview error:', err.message);
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
 router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
   try {
     const tenant = req.tenant;
@@ -2104,7 +2247,7 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/bin-sequence-alerts ────────────────────────────────
 router.get('/bin-sequence-alerts', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const tenantId = req.tenant.id;
+    const tenantId = tenant.id;
     const now      = Date.now();
 
     // ── جلب البيانات بالتوازي ─────────────────────────────────────────────

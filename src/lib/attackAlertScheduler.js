@@ -22,7 +22,7 @@ const STARTUP_DELAY_MS      = 2  * 60 * 1000;  // first run: 2 min after boot
 const ATTACK_WINDOW_MS      = 10 * 60 * 1000;  // look-back window: 10 minutes
 const ATTACK_THRESHOLD      = 10;               // min attacks to trigger alert
 const COOLDOWN_MS           = 6  * 60 * 60 * 1000; // 6-hour cooldown per tenant
-const SAVINGS_PER_ATTACK    = 0.30;             // estimated $ saved per blocked attempt
+const { SAVINGS_PER_ATTACK } = require('./constants');
 // ───────────────────────────────────────────────────────────────────────────
 
 /**
