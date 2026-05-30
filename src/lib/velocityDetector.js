@@ -1,84 +1,82 @@
 // src/lib/velocityDetector.js
-// طبقة كشف سرعة محاولات الدفع لمنع هجمات اختبار البطاقات (Card Testing)
+// طبقة كشف سرعة محاولات الدفع — persistent via CardTestAttempt (Prisma)
 
-const velocityStore = new Map(); // key: `ip:${ip}` أو `device:${deviceFingerprint}`
+const crypto = require('crypto');
+const db     = require('./db');
+const logger = require('./logger');
+
 const FAILURE_WINDOW_MS = 10 * 60 * 1000; // 10 دقائق
 const BLOCK_DURATION_MS = 60 * 60 * 1000; // 1 ساعة
 
-// عتبات الحظر
 const THRESHOLDS = {
-  IP: 5,     // 5 محاولات فاشلة من نفس IP في 10 دقائق
-  DEVICE: 5  // 5 محاولات فاشلة من نفس الجهاز في 10 دقائق
+  IP:     5,
+  DEVICE: 5,
 };
 
-// تنظيف دوري للمخزن (كل 5 دقائق)
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, entry] of velocityStore.entries()) {
-    if (entry.blockedUntil && entry.blockedUntil < now) {
-      velocityStore.delete(key);
-    } else if (entry.timestamp < now - FAILURE_WINDOW_MS) {
-      velocityStore.delete(key);
-    }
-  }
-}, 5 * 60 * 1000).unref();
+// GDPR-safe hashing — نفس نمط risk.js
+const hashValue = (val) => {
+  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
+  return crypto.createHmac('sha256', salt).update(String(val)).digest('hex');
+};
 
 /**
- * تسجيل محاولة فاشلة (يتم استدعاؤها عندما يكون القرار Block)
- * @param {object} params - { ip, deviceFingerprint }
+ * تسجيل محاولة فاشلة في CardTestAttempt
+ * @param {object} params - { ip, deviceFingerprint, merchantId, amount }
  */
-function recordFailedAttempt({ ip, deviceFingerprint }) {
-  const now = Date.now();
-  
-  if (ip) {
-    const key = `ip:${ip}`;
-    const entry = velocityStore.get(key) || { count: 0, timestamp: now };
-    entry.count++;
-    entry.timestamp = now;
-    if (entry.count >= THRESHOLDS.IP) {
-      entry.blockedUntil = now + BLOCK_DURATION_MS;
-    }
-    velocityStore.set(key, entry);
-  }
-
-  if (deviceFingerprint) {
-    const key = `device:${deviceFingerprint}`;
-    const entry = velocityStore.get(key) || { count: 0, timestamp: now };
-    entry.count++;
-    entry.timestamp = now;
-    if (entry.count >= THRESHOLDS.DEVICE) {
-      entry.blockedUntil = now + BLOCK_DURATION_MS;
-    }
-    velocityStore.set(key, entry);
+async function recordFailedAttempt({ ip, deviceFingerprint, merchantId = 'unknown', amount = 0 }) {
+  try {
+    await db.cardTestAttempt.create({
+      data: {
+        merchantId,
+        ipHash:     ip               ? hashValue(ip)               : null,
+        deviceHash: deviceFingerprint ? hashValue(deviceFingerprint) : null,
+        amount,
+        wasBlocked: true,
+      },
+    });
+  } catch (err) {
+    logger.error({ module: 'velocityDetector', err }, 'recordFailedAttempt failed');
   }
 }
 
 /**
- * التحقق مما إذا كان IP أو جهاز معين محظورًا حاليًا بسبب السرعة العالية
- * @param {object} params - { ip, deviceFingerprint }
- * @returns {object} - { blocked: boolean, reason: string | null }
+ * التحقق مما إذا كان IP أو جهاز معين يتجاوز عتبة السرعة
+ * @param {object} params - { ip, deviceFingerprint, merchantId }
+ * @returns {Promise<{blocked: boolean, reason: string|null}>}
  */
-function checkVelocity({ ip, deviceFingerprint }) {
-  const now = Date.now();
-  
-  if (ip) {
-    const ipEntry = velocityStore.get(`ip:${ip}`);
-    if (ipEntry && ipEntry.blockedUntil && ipEntry.blockedUntil > now) {
-      return { 
-        blocked: true, 
-        reason: `IP temporarily blocked due to high failure rate (${ipEntry.count} attempts)` 
-      };
-    }
-  }
+async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown' }) {
+  const since = new Date(Date.now() - FAILURE_WINDOW_MS);
 
-  if (deviceFingerprint) {
-    const deviceEntry = velocityStore.get(`device:${deviceFingerprint}`);
-    if (deviceEntry && deviceEntry.blockedUntil && deviceEntry.blockedUntil > now) {
-      return { 
-        blocked: true, 
-        reason: `Device temporarily blocked due to high failure rate (${deviceEntry.count} attempts)` 
-      };
+  try {
+    if (ip) {
+      const ipHash  = hashValue(ip);
+      const ipCount = await db.cardTestAttempt.count({
+        where: { ipHash, createdAt: { gte: since } },
+      });
+      if (ipCount >= THRESHOLDS.IP) {
+        return {
+          blocked: true,
+          reason:  `IP temporarily blocked due to high failure rate (${ipCount} attempts in 10 min)`,
+        };
+      }
     }
+
+    if (deviceFingerprint) {
+      const deviceHash  = hashValue(deviceFingerprint);
+      const deviceCount = await db.cardTestAttempt.count({
+        where: { deviceHash, createdAt: { gte: since } },
+      });
+      if (deviceCount >= THRESHOLDS.DEVICE) {
+        return {
+          blocked: true,
+          reason:  `Device temporarily blocked due to high failure rate (${deviceCount} attempts in 10 min)`,
+        };
+      }
+    }
+  } catch (err) {
+    logger.error({ module: 'velocityDetector', err }, 'checkVelocity DB error — failing open');
+    // Fail open: لو الـ DB فشل، نكمل ولا نوقف الطلب
+    return { blocked: false, reason: null };
   }
 
   return { blocked: false, reason: null };

@@ -203,6 +203,55 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
 
   const binSequenceStats = getBINStats();
 
+  // ── PayPal Shield Stats (from AlertLog) ───────────────────────────────
+  const sevenDaysAgoPaypal = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+  const [paypalWeeklyLogs, paypalAllTimeLogs, tenantPaypalMeta] = await Promise.all([
+
+    // آخر 7 أيام من تنبيهات PayPal
+    prisma.alertLog.findMany({
+      where: {
+        tenantId:  tenantId,
+        alertType: 'paypal_weekly_shield',
+        sentAt:    { gte: sevenDaysAgoPaypal },
+      },
+      select: { attackCount: true, savedAmount: true, sentAt: true },
+      orderBy: { sentAt: 'desc' },
+    }),
+
+    // إجمالي كل الوقت
+    prisma.alertLog.aggregate({
+      where:   { tenantId: tenantId, alertType: 'paypal_weekly_shield' },
+      _sum:    { attackCount: true, savedAmount: true },
+      _count:  { id: true },
+    }),
+
+    // آخر تنبيه PayPal فوري (من lastPaypalAlertAt)
+    prisma.tenant.findUnique({
+      where:  { id: tenantId },
+      select: { lastPaypalAlertAt: true },
+    }),
+
+  ]);
+
+  const paypalWeekSuspicious  = paypalWeeklyLogs.reduce((s, l) => s + (l.attackCount || 0), 0);
+  const paypalWeekSaved       = paypalWeeklyLogs.reduce((s, l) => s + (l.savedAmount  || 0), 0);
+  const paypalAllTimeSuspicious = paypalAllTimeLogs._sum.attackCount || 0;
+  const paypalAllTimeSaved      = paypalAllTimeLogs._sum.savedAmount  || 0;
+  const paypalReportCount       = paypalAllTimeLogs._count.id         || 0;
+  const paypalIsActive          = paypalReportCount > 0;
+  const lastPaypalAlertAt       = tenantPaypalMeta?.lastPaypalAlertAt ?? null;
+
+  const paypalStats = {
+    isActive:            paypalIsActive,
+    weekSuspicious:      paypalWeekSuspicious,
+    weekSaved:           paypalWeekSaved,
+    allTimeSuspicious:   paypalAllTimeSuspicious,
+    allTimeSaved:        paypalAllTimeSaved,
+    reportCount:         paypalReportCount,
+    lastAlertAt:         lastPaypalAlertAt,
+  };
+
   return {
     totalBlocked,
     feesSaved:        (totalBlocked * FEES_PER_ATTEMPT).toFixed(2),
@@ -217,13 +266,14 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
     chartData:        Object.entries(dayMap).map(([date, count]) => ({ date, count })),
     recentEight:      lastEight,
     connectionStatus: getConnectionStatus(lastActivity?.blockedAt ?? null),
+    paypalStats,
   };
 };
 
 // ── GET /api/dashboard  (JSON) ───────────────────────────────
 router.get('/', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(tenant.id, req.tenant.createdAt);
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
     res.json({
       tenant: {
         email:       req.tenant.email,
@@ -243,11 +293,11 @@ router.get('/', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/page  (HTML) ─────────────────────────
 router.get('/page', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(tenant.id, req.tenant.createdAt);
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
     res.setHeader('Content-Type',  'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag',  'noindex');
-    res.send(buildDashboardHtml(req.tenant, data));
+    res.send(await buildDashboardHtml(req.tenant, data));
   } catch (err) {
     console.error('[Dashboard] Page error:', err.message);
     res.status(500).send('Internal Server Error');
@@ -1409,6 +1459,229 @@ const buildDashboardHtml = async (tenant, data) => {
     </div>`;
   })()}
 
+  <!-- ── PayPal Shield Section ── -->
+  ${(() => {
+    const pp = data.paypalStats;
+
+    // إذا لم يكن التاجر يستخدم PayPal بعد
+    if (!pp.isActive) {
+      return `
+      <div style="
+        background:linear-gradient(135deg,#0a0f1e,#0d1529);
+        border:1px solid #1e2d45;
+        border-radius:var(--radius);
+        padding:1.1rem 1.5rem;
+        margin-bottom:1.5rem;
+        display:flex;
+        align-items:center;
+        gap:1rem;
+      ">
+        <div style="
+          width:36px;height:36px;flex-shrink:0;
+          background:rgba(59,130,246,.08);
+          border:1px solid rgba(59,130,246,.15);
+          border-radius:9px;
+          display:flex;align-items:center;justify-content:center;
+          font-size:1rem;
+        ">🅿️</div>
+        <div style="flex:1;">
+          <div style="font-size:.8rem;font-weight:700;color:#475569;letter-spacing:-.01em;">
+            PayPal Shield — Ready
+          </div>
+          <div style="font-size:.72rem;color:#334155;margin-top:.15rem;line-height:1.4;">
+            Connect your PayPal webhook to activate transaction-level monitoring
+          </div>
+        </div>
+        <div style="
+          flex-shrink:0;
+          font-size:.65rem;font-weight:600;
+          color:#334155;
+          background:rgba(255,255,255,.03);
+          border:1px solid #1e2d45;
+          border-radius:20px;
+          padding:.25rem .7rem;
+          white-space:nowrap;
+        ">Not connected</div>
+      </div>`;
+    }
+
+    // PayPal نشط — عرض الـ Shield Section كاملة
+    const savedFmt = fmtCurrency.format(pp.weekSaved);
+    const allTimeSavedFmt = fmtCurrency.format(pp.allTimeSaved);
+
+    const relTime = (date) => {
+      if (!date) return 'No alerts yet';
+      const diff = Date.now() - new Date(date).getTime();
+      const m = Math.floor(diff / 60000);
+      const h = Math.floor(diff / 3600000);
+      const d = Math.floor(diff / 86400000);
+      if (m < 1)  return 'just now';
+      if (m < 60) return `${m}m ago`;
+      if (h < 24) return `${h}h ago`;
+      return `${d}d ago`;
+    };
+
+    const lastAlertStr = relTime(pp.lastAlertAt);
+    const hasWeekActivity = pp.weekSuspicious > 0;
+
+    return `
+    <div style="
+      background:linear-gradient(135deg,#080f1f,#0c1a38);
+      border:1px solid #1a3159;
+      border-radius:var(--radius);
+      margin-bottom:1.5rem;
+      overflow:hidden;
+      position:relative;
+    ">
+      <!-- Glow top border -->
+      <div style="
+        position:absolute;top:0;left:0;right:0;height:2px;
+        background:linear-gradient(90deg,#1d4ed8,#3b82f6,#1d4ed8);
+        opacity:.7;
+      "></div>
+
+      <!-- Header Row -->
+      <div style="
+        display:flex;align-items:center;justify-content:space-between;
+        padding:.875rem 1.25rem;
+        border-bottom:1px solid rgba(59,130,246,.1);
+      ">
+        <div style="display:flex;align-items:center;gap:.6rem;">
+          <div style="
+            width:28px;height:28px;
+            background:linear-gradient(135deg,#1d4ed8,#3b82f6);
+            border-radius:7px;
+            display:flex;align-items:center;justify-content:center;
+            font-size:.85rem;
+            box-shadow:0 0 12px rgba(59,130,246,.3);
+          ">🅿️</div>
+          <span style="
+            font-size:.75rem;font-weight:700;
+            text-transform:uppercase;letter-spacing:.07em;
+            color:#60a5fa;
+          ">PayPal Shield</span>
+          <span style="
+            font-size:.62rem;font-weight:600;
+            color:#22c55e;
+            background:rgba(34,197,94,.08);
+            border:1px solid rgba(34,197,94,.2);
+            border-radius:20px;
+            padding:.15rem .55rem;
+          ">● Active</span>
+        </div>
+        <div style="
+          font-size:.65rem;color:#334155;
+          background:rgba(255,255,255,.03);
+          border:1px solid #1e2d45;
+          border-radius:20px;
+          padding:.2rem .65rem;
+          font-family:'DM Mono',monospace;
+        ">Last alert: ${escapeHtml(lastAlertStr)}</div>
+      </div>
+
+      <!-- Stats Row -->
+      <div style="
+        display:grid;
+        grid-template-columns:repeat(3,1fr);
+        gap:0;
+        border-bottom:1px solid rgba(59,130,246,.08);
+      ">
+
+        <!-- Stat 1: This Week Intercepted -->
+        <div style="
+          padding:1rem 1.25rem;
+          border-right:1px solid rgba(59,130,246,.08);
+          position:relative;
+        ">
+          <div style="
+            font-size:.6rem;font-weight:600;
+            text-transform:uppercase;letter-spacing:.08em;
+            color:#334155;margin-bottom:.35rem;
+          ">This Week</div>
+          <div style="
+            font-size:1.75rem;font-weight:700;
+            color:${hasWeekActivity ? '#f87171' : '#475569'};
+            letter-spacing:-.03em;line-height:1;
+            font-variant-numeric:tabular-nums;
+          ">${pp.weekSuspicious}</div>
+          <div style="font-size:.65rem;color:#334155;margin-top:.25rem;">
+            suspicious transactions
+          </div>
+          ${hasWeekActivity ? `
+          <div style="
+            position:absolute;top:.75rem;right:.75rem;
+            width:6px;height:6px;
+            border-radius:50%;
+            background:#ef4444;
+            box-shadow:0 0 6px #ef4444;
+            animation:pulse 2s ease-in-out infinite;
+          "></div>` : ''}
+        </div>
+
+        <!-- Stat 2: Savings This Week -->
+        <div style="
+          padding:1rem 1.25rem;
+          border-right:1px solid rgba(59,130,246,.08);
+        ">
+          <div style="
+            font-size:.6rem;font-weight:600;
+            text-transform:uppercase;letter-spacing:.08em;
+            color:#334155;margin-bottom:.35rem;
+          ">Saved This Week</div>
+          <div style="
+            font-size:1.75rem;font-weight:700;
+            color:${pp.weekSaved > 0 ? '#4ade80' : '#475569'};
+            letter-spacing:-.03em;line-height:1;
+            font-variant-numeric:tabular-nums;
+          ">${pp.weekSaved > 0 ? savedFmt : '—'}</div>
+          <div style="font-size:.65rem;color:#334155;margin-top:.25rem;">
+            in dispute fees avoided
+          </div>
+        </div>
+
+        <!-- Stat 3: All Time -->
+        <div style="padding:1rem 1.25rem;">
+          <div style="
+            font-size:.6rem;font-weight:600;
+            text-transform:uppercase;letter-spacing:.08em;
+            color:#334155;margin-bottom:.35rem;
+          ">All Time</div>
+          <div style="
+            font-size:1.75rem;font-weight:700;
+            color:#3b82f6;
+            letter-spacing:-.03em;line-height:1;
+            font-variant-numeric:tabular-nums;
+          ">${pp.allTimeSuspicious}</div>
+          <div style="font-size:.65rem;color:#334155;margin-top:.25rem;">
+            total intercepted · ${allTimeSavedFmt} saved
+          </div>
+        </div>
+
+      </div>
+
+      <!-- End Rule — Peak-End Psychology -->
+      <div style="
+        padding:.7rem 1.25rem;
+        display:flex;align-items:center;justify-content:space-between;
+        flex-wrap:wrap;gap:.5rem;
+      ">
+        <span style="
+          font-size:.72rem;font-weight:600;
+          color:#1e40af;
+          display:flex;align-items:center;gap:.4rem;
+        ">
+          <span style="color:#22c55e;">✓</span>
+          PayPal transactions monitored with the same precision as Stripe
+        </span>
+        <span style="
+          font-size:.65rem;color:#1e3a5f;
+          font-family:'DM Mono',monospace;
+        ">${pp.reportCount} weekly report${pp.reportCount !== 1 ? 's' : ''} generated</span>
+      </div>
+
+    </div>`;
+  })()}
+
   ${isNew ? `
   <!-- ── Onboarding ── -->
   <div class="onboard">
@@ -1825,7 +2098,7 @@ const buildDashboardHtml = async (tenant, data) => {
     </table>
   </div>
   <!-- ── Monthly Reports Archive ── -->
-  ${await buildReportsArchiveSection(tenant.id, req.tenant.plan)}
+  ${await buildReportsArchiveSection(tenant.id, tenant.plan)}
 
   <!-- ── API Key Section ── -->
   <div class="tbl-wrap" style="margin-top:1.5rem;">
@@ -2075,7 +2348,7 @@ async function buildreportsarchivesection(tenantid, plan) {
   const fmtusd = (n) => n.tolocalestring('en-us', { style: 'currency', currency: 'usd', minimumfractiondigits: 0 });
 
   const rows = reports.map((r, i) => {
-    const islocked  = !ispro && i > 0;
+    const islocked   = !ispro && i > 0;
     const monthlabel = `${monthnames[r.reportmonth]} ${r.reportyear}`;
     const islatest   = i === 0;
 
@@ -2247,7 +2520,7 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/bin-sequence-alerts ────────────────────────────────
 router.get('/bin-sequence-alerts', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const tenantId = tenant.id;
+    const tenantId = req.tenant.id;
     const now      = Date.now();
 
     // ── جلب البيانات بالتوازي ─────────────────────────────────────────────
