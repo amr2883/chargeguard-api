@@ -37,6 +37,7 @@ model Tenant {
   blockedAttempts   BlockedAttempt[]   @relation("TenantBlockedAttempts")
   alertLogs         AlertLog[]         @relation("TenantAlerts")
   binSequenceAlerts BinSequenceAlert[] @relation("TenantBinAlerts")
+  monthlyReports    MonthlyReport[]    @relation("TenantMonthlyReports")
 }
 
 // ========== Merchant Profile ==========
@@ -414,6 +415,34 @@ model BinSequenceAlert {
   @@index([tenantId, status, detectedAt])
   @@index([tenantId, detectedAt])
 }
+// ========== Monthly Security Report ==========
+model MonthlyReport {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation("TenantMonthlyReports", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  reportMonth  Int      // 1–12
+  reportYear   Int
+
+  // حالة التوليد
+  status       String   @default("generating") // generating | ready | failed
+
+  // الإحصائيات المُجمَّدة وقت الإنشاء — لا تتغير لاحقاً
+  totalAttacks       Int
+  totalProtected     Float   // sum(amountAttempted) — القيمة الفعلية المحمية
+  totalFeesSaved     Float   // attacks × SAVINGS_PER_ATTACK
+  securityScore      Int
+  topCountry         String?
+  topReason          String?
+  prevMonthAttacks   Int?    // للمقارنة الشهرية
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([tenantId, reportMonth, reportYear])
+  @@index([tenantId, reportYear, reportMonth])
+}
+
 
 // ========== Attack Alert Log ==========
 model AlertLog {
