@@ -29,8 +29,8 @@ const STARTUP_DELAY_MS       = 60 * 60 * 1000;  // first run: 1 hour after boot
 const SEND_DAY_UTC           = 0;                // 0 = Sunday
 const SEND_HOUR_UTC          = 9;                // 09:00–09:59 UTC
 const TENANT_DELAY_MS        = 3000;             // 3s between tenants (SMTP courtesy)
-const SAVINGS_PER_ATTACK     = 0.30;             // must stay in sync with attackAlertScheduler.js
-const QUIET_STREAK_THRESHOLD = 3;               // skip send after this many consecutive quiet weeks
+const { SAVINGS_PER_ATTACK, QUIET_STREAK_THRESHOLD: QUIET_STREAK_THRESHOLD_CONST } = require('../lib/constants');
+const QUIET_STREAK_THRESHOLD = QUIET_STREAK_THRESHOLD_CONST;
 // ───────────────────────────────────────────────────────────────────────────
 
 // ── Week boundary helpers ───────────────────────────────────────────────────
