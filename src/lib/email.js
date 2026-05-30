@@ -887,9 +887,387 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
   throw lastError;
 }
 
+async function sendPaypalWeeklyReportEmail({
+  tenant,
+  weekStart,
+  paypalTxnCount,
+  paypalBlockedCount,
+  paypalFlaggedCount,
+  savedAmount,
+  topCardCountry,
+  weekOverWeekPct,
+  historicalPaypalTotal,
+}) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const savedFormatted = savedAmount.toLocaleString('en-US', {
+    style: 'currency', currency: 'USD', minimumFractionDigits: 2,
+  });
+
+  const weekLabel = weekStart.toLocaleString('en-US', {
+    month: 'short', day: 'numeric', timeZone: 'UTC',
+  });
+
+  // ── Week-over-week badge ───────────────────────────────────────────────
+  let wowBadge = '';
+  if (weekOverWeekPct === null) {
+    wowBadge = `<span style="font-size:12px;color:#64748b;">First active PayPal week</span>`;
+  } else if (weekOverWeekPct > 0) {
+    wowBadge = `<span style="font-size:12px;color:#dc2626;font-weight:600;">↑ ${weekOverWeekPct}% vs last week</span>`;
+  } else if (weekOverWeekPct < 0) {
+    wowBadge = `<span style="font-size:12px;color:#16a34a;font-weight:600;">↓ ${Math.abs(weekOverWeekPct)}% vs last week</span>`;
+  } else {
+    wowBadge = `<span style="font-size:12px;color:#64748b;">Same as last week</span>`;
+  }
+
+  // ── Historical total block ─────────────────────────────────────────────
+  const histHtml = historicalPaypalTotal && historicalPaypalTotal.count > paypalBlockedCount
+    ? `<div style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
+         <p style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#0369a1;margin:0 0 4px;">📊 PayPal Shield — All Time</p>
+         <p style="font-size:22px;font-weight:800;color:#0c4a6e;margin:0;">
+           ${historicalPaypalTotal.count.toLocaleString('en-US')}
+           <span style="font-size:13px;font-weight:400;color:#0369a1;"> suspicious PayPal transactions intercepted</span>
+         </p>
+       </div>`
+    : '';
+
+  // ── Active week vs quiet week ──────────────────────────────────────────
+  let bodyHtml;
+
+  if (paypalBlockedCount > 0 || paypalFlaggedCount > 0) {
+    const totalIntercepted = paypalBlockedCount + paypalFlaggedCount;
+    bodyHtml = `
+      <!-- PayPal Hero Banner -->
+      <div style="background:linear-gradient(135deg,#0c1a3a,#1e3a5f);padding:28px 32px;border-left:1px solid #1d4ed8;border-right:1px solid #1d4ed8;">
+        <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin:0 0 8px;font-weight:600;">🛡️ PayPal Shield — Weekly Report</p>
+        <h1 style="font-size:36px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">${totalIntercepted}</h1>
+        <p style="font-size:15px;color:#bfdbfe;margin:0 0 10px;">suspicious PayPal transactions intercepted on <strong>${storeDisplay}</strong></p>
+        ${wowBadge}
+      </div>
+
+      <!-- Stats Row -->
+      <div style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;padding:20px 32px;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr>
+            <td style="width:33%;padding-right:8px;">
+              <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+                <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Blocked</p>
+                <p style="font-size:26px;font-weight:800;color:#dc2626;margin:0;line-height:1;">${paypalBlockedCount}</p>
+                <p style="font-size:11px;color:#64748b;margin:3px 0 0;">hard blocks</p>
+              </div>
+            </td>
+            <td style="width:33%;padding-right:8px;padding-left:4px;">
+              <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+                <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Flagged</p>
+                <p style="font-size:26px;font-weight:800;color:#d97706;margin:0;line-height:1;">${paypalFlaggedCount}</p>
+                <p style="font-size:11px;color:#64748b;margin:3px 0 0;">for review</p>
+              </div>
+            </td>
+            <td style="width:33%;padding-left:8px;">
+              <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
+                <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Est. Savings</p>
+                <p style="font-size:26px;font-weight:800;color:#16a34a;margin:0;line-height:1;">${savedFormatted}</p>
+                <p style="font-size:11px;color:#64748b;margin:3px 0 0;">fees avoided</p>
+              </div>
+            </td>
+          </tr>
+        </table>
+      </div>
+
+      <!-- Top Card Origin -->
+      ${topCardCountry ? `
+      <div style="padding:20px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <p style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 8px;">Top Card Origin This Week</p>
+        <p style="font-size:14px;color:#475569;margin:0;">Most suspicious PayPal cards this week originated from <strong style="color:#0f172a;">${topCardCountry}</strong>. ChargeGuard flagged them before any transaction was processed.</p>
+      </div>` : ''}
+
+      <!-- Historical -->
+      <div style="padding:20px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        ${histHtml}
+      </div>
+
+      <!-- Reassurance + Soft Pro CTA -->
+      <div style="padding:16px 32px 20px;background:#f0fdf4;border:1px solid #bbf7d0;border-top:none;">
+        <p style="font-size:14px;color:#166534;margin:0 0 8px;font-weight:600;">✅ PayPal is protected. Your store processed ${paypalTxnCount} PayPal transactions normally this week.</p>
+        <p style="font-size:13px;color:#166534;margin:0;line-height:1.6;">ChargeGuard monitors every PayPal transaction the same way it monitors Stripe — silently, in the background.</p>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:20px 32px 28px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+        <a href="https://chargeguard-api.onrender.com/api/dashboard/page"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          View PayPal Activity →
+        </a>
+      </div>`;
+
+  } else {
+    // Quiet week
+    bodyHtml = `
+      <!-- Quiet Banner -->
+      <div style="background:#f0fdf4;padding:28px 32px;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0;text-align:center;">
+        <p style="font-size:32px;margin:0 0 8px;">🛡️</p>
+        <h1 style="font-size:22px;font-weight:700;color:#14532d;margin:0 0 8px;">PayPal was clean this week</h1>
+        <p style="font-size:15px;color:#166534;margin:0;">No suspicious PayPal transactions detected — monitoring is active 24/7</p>
+      </div>
+
+      <!-- Historical -->
+      ${histHtml ? `<div style="padding:20px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">${histHtml}</div>` : ''}
+
+      <!-- Reassurance -->
+      <div style="padding:20px 32px 28px;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;">
+        <p style="font-size:13px;color:#475569;margin:0;line-height:1.7;">PayPal Shield scans every transaction in real time. A quiet week means the firewall is doing its job — silently blocking threats before they register.</p>
+      </div>`;
+  }
+
+  const subject = (paypalBlockedCount + paypalFlaggedCount) > 0
+    ? `🛡️ PayPal Shield blocked ${paypalBlockedCount + paypalFlaggedCount} suspicious transactions on ${storeDisplay}`
+    : `✅ Clean PayPal week for ${storeDisplay} — Shield Report`;
+
+  const fullHtml = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">PayPal Shield — ${weekLabel}</span>
+          </td>
+        </tr></table>
+      </div>
+      ${bodyHtml}
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your store's PayPal integration is monitored by ChargeGuard.
+          PayPal Shield reports are sent every Sunday at 09:30 UTC.
+        </p>
+      </div>
+    </div>`;
+
+  const RETRIES          = 3;
+  const RETRY_DELAY_MS   = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[PaypalWeekly] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      await sendViaGmail({
+        from:    `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to:      tenant.email,
+        subject,
+        html:    fullHtml,
+      });
+      console.log(`[PaypalWeekly] ✅ Sent to ${tenant.email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[PaypalWeekly] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[PaypalWeekly] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
 async function sendWelcomeWithKeyEmail(email, apiKey) {
   console.log('[Email] Sending welcome+key email after verification to:', email);
   await sendApiKeyEmail(email, apiKey);
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail };
+async function sendPaypalAlertEmail(tenant, alertData) {
+  const {
+    paypalTxnId,
+    brand,
+    last4,
+    cardCountry,
+    amount,
+    currency = 'USD',
+    riskScore,
+    decision,
+    flags = [],
+    estimatedSavings,
+  } = alertData;
+
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const now = new Date();
+  const timeStr = now.toLocaleString('en-US', {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+    timeZone: 'UTC', timeZoneName: 'short',
+  });
+
+  const txnDisplay    = paypalTxnId ? paypalTxnId.slice(-8).toUpperCase() : '—';
+  const brandClean    = brand ? brand.charAt(0).toUpperCase() + brand.slice(1) : 'Card';
+  const cardDisplay   = last4 ? `${brandClean} ••••${last4}` : brandClean;
+  const countryDisplay = cardCountry || 'Unknown';
+  const amountDisplay  = amount
+    ? Number(amount).toLocaleString('en-US', { style: 'currency', currency, minimumFractionDigits: 2 })
+    : '—';
+  const savingsDisplay = estimatedSavings
+    ? estimatedSavings.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 2 })
+    : null;
+
+  const decisionLabel  = decision === 'block' ? 'Blocked' : 'Flagged for Review';
+  const decisionColor  = decision === 'block' ? '#dc2626' : '#d97706';
+  const decisionBg     = decision === 'block' ? '#fef2f2' : '#fffbeb';
+  const decisionBorder = decision === 'block' ? '#fecaca' : '#fde68a';
+
+  const topFlag    = flags[0]?.text || null;
+  const flagsHtml  = topFlag
+    ? `<p style="font-size:13px;color:#475569;margin:0 0 4px;line-height:1.6;"><strong style="color:#0f172a;">Primary reason:</strong> ${topFlag}</p>`
+    : '';
+
+  const savingsHtml = savingsDisplay
+    ? `<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px 16px;margin-bottom:20px;">
+         <p style="font-size:13px;color:#166534;margin:0;line-height:1.6;">💰 <strong>Estimated savings:</strong> ${savingsDisplay} in potential dispute fees avoided.</p>
+       </div>`
+    : '';
+
+  const RETRIES          = 3;
+  const RETRY_DELAY_MS   = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+
+  let lastError;
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[PaypalAlert] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      await sendViaGmail({
+        from:    `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to:      tenant.email,
+        subject: `🛡️ ChargeGuard intercepted a suspicious PayPal transaction on ${storeDisplay}`,
+        html: `
+<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+  <!-- Header -->
+  <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+    <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+      <td style="vertical-align:middle;">
+        <table cellpadding="0" cellspacing="0"><tr>
+          <td style="padding-right:10px;vertical-align:middle;">
+            <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+              </svg>
+            </div>
+          </td>
+          <td style="vertical-align:middle;">
+            <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+          </td>
+        </tr></table>
+      </td>
+      <td style="text-align:right;vertical-align:middle;">
+        <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">${timeStr}</span>
+      </td>
+    </tr></table>
+  </div>
+
+  <!-- Peak Banner -->
+  <div style="background:linear-gradient(135deg,#0c1a3a,#1e3a5f);padding:28px 32px;border-left:1px solid #1d4ed8;border-right:1px solid #1d4ed8;">
+    <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin:0 0 8px;font-weight:600;">🛡️ PayPal Shield — Transaction Intercepted</p>
+    <h1 style="font-size:26px;font-weight:800;color:#ffffff;margin:0 0 6px;line-height:1.2;">Suspicious PayPal transaction stopped</h1>
+    <p style="font-size:14px;color:#bfdbfe;margin:0;">on <strong>${storeDisplay}</strong> — before it reached processing</p>
+  </div>
+
+  <!-- Transaction Card -->
+  <div style="background:#f8fafc;border:1px solid #e2e8f0;border-top:none;padding:24px 32px;">
+    <table cellpadding="0" cellspacing="0" style="width:100%;">
+      <tr>
+        <td style="width:50%;padding-right:12px;">
+          <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 18px;">
+            <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">PayPal Transaction</p>
+            <p style="font-size:15px;font-weight:700;color:#0f172a;margin:0;font-family:'Courier New',monospace;">#${txnDisplay}</p>
+          </div>
+        </td>
+        <td style="width:50%;padding-left:12px;">
+          <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 18px;">
+            <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Amount</p>
+            <p style="font-size:15px;font-weight:700;color:#0f172a;margin:0;">${amountDisplay}</p>
+          </div>
+        </td>
+      </tr>
+      <tr><td colspan="2" style="padding-top:12px;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="width:50%;padding-right:12px;">
+            <div style="background:#ffffff;border:1px solid #e2e8f0;border-radius:10px;padding:16px 18px;">
+              <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Card</p>
+              <p style="font-size:14px;font-weight:600;color:#0f172a;margin:0;">${cardDisplay}</p>
+              <p style="font-size:12px;color:#64748b;margin:2px 0 0;">Issued in ${countryDisplay}</p>
+            </div>
+          </td>
+          <td style="width:50%;padding-left:12px;">
+            <div style="background:${decisionBg};border:1px solid ${decisionBorder};border-radius:10px;padding:16px 18px;">
+              <p style="font-size:10px;letter-spacing:0.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Decision</p>
+              <p style="font-size:14px;font-weight:700;color:${decisionColor};margin:0;">${decisionLabel}</p>
+              <p style="font-size:12px;color:#64748b;margin:2px 0 0;">Risk score: ${riskScore}/100</p>
+            </div>
+          </td>
+        </tr></table>
+      </td></tr>
+    </table>
+  </div>
+
+  <!-- Reason + Savings -->
+  <div style="padding:20px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+    ${flagsHtml}
+    ${savingsHtml}
+  </div>
+
+  <!-- CTA -->
+  <div style="padding:4px 32px 24px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+    <a href="https://chargeguard-api.onrender.com/api/dashboard/page"
+       style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:14px;font-weight:600;padding:12px 28px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+      View in Dashboard →
+    </a>
+  </div>
+
+  <!-- End Rule — الجملة الأخيرة تبقى في الذاكرة -->
+  <div style="background:#f0fdf4;padding:16px 32px;border:1px solid #bbf7d0;border-top:none;text-align:center;">
+    <p style="font-size:14px;font-weight:600;color:#166534;margin:0;">✅ Your store is running normally. PayPal is protected. No action required.</p>
+  </div>
+
+  <!-- Footer -->
+  <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+    <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+      You're receiving this because ChargeGuard detected suspicious PayPal activity on your store.
+      Alerts are throttled to prevent inbox flooding.
+    </p>
+  </div>
+
+</div>`,
+      });
+      console.log(`[PaypalAlert] ✅ Sent to ${tenant.email} — txn #${txnDisplay}, score ${riskScore}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[PaypalAlert] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[PaypalAlert] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail };
