@@ -108,6 +108,7 @@ class ChargeGuard_Stripe_Webhook {
         $enrich_data = [
             'orderId'         => (string) $order_id,
             'paymentIntentId' => $payment_intent->id,
+            'source'          => 'stripe',
             'bin'             => $iin,
             'cardBrand'       => $brand,
             'cardCountry'     => $country,
