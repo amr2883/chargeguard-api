@@ -21,8 +21,10 @@ model Tenant {
   emailVerifyToken     String?   @unique
   emailVerifyExpiresAt DateTime?
   keyRotatedAt         DateTime?
-  lastAlertSentAt      DateTime?
-  webhookUrl           String?
+  lastAlertSentAt           DateTime?
+  countryOverrides          Json?     @default("{}")
+  countryOverridesUpdatedAt DateTime?
+  webhookUrl                String?
   webhookType          String?
   webhookLastStatus    String?
   webhookLastSentAt    DateTime?
@@ -31,9 +33,10 @@ model Tenant {
   updatedAt     DateTime  @updatedAt
 
   // ربط المستأجر بملفات التاجر
-  profiles         MerchantProfile[]  @relation("TenantProfiles")
-  blockedAttempts  BlockedAttempt[]   @relation("TenantBlockedAttempts")
-  alertLogs        AlertLog[]         @relation("TenantAlerts")
+  profiles          MerchantProfile[]  @relation("TenantProfiles")
+  blockedAttempts   BlockedAttempt[]   @relation("TenantBlockedAttempts")
+  alertLogs         AlertLog[]         @relation("TenantAlerts")
+  binSequenceAlerts BinSequenceAlert[] @relation("TenantBinAlerts")
 }
 
 // ========== Merchant Profile ==========
@@ -390,6 +393,26 @@ model RegistrationAttempt {
   createdAt DateTime @default(now())
 
   @@index([ipHash, createdAt])
+}
+
+// ========== BIN Sequence Alert ==========
+model BinSequenceAlert {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation("TenantBinAlerts", fields: [tenantId], references: [id], onDelete: Cascade)
+  binPrefix     String
+  layer         Int
+  reason        String
+  cardsCount    Int
+  entitiesCount Int
+  riskAddition  Int
+  status        String    @default("active")
+  notifiedAt    DateTime?
+  detectedAt    DateTime  @default(now())
+  resolvedAt    DateTime?
+
+  @@index([tenantId, status, detectedAt])
+  @@index([tenantId, detectedAt])
 }
 
 // ========== Attack Alert Log ==========

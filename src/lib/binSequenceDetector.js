@@ -235,4 +235,4 @@ function getBINStats() {
   return { activePrefixes, blockedPrefixes, totalActiveBINs };
 }
 
-module.exports = { checkBINSequence, recordBINAttempt, getBINStats };
+module.exports = { checkBINSequence, recordBINAttempt, getBINStats, THRESHOLDS };

@@ -168,6 +168,7 @@ async function calculateRiskScore(
   saveEvaluation = true,
   externalVelocity = null,   // { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
   cardHashRecord = null,     // ← إضافة معامل cardHashRecord
+  merchantConfig = null,     // ← merchant country overrides
 ) {
     let score = 100;
   let sameIPOrders = [];
@@ -465,12 +466,14 @@ async function calculateRiskScore(
 
 if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     try {
-      const binIntel = binIntelSettled.value;
+      binIntelResult = binIntelSettled.value;
+      const binIntel = binIntelResult;
       const { penalty: binPenalty, flags: binFlags } = calculateBINPenalty(
         binIntel,
         { amount: order.amount, billingAddress: billingAddr },
         isNewCustomer,
-        ipIntelResult
+        ipIntelResult,
+        merchantConfig
       );
       if (binPenalty > 0) {
         score -= binPenalty;

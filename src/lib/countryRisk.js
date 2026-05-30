@@ -105,4 +105,27 @@ function calculateCountryRiskPenalty(countryCode, amount, merchantConfig = null)
     },
   };
 }
-module.exports = { getCountryRiskTier, calculateCountryRiskPenalty };
+// ─── Available Countries for Settings UI ─────────────────────────────────
+// بيُعيد flat array من كل الدول المدعومة مع بياناتها
+// يُستخدم في settings endpoint وفي الـ PHP/JS UI
+function getAvailableCountries() {
+  const COUNTRY_NAMES = {
+    NG: 'Nigeria',     CM: 'Cameroon',    GH: 'Ghana',
+    PK: 'Pakistan',    BD: 'Bangladesh',
+    VN: 'Vietnam',     ID: 'Indonesia',   PH: 'Philippines',
+    RO: 'Romania',     UA: 'Ukraine',
+  };
+
+  return Object.entries(COUNTRY_RISK_TIERS).flatMap(([tier, config]) =>
+    [...config.countries].map(code => ({
+      code,
+      name:        COUNTRY_NAMES[code] ?? code,
+      tier,
+      basePenalty: config.basePenalty,
+      severity:    config.severity,
+      label:       config.label,
+    }))
+  );
+}
+
+module.exports = { getCountryRiskTier, calculateCountryRiskPenalty, getAvailableCountries };

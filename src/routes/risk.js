@@ -18,6 +18,57 @@ const { buildGraphFromOrder } = require('../lib/identityGraph');
 const prometheus = require('../lib/prometheus');
 
 const { domainAuthMiddleware, normalizeDomain } = require('../lib/domainAuth');
+const { notifyBINSequenceAlert }               = require('../lib/notify');
+
+// ── BIN Sequence Alert Persistence ───────────────────────────────────────
+const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
+  if (!tenantId) return; // webhook بدون tenant — TODO: ربط webhook بالـ tenant
+  try {
+    const prefix     = String(bin).replace(/\D/g, '').slice(0, 4);
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+
+    const existing = await db.binSequenceAlert.findFirst({
+      where: {
+        tenantId,
+        binPrefix: prefix,
+        status:    'active',
+        detectedAt: { gte: oneHourAgo },
+      },
+    });
+
+    if (existing) {
+      await db.binSequenceAlert.update({
+        where: { id: existing.id },
+        data:  { cardsCount: { increment: 1 } },
+      });
+    } else {
+      const newAlert = await db.binSequenceAlert.create({
+        data: {
+          tenantId,
+          binPrefix:     prefix,
+          layer:         binSeq.layer    || 0,
+          reason:        binSeq.reason   || 'BIN sequence detected',
+          cardsCount:    1,
+          entitiesCount: 1,
+          riskAddition:  binSeq.riskAddition || 0,
+          status:        'active',
+        },
+      });
+
+      // إشعار التاجر — fire-and-forget مع cooldown
+      const tenant = await db.tenant.findUnique({
+        where:  { id: tenantId },
+        select: { id: true, email: true, webhookUrl: true, webhookType: true },
+      });
+      if (tenant) {
+        notifyBINSequenceAlert(tenant, newAlert)
+          .catch(err => logger.error({ module: 'risk', err: err.message }, 'BIN notification failed'));
+      }
+    }
+  } catch (err) {
+    logger.error({ module: 'risk', err: err.message }, 'persistBinSequenceAlert failed');
+  }
+};
 
 const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
@@ -27,7 +78,7 @@ const apiKeyAuth = async (req, res, next) => {
 
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
-    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true }
+    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true }
   });
 
   if (!tenant || !tenant.isActive) {
@@ -44,7 +95,7 @@ const apiKeyAuth = async (req, res, next) => {
     }
   }
 
-  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret };
+  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret, countryOverrides: tenant.countryOverrides || {}, plan: tenant.plan };
   next();
 };
 /**
@@ -178,6 +229,12 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
     // 1b. BIN Sequence Detection
     if (bin) {
       const binSeq = checkBINSequence({ bin, ipAddress, deviceFingerprint });
+
+      if (binSeq.blocked || binSeq.riskAddition > 0) {
+        persistBinSequenceAlert(req.tenant.id, bin, binSeq)
+          .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
+      }
+
       if (binSeq.blocked) {
         return res.status(403).json({
           error: 'Request blocked due to suspicious card testing pattern',
@@ -286,6 +343,10 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
         const evaluateStart = Date.now();
 
     // 4. ������� ���� ������� (�� ����� velocityCounts)
+    const merchantConfig = {
+      countryOverrides: req.tenant.countryOverrides || {}
+    };
+
     const riskResult = await calculateRiskScore(
       order,
       formattedOrders,
@@ -293,7 +354,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
       blacklist,
       merchantId,
       false,
-      { deviceVelocityCount, ipVelocityCount, emailVelocityCount }  // velocity counts
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount },
+      null,           // cardHashRecord — متاح فقط في /enrich
+      merchantConfig
     );
 
     // 5. ���� ���������
@@ -1047,6 +1110,30 @@ router.post('/woocommerce-webhook', async (req, res) => {
           flags: [],
           connectedRisk: 0,
           whitelisted: true
+        });
+      }
+    }
+
+    // 7b. BIN Sequence Detection
+    if (extracted.bin) {
+      const binSeq = checkBINSequence({
+        bin: extracted.bin,
+        ipAddress: extracted.ipAddress,
+        deviceFingerprint: riskRequest.deviceFingerprint
+      });
+
+      // TODO: تمرير tenantId هنا عند ربط webhook بالـ Tenant
+      if (binSeq.blocked || binSeq.riskAddition > 0) {
+        persistBinSequenceAlert(null, extracted.bin, binSeq)
+          .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
+      }
+
+      if (binSeq.blocked) {
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious card testing pattern',
+          reason: binSeq.reason,
+          decision: 'block',
+          flags: [{ severity: 'critical', text: binSeq.reason }]
         });
       }
     }
