@@ -42,10 +42,12 @@ const authRoutes      = require('./routes/auth');
 const adminRoutes     = require('./routes/admin');
 const dashboardRoutes = require('./routes/dashboard');
 const settingsRoutes  = require('./routes/settings');
+const paymentsRoutes  = require('./routes/payments');
 app.use('/api/risk',      riskRoutes);
 app.use('/api/auth',      authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/settings',  settingsRoutes);
+app.use('/api/payments',  paymentsRoutes);
 // Morgan ����� �� /admin ���� ����� ��� secret �� �����
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
