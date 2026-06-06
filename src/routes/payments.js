@@ -1,8 +1,70 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
+// crypto built-in — used for crc32 in local cert verification (reserved)
 const db = require('../lib/db');
 const logger = require('../lib/logger');
+
+// ── PayPal Webhook Signature Verification ─────────────────────────────
+// الآلية: PayPal يوقّع (transmissionId|timestamp|webhookId|crc32(body))
+//         بـ RSA private key، ونحن نتحقق بـ public cert من PayPal
+// ──────────────────────────────────────────────────────────────────────
+const CRC32_TABLE = (() => {
+  const table = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let c = i;
+    for (let j = 0; j < 8; j++) {
+      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+    }
+    table[i] = c;
+  }
+  return table;
+})();
+
+const crc32 = (buf) => {
+  let crc = 0xFFFFFFFF;
+  for (const byte of buf) {
+    crc = CRC32_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
+  }
+  return ((crc ^ 0xFFFFFFFF) >>> 0);
+};
+
+const certCache = new Map();
+
+const fetchCert = (url) => new Promise((resolve, reject) => {
+  if (!url.startsWith('https://api.paypal.com/') &&
+      !url.startsWith('https://api.sandbox.paypal.com/')) {
+    return reject(new Error('Invalid cert URL — not from PayPal domain'));
+  }
+  if (certCache.has(url)) return resolve(certCache.get(url));
+  https.get(url, (res) => {
+    let data = '';
+    res.on('data', chunk => data += chunk);
+    res.on('end', () => {
+      certCache.set(url, data);
+      setTimeout(() => certCache.delete(url), 60 * 60 * 1000);
+      resolve(data);
+    });
+  }).on('error', reject);
+});
+
+const verifyPayPalWebhook = async ({
+  transmissionId,
+  transmissionTime,
+  webhookId,
+  certUrl,
+  authAlgo,
+  transmissionSig,
+  rawBody,
+}) => {
+  const bodyHash   = crc32(rawBody);
+  const signString = `${transmissionId}|${transmissionTime}|${webhookId}|${bodyHash}`;
+  const cert       = await fetchCert(certUrl);
+  const algo       = authAlgo?.includes('256') ? 'SHA256' : 'SHA1';
+  const verifier   = createVerify(`${algo}withRSA`);
+  verifier.update(signString);
+  return verifier.verify(cert, transmissionSig, 'base64');
+};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // خريطة الخطط — المصدر الوحيد للحقيقة (Source of Truth) للأسعار
@@ -231,15 +293,80 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     return res.status(401).json({ error: 'Missing PayPal verification headers' });
   }
 
-  // ── تحقق بسيط بديل ريثما تُضاف مكتبة PayPal SDK ─────────────────────
-  // في الإنتاج: استخدم PayPal Node SDK لـ verifyWebhookSignature
-  // هنا: نتحقق على الأقل من وجود الـ headers الصحيحة
-  // TODO: استبدل هذا بـ PayPal SDK verification كاملة قبل الإنتاج
-  const signatureVerified = !!(transmissionId && transmissionSig && webhookId);
+  // ── التحقق الحقيقي من توقيع PayPal عبر REST API ──────────────────────
+  // PayPal يوفر endpoint رسمي للـ verification — أدق وأأمن من HMAC يدوي
+  // لأن PayPal يستخدم RSA مع certificate متغير، مش HMAC ثابت.
+  let signatureVerified = false;
+  try {
+    // الحصول على Access Token
+    const authString = Buffer.from(
+      process.env.PAYPAL_CLIENT_ID + ':' + process.env.PAYPAL_CLIENT_SECRET
+    ).toString('base64');
 
-  if (!signatureVerified) {
-    logger.warn({ module: 'payments' }, 'PayPal webhook signature verification failed');
-    return res.status(401).json({ error: 'Invalid webhook signature' });
+    const tokenRes  = await fetch(
+      process.env.PAYPAL_MODE === 'sandbox'
+        ? 'https://api.sandbox.paypal.com/v1/oauth2/token'
+        : 'https://api.paypal.com/v1/oauth2/token',
+      {
+        method:  'POST',
+        headers: {
+          'Authorization': 'Basic ' + authString,
+          'Content-Type':  'application/x-www-form-urlencoded',
+        },
+        body: 'grant_type=client_credentials',
+      }
+    );
+
+    const tokenData   = await tokenRes.json();
+    const accessToken = tokenData.access_token;
+
+    if (!accessToken) {
+      logger.error({ module: 'payments' }, 'PayPal token fetch failed during webhook verification');
+      return res.status(401).json({ error: 'Could not obtain PayPal access token' });
+    }
+
+    // التحقق من التوقيع
+    const verifyRes = await fetch(
+      process.env.PAYPAL_MODE === 'sandbox'
+        ? 'https://api.sandbox.paypal.com/v1/notifications/verify-webhook-signature'
+        : 'https://api.paypal.com/v1/notifications/verify-webhook-signature',
+      {
+        method:  'POST',
+        headers: {
+          'Authorization': 'Bearer ' + accessToken,
+          'Content-Type':  'application/json',
+        },
+        body: JSON.stringify({
+          auth_algo:         authAlgo         || 'SHA256withRSA',
+          cert_url:          certUrl,
+          transmission_id:   transmissionId,
+          transmission_sig:  transmissionSig,
+          transmission_time: transmissionTime,
+          webhook_id:        webhookId,
+          webhook_event:     JSON.parse(rawBody.toString()),
+        }),
+      }
+    );
+
+    const verifyData     = await verifyRes.json();
+    signatureVerified    = verifyData.verification_status === 'SUCCESS';
+
+    if (!signatureVerified) {
+      logger.warn(
+        { module: 'payments', verification_status: verifyData.verification_status },
+        'PayPal webhook signature verification FAILED'
+      );
+      return res.status(401).json({ error: 'Invalid webhook signature' });
+    }
+
+    logger.info({ module: 'payments', transmissionId }, 'PayPal webhook signature verified ✅');
+
+  } catch (verifyErr) {
+    logger.error(
+      { module: 'payments', error: verifyErr.message },
+      'PayPal webhook verification request failed'
+    );
+    return res.status(500).json({ error: 'Webhook verification failed' });
   }
 
   // ── 2. تحليل جسم الـ Webhook ──────────────────────────────────────────
