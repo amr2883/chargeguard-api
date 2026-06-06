@@ -1087,6 +1087,267 @@ async function sendPaypalWeeklyReportEmail({
   throw lastError;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// sendRenewalReminderEmail — تحذير "اشتراكك ينتهي خلال X أيام"
+// يُرسل عند: 7 أيام، 3 أيام، 1 يوم
+// ══════════════════════════════════════════════════════════════════════════════
+async function sendRenewalReminderEmail(tenant, { daysRemaining, planLabel, renewUrl }) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const urgency = daysRemaining <= 1
+    ? { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', badge: '🚨 Last chance', tone: 'Your protection expires tomorrow.' }
+    : daysRemaining <= 3
+    ? { color: '#d97706', bg: '#fffbeb', border: '#fde68a', badge: '⚠️ Expiring soon', tone: `${daysRemaining} days left on your subscription.` }
+    : { color: '#0369a1', bg: '#f0f9ff', border: '#bae6fd', badge: '📅 Renewal reminder', tone: `Your subscription renews in ${daysRemaining} days.` };
+
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">${urgency.badge}</span>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Urgency Banner -->
+      <div style="background:${urgency.bg};padding:28px 32px;border-left:1px solid ${urgency.border};border-right:1px solid ${urgency.border};">
+        <h1 style="font-size:24px;font-weight:800;color:${urgency.color};margin:0 0 8px;line-height:1.2;">
+          ${urgency.tone}
+        </h1>
+        <p style="font-size:15px;color:#475569;margin:0;">
+          Renew your <strong>${planLabel}</strong> plan to keep <strong>${storeDisplay}</strong> protected without interruption.
+        </p>
+      </div>
+
+      <!-- What happens -->
+      <div style="padding:24px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">What happens if your subscription expires?</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr><td style="padding-bottom:12px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:12px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Card testing protection pauses — bots can resume probing your checkout</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td style="padding-bottom:12px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:12px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">BIN sequence detection and Identity Graph go offline</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td>
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:12px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Your store reverts to the free plan (500 attacks/month limit)</p></td>
+            </tr></table>
+          </td></tr>
+        </table>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:24px 32px 28px;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+        <a href="${renewUrl}"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          Renew ${planLabel} Now →
+        </a>
+        <p style="font-size:12px;color:#94a3b8;margin:16px 0 0;">
+          Secure checkout via PayPal. Your data is never stored on our servers.
+        </p>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your ChargeGuard subscription is approaching its renewal date.
+        </p>
+      </div>
+    </div>`;
+
+  const subject = daysRemaining <= 1
+    ? `🚨 ChargeGuard protection expires tomorrow — renew now`
+    : `⚠️ Your ChargeGuard subscription expires in ${daysRemaining} days`;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[RenewalReminder] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: tenant.email,
+        subject,
+        html,
+      });
+      console.log(`[RenewalReminder] ✅ Sent to ${tenant.email} — ${daysRemaining} days remaining`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[RenewalReminder] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[RenewalReminder] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// sendGracePeriodEmail — إشعار "اشتراكك انتهى، لديك 7 أيام سماح"
+// ══════════════════════════════════════════════════════════════════════════════
+async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, renewUrl }) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+
+  const graceDateStr = graceEndsAt.toLocaleString('en-US', {
+    month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC',
+  });
+
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Grace Period Active</span>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Banner -->
+      <div style="background:linear-gradient(135deg,#451a03,#7c2d12);padding:28px 32px;border-left:1px solid #92400e;border-right:1px solid #92400e;">
+        <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#fbbf24;margin:0 0 8px;font-weight:600;">⏳ Subscription Expired</p>
+        <h1 style="font-size:26px;font-weight:800;color:#ffffff;margin:0 0 8px;line-height:1.2;">
+          Your store is in the grace period
+        </h1>
+        <p style="font-size:15px;color:#fde68a;margin:0;">
+          Full protection continues until <strong>${graceDateStr}</strong>
+        </p>
+      </div>
+
+      <!-- Grace Period Explanation -->
+      <div style="padding:28px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <div style="background:#fefce8;border:1px solid #fde68a;border-radius:10px;padding:18px 20px;margin-bottom:24px;">
+          <p style="font-size:14px;color:#92400e;margin:0;line-height:1.7;">
+            <strong>Good news:</strong> We've extended your <strong>${planLabel}</strong> protection for 7 days at no charge.
+            Your store is still fully shielded — all 53 features remain active.
+            Renew before <strong>${graceDateStr}</strong> to avoid any interruption.
+          </p>
+        </div>
+
+        <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">After the grace period ends:</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr><td style="padding-bottom:10px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:11px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Protection reverts to free plan (500 attacks/month)</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td>
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:11px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Advanced features (BIN Intelligence, Identity Graph) deactivate</p></td>
+            </tr></table>
+          </td></tr>
+        </table>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:24px 32px 28px;background:#fff7ed;border:1px solid #fed7aa;border-top:none;text-align:center;">
+        <p style="font-size:14px;color:#92400e;margin:0 0 16px;font-weight:600;">
+          Renew now and keep your store protected — no setup required.
+        </p>
+        <a href="${renewUrl}"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          Renew ${planLabel} — Keep Protection →
+        </a>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your ChargeGuard subscription has expired.
+          Your store remains protected during the 7-day grace period.
+        </p>
+      </div>
+    </div>`;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[GracePeriod] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: tenant.email,
+        subject: `⏳ ChargeGuard grace period active — renew by ${graceDateStr}`,
+        html,
+      });
+      console.log(`[GracePeriod] ✅ Sent to ${tenant.email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[GracePeriod] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[GracePeriod] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
 async function sendWelcomeWithKeyEmail(email, apiKey) {
   console.log('[Email] Sending welcome+key email after verification to:', email);
   await sendApiKeyEmail(email, apiKey);
@@ -1270,4 +1531,4 @@ async function sendPaypalAlertEmail(tenant, alertData) {
   throw lastError;
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail };
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail };
