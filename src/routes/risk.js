@@ -78,7 +78,7 @@ const apiKeyAuth = async (req, res, next) => {
 
   const tenant = await db.tenant.findUnique({
     where: { apiKey },
-    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true }
+    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true }
   });
 
   if (!tenant || !tenant.isActive) {
@@ -95,7 +95,7 @@ const apiKeyAuth = async (req, res, next) => {
     }
   }
 
-  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret, countryOverrides: tenant.countryOverrides || {}, plan: tenant.plan };
+  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret, countryOverrides: tenant.countryOverrides || {}, plan: tenant.plan, subscriptionStatus: tenant.subscriptionStatus, subscriptionEndDate: tenant.subscriptionEndDate };
   next();
 };
 /**
@@ -125,6 +125,60 @@ const apiKeyAuth = async (req, res, next) => {
  */
 router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
+    // ── 0. Subscription & Quota Gate ─────────────────────────────────────
+    // هذا الفحص هو نقطة التحكم الوحيدة الفعّالة — الـ plugin لا يفحص الاشتراك
+    // لذلك نرفض هنا على مستوى الخادم قبل أي معالجة
+
+    const tenantPlan   = req.tenant.plan;
+    const subStatus    = req.tenant.subscriptionStatus;
+    const subEndDate   = req.tenant.subscriptionEndDate;
+
+    // أ. لو الاشتراك منتهي — نرفض فوراً
+    if (subStatus === 'expired') {
+      logger.warn(
+        { module: 'risk', tenantId: req.tenant.id, plan: tenantPlan },
+        'Evaluate blocked — subscription expired'
+      );
+      return res.status(403).json({
+        decision:    'block',
+        score:       100,
+        flags:       [{ severity: 'critical', text: 'Subscription expired — please renew your ChargeGuard plan.' }],
+        connectedRisk: 0,
+        blocked_reason: 'subscription_expired',
+      });
+    }
+
+    // ب. Starter أو early_access — فحص الـ monthly quota (500 هجوم/شهر)
+    const isLimitedPlan = tenantPlan === 'starter' || tenantPlan === 'early_access';
+    if (isLimitedPlan) {
+      const MONTHLY_LIMIT = 500;
+      const startOfMonth  = new Date();
+      startOfMonth.setUTCDate(1);
+      startOfMonth.setUTCHours(0, 0, 0, 0);
+
+      const monthlyCount = await db.blockedAttempt.count({
+        where: {
+          tenantId:  req.tenant.id,
+          blockedAt: { gte: startOfMonth },
+        },
+      });
+
+      if (monthlyCount >= MONTHLY_LIMIT) {
+        logger.warn(
+          { module: 'risk', tenantId: req.tenant.id, plan: tenantPlan, monthlyCount },
+          'Evaluate blocked — monthly quota exceeded'
+        );
+        return res.status(403).json({
+          decision:    'block',
+          score:       100,
+          flags:       [{ severity: 'critical', text: 'Monthly protection limit reached — upgrade to Pro for unlimited coverage.' }],
+          connectedRisk: 0,
+          blocked_reason: 'quota_exceeded',
+        });
+      }
+    }
+    // ── End Subscription & Quota Gate ────────────────────────────────────
+
     // ������� ��������
     const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
     const merchantId = bodyMerchantId || req.headers['x-merchant-id'];
@@ -1975,10 +2029,26 @@ router.get('/verify-key', async (req, res) => {
     //    (������ ��� ������� �� ������ ������� ����� ��� ����� ����� ����)
     // TODO: ����� ������ �� ������� ��� ���� ��� allowedDomains
 
-    // 5. �� ��� ����
+    // 5. إرجاع حالة الاشتراك مع الـ validation
+    const tenantFull = await db.tenant.findUnique({
+      where:  { apiKey },
+      select: {
+        plan:               true,
+        subscriptionStatus: true,
+        subscriptionEndDate: true,
+        billingCycle:       true,
+        lastPaymentDate:    true,
+      },
+    });
+
     return res.status(200).json({
-      valid: true,
-      message: 'API key is valid'
+      valid:              true,
+      message:            'API key is valid',
+      plan:               tenantFull?.plan               || 'starter',
+      subscriptionStatus: tenantFull?.subscriptionStatus || 'free',
+      subscriptionEndDate: tenantFull?.subscriptionEndDate || null,
+      billingCycle:       tenantFull?.billingCycle        || null,
+      lastPaymentDate:    tenantFull?.lastPaymentDate     || null,
     });
 
   } catch (error) {
