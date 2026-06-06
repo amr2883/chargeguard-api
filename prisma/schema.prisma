@@ -17,42 +17,39 @@ model Tenant {
   webhookSecret String?
   plan          String   @default("early_access")
 
-// ========== Subscription Fields ==========
-subscriptionStatus   String    @default("free")
-// القيم الممكنة: free | active | grace_period | expired | cancelled
-subscriptionEndDate  DateTime?
-billingCycle         String?
-// القيم الممكنة: monthly | annual
+  // ========== Subscription Fields ==========
+  subscriptionStatus          String    @default("free")
+  subscriptionEndDate         DateTime?
+  billingCycle                String?
+  lastPaymentDate             DateTime?
+  lastPaymentAmount           Float?
+  lastCaptureId               String?   @unique
+  isActive                    Boolean   @default(true)
+  emailVerified               Boolean   @default(false)
+  emailVerifyToken            String?   @unique
+  emailVerifyExpiresAt        DateTime?
+  keyRotatedAt                DateTime?
+  lastAlertSentAt             DateTime?
+  lastPaypalAlertAt           DateTime?
+  lastRenewalReminderSentAt   DateTime?
+  lastGracePeriodNoticeSentAt DateTime?
+  countryOverrides            Json?     @default("{}")
+  countryOverridesUpdatedAt   DateTime?
+  webhookUrl                  String?
+  webhookType                 String?
+  webhookLastStatus           String?
+  webhookLastSentAt           DateTime?
+  webhookFailureCount         Int       @default(0)
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
 
-lastPaymentDate      DateTime?
-lastPaymentAmount    Float?
-lastCaptureId        String?   @unique
-// آخر PayPal capture ID — للـ Idempotency
-  isActive             Boolean   @default(true)
-  emailVerified        Boolean   @default(false)
-  emailVerifyToken     String?   @unique
-  emailVerifyExpiresAt DateTime?
-  keyRotatedAt         DateTime?
-  lastAlertSentAt           DateTime?
-  lastPaypalAlertAt         DateTime?
-  countryOverrides          Json?     @default("{}")
-  countryOverridesUpdatedAt DateTime?
-  webhookUrl                String?
-  webhookType          String?
-  webhookLastStatus    String?
-  webhookLastSentAt    DateTime?
-  webhookFailureCount  Int       @default(0)
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-
-  // ربط المستأجر بملفات التاجر
   profiles          MerchantProfile[]  @relation("TenantProfiles")
   blockedAttempts   BlockedAttempt[]   @relation("TenantBlockedAttempts")
   alertLogs         AlertLog[]         @relation("TenantAlerts")
   binSequenceAlerts BinSequenceAlert[] @relation("TenantBinAlerts")
   monthlyReports    MonthlyReport[]    @relation("TenantMonthlyReports")
-checkoutSessions  CheckoutSession[] @relation("TenantCheckoutSessions")
-payments          Payment[]         @relation("TenantPayments")
+  checkoutSessions  CheckoutSession[]  @relation("TenantCheckoutSessions")
+  payments          Payment[]          @relation("TenantPayments")
 }
 
 // ========== Merchant Profile ==========

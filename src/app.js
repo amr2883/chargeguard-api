@@ -4,6 +4,7 @@ const { startAttackAlertScheduler } = require('./lib/attackAlertScheduler');
 const { startWeeklySummaryScheduler } = require('./jobs/weeklySummaryScheduler');
 const { startMonthlyReportScheduler }      = require('./jobs/monthlyReportScheduler');
 const { startPaypalWeeklyReportScheduler } = require('./jobs/paypalWeeklyReportScheduler');
+const { startSubscriptionScheduler }       = require('./jobs/subscriptionScheduler');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -32,10 +33,14 @@ try {
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
+app.use('/api/payments/paypal-webhook', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
 }));
+
+const path = require('path');
+app.use(express.static(path.join(__dirname, 'public')));
 
 const riskRoutes      = require('./routes/risk');
 const authRoutes      = require('./routes/auth');
@@ -158,4 +163,6 @@ app.listen(PORT, () => {
 
   // 🛡️ 7) PayPal Weekly Shield Scheduler (checks hourly, sends Sundays 09:30 UTC)
   startPaypalWeeklyReportScheduler(prismaForCleanup);
+  // 🔄 8) Subscription Lifecycle Scheduler (hourly)
+  startSubscriptionScheduler(prismaForCleanup);
 });
