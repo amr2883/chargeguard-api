@@ -46,7 +46,7 @@ const buildRenewUrl = (planId) => {
   const base = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
   // التاجر يُعيد المرور بنفس تدفق الدفع
   // لا نحتاج session هنا — سيُنشأ عند الضغط على الزر في صفحة التسعير
-  return `https://chargeguard.io/#pricing?renew=${planId}`;
+  return `https://chargeguard.io/upgrade.html?plan=${planId}`;
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
