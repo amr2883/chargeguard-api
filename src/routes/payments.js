@@ -4,6 +4,7 @@ const crypto = require('crypto');
 // crypto built-in — used for crc32 in local cert verification (reserved)
 const db = require('../lib/db');
 const logger = require('../lib/logger');
+const { sendsubscriptionconfirmationemail } = require('../lib/email');
 
 // ── PayPal Webhook Signature Verification ─────────────────────────────
 // الآلية: PayPal يوقّع (transmissionId|timestamp|webhookId|crc32(body))
@@ -525,9 +526,19 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     );
 
     // ── 10. إرسال إيميل تأكيد للتاجر (fire-and-forget) ───────────────────
-    // TODO: أضف sendSubscriptionConfirmationEmail هنا
-    // sendSubscriptionConfirmationEmail(session.tenant.email, { planName, subscriptionEndDate, amount: amountPaid })
-    //   .catch(err => logger.error({ module: 'payments', err: err.message }, 'Confirmation email failed'));
+    // تأخير 2 ثانية بعد الـ transaction — نضمن أن DB commit اكتمل
+    // fire-and-forget: أي خطأ في الإيميل لا يؤثر على استجابة الـ webhook
+    setTimeout(() => {
+      sendSubscriptionConfirmationEmail(session.tenant.email, {
+        planName,
+        billingCycle:        session.billingCycle,
+        amount:              amountPaid,
+        subscriptionEndDate,
+        captureId,
+      }).catch(err =>
+        logger.error({ module: 'payments', captureId, err: err.message }, 'Confirmation email failed — non-critical')
+      );
+    }, 2000);
 
   } catch (err) {
     logger.error(
