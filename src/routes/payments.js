@@ -4,7 +4,7 @@ const crypto = require('crypto');
 // crypto built-in — used for crc32 in local cert verification (reserved)
 const db = require('../lib/db');
 const logger = require('../lib/logger');
-const { sendsubscriptionconfirmationemail } = require('../lib/email');
+const { sendSubscriptionConfirmationEmail } = require('../lib/email');
 
 // ── PayPal Webhook Signature Verification ─────────────────────────────
 // الآلية: PayPal يوقّع (transmissionId|timestamp|webhookId|crc32(body))
