@@ -85,11 +85,16 @@ const processRenewalReminders = async (db) => {
   for (const tenant of tenantsToRemind) {
     try {
       const endDate     = new Date(tenant.subscriptionEndDate);
-      const daysLeft    = Math.ceil((endDate - now) / (1000 * 60 * 60 * 24));
-      const shouldRemind = REMINDER_DAYS.includes(daysLeft);
+      // نستخدم floor مع window ±6 ساعات لضمان عدم تفويت أي إشعار
+      // مثلاً: إذا كان الوقت المتبقي 6.8 يوم → floor = 6، نتحقق هل 7 في النطاق
+      // إذا كان 7.1 يوم → floor = 7، يُرسل — صحيح
+      // إذا كان 2.8 يوم → floor = 2، نتحقق هل 3 في النطاق (2.8 > 2.5 → نعم)
+      const hoursLeft   = (endDate - now) / (1000 * 60 * 60);
+      const daysLeft    = Math.ceil(hoursLeft / 24); // للعرض في الإيميل فقط
+      const shouldRemind = REMINDER_DAYS.some(d => hoursLeft <= d * 24 && hoursLeft > (d * 24) - 25);
+      // window = 25 ساعة لكل نقطة (أكبر من interval الساعة بهامش أمان)
 
       if (!shouldRemind) continue;
-      // يوم مش في [7, 3, 1] — تجاهل
 
       if (!canSendEmail(tenant.lastRenewalReminderSentAt)) {
         console.log(`[SubscriptionScheduler] ⏭️  Skipping reminder for ${tenant.email} — cooldown active`);
