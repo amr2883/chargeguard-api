@@ -13,6 +13,8 @@ const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
 const { checkBINSequence } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
+const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
+const { hashApiKey } = require('../lib/apiKeyHash');
 const { normalizeBin } = require('../lib/binIntelligence');
 const { buildGraphFromOrder } = require('../lib/identityGraph');
 const prometheus = require('../lib/prometheus');
@@ -76,13 +78,17 @@ const apiKeyAuth = async (req, res, next) => {
     return res.status(401).json({ error: 'API key is required' });
   }
 
-  const tenant = await db.tenant.findUnique({
-    where: { apiKey },
-    select: { id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true }
+  const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
+    id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true
   });
 
   if (!tenant || !tenant.isActive) {
     return res.status(401).json({ error: 'Invalid or inactive API key' });
+  }
+
+  if (usedPreviousKey) {
+    res.set('X-ChargeGuard-Key-Deprecated', 'true');
+    logger.warn({ module: 'risk', tenantId: tenant.id }, 'Request authenticated using previous (grace-period) API key — plugin should be updated');
   }
 
   if (!tenant.emailVerified) {
@@ -123,7 +129,7 @@ const apiKeyAuth = async (req, res, next) => {
  *       500:
  *         description: Internal server error
  */
-router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
+router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     // ── 0. Subscription & Quota Gate ─────────────────────────────────────
     // هذا الفحص هو نقطة التحكم الوحيدة الفعّالة — الـ plugin لا يفحص الاشتراك
@@ -556,7 +562,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
  *       500:
  *         description: Internal error
  */
-router.post('/mark-fraud', apiKeyAuth, async (req, res) => {
+router.post('/mark-fraud', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   // ��� ������ �� ���� �������
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
@@ -616,7 +622,7 @@ const { processFeedback } = require('../lib/feedbackLoop');
  *       500:
  *         description: Internal error
  */
-router.post('/feedback', apiKeyAuth, async (req, res) => {
+router.post('/feedback', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { orderId, isFraud } = req.body;
 
@@ -725,7 +731,7 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
  *       400:
  *         description: Invalid input
  */
-router.post('/blacklist', apiKeyAuth, async (req, res) => {
+router.post('/blacklist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
     if (!merchantId || !type || !value) {
@@ -781,7 +787,7 @@ router.post('/blacklist', apiKeyAuth, async (req, res) => {
  *       404:
  *         description: Entry not found
  */
-router.delete('/blacklist/:id', apiKeyAuth, async (req, res) => {
+router.delete('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { id } = req.params;
     const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
@@ -901,7 +907,7 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
  *       404:
  *         description: Entry not found or not owned by this merchant
  */
-router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
+router.put('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { id } = req.params;
     const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
@@ -938,7 +944,7 @@ router.put('/blacklist/:id', apiKeyAuth, async (req, res) => {
 
 // ========== Whitelist Management Endpoints ==========
 
-router.post('/whitelist', apiKeyAuth, async (req, res) => {
+router.post('/whitelist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
     if (!merchantId || !type || !value) {
@@ -1015,7 +1021,7 @@ router.get('/whitelist', apiKeyAuth, async (req, res) => {
   }
 });
 
-router.delete('/whitelist/:id', apiKeyAuth, async (req, res) => {
+router.delete('/whitelist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
     const { id } = req.params;
     const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
@@ -1084,8 +1090,8 @@ router.post('/woocommerce-webhook', async (req, res) => {
       
       const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
       if (!isValid) {
-        logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch details');
-        // return res.status(401).json({ error: 'Invalid signature', debug: { receivedLength: signature.length, expectedLength: expected.length } });
+        logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch — rejecting forged webhook request');
+        return res.status(401).json({ error: 'Invalid signature' });
       }
     } else if (wcSecret && !signature) {
       // Secret configured but signature missing � reject
@@ -1383,7 +1389,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
 });
 // ========== Check Device Endpoint ==========
 // ������� ������ ���� ������� ���������� �� ������� �������
-router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
+router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { fingerprint } = req.body;
     if (!fingerprint) {
@@ -1446,7 +1452,7 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, async (req, res) 
 
 // ========== Enrich Endpoint ==========
 // ������� ������ ����� ������� BIN �� ������ ����� �������� (��� Stripe)
-router.post('/enrich', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
+router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { 
       orderId, 
@@ -1848,14 +1854,18 @@ router.post('/tenants/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    // Generate a unique API key
+    // Generate a unique API key (256-bit CSPRNG — NIST SP 800-63B §5.1.1.2 entropy requirement)
     const apiKey = crypto.randomBytes(32).toString('base64');
+    const apiKeyHash = hashApiKey(apiKey);
 
     // Generate email verification token
     const emailVerifyToken = crypto.randomBytes(32).toString('hex');
     const emailVerifyExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    // Normalize storeUrl domain
+    // Normalize storeUrl domain — this becomes the tenant's only authorized
+    // origin for API key use (CWE-636 fix: domain binding must be populated
+    // at creation time so domainAuthMiddleware has real data to enforce
+    // against rather than failing open on a missing/empty array).
     const allowedDomains = [];
     if (storeUrl) {
       const normalizedDomain = normalizeDomain(storeUrl);
@@ -1867,11 +1877,21 @@ router.post('/tenants/register', async (req, res) => {
     // In development mode, skip email verification
     const skipVerification = process.env.EMAIL_VERIFICATION_DISABLED === 'true';
 
-    const tenant = await db.tenant.create({
+   const tenant = await db.tenant.create({
       data: {
         email,
         storeUrl: storeUrl || null,
-        apiKey,
+        allowedDomains, // Domain-binding allowlist (CWE-636 fix) — enforced by domainAuthMiddleware
+        apiKeyHash, // Source of truth for authentication (OWASP ASVS V6.2.1)
+        // Production path only: apiKey plaintext is held transiently so the post-verification
+        // welcome email (sent from /verify-email, only after inbox ownership is proven) can
+        // include it. It is purged in the same DB write that sets emailVerified = true (see
+        // routes/auth.js), bounding the exposure window to "time until the merchant clicks the
+        // confirmation link" — the same transient-then-deleted pattern already used for
+        // emailVerifyToken (CWE-532 minimization; NIST SP 800-63B authenticator lifecycle).
+        // The skipVerification (dev mode) path below never writes apiKey at all, since the key
+        // is sent directly from this request's closure before this row is committed.
+        apiKey: skipVerification ? null : apiKey,
         plan: 'early_access',
         isActive: true,
         emailVerified: skipVerification,
@@ -1885,7 +1905,7 @@ router.post('/tenants/register', async (req, res) => {
     if (skipVerification) {
       // Dev mode — send API key immediately as before
       const { sendApiKeyEmail } = require('../lib/email');
-      sendApiKeyEmail(tenant.email, tenant.apiKey).catch(err => {
+      sendApiKeyEmail(tenant.email, apiKey).catch(err => {
         logger.error({ module: 'email', error: err.message }, 'Failed to send API key email (dev mode)');
       });
 
@@ -1998,14 +2018,11 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 2. Find tenant by API key
-    const tenant = await db.tenant.findUnique({
-      where: { apiKey },
-      select: {
-        id: true,
-        isActive: true,
-        emailVerified: true,
-      }
+    // 2. Find tenant by API key (hash-first with deprecated-plaintext fallback — zero-downtime migration)
+    const { tenant } = await resolveTenantByApiKey(apiKey, {
+      id: true,
+      isActive: true,
+      emailVerified: true,
     });
 
     // 2. Validate tenant
@@ -2031,7 +2048,7 @@ router.get('/verify-key', async (req, res) => {
 
     // 5. إرجاع حالة الاشتراك مع الـ validation
     const tenantFull = await db.tenant.findUnique({
-      where:  { apiKey },
+      where:  { id: tenant.id },
       select: {
         plan:               true,
         subscriptionStatus: true,

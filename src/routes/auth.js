@@ -3,13 +3,105 @@ const router = express.Router();
 const crypto = require('crypto');
 const db = require('../lib/db');
 const logger = require('../lib/logger');
+const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
+const { hashApiKey } = require('../lib/apiKeyHash');
+
+// ── IP Hashing (GDPR-safe) — same construction as routes/risk.js ────────────
+const hashIp = (ip) => {
+  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
+  return crypto.createHmac('sha256', salt).update(ip).digest('hex');
+};
+
+// ── Rate limit + Turnstile middleware for /connect (OWASP API4:2023) ───────
+// 3 attempts / 15 minutes per IP — tighter than /tenants/register's 5/hour
+// because /connect issues a live credential on confirmation. IP-only (not
+// email-keyed) to avoid creating an enumeration oracle, consistent with this
+// endpoint's existing generic-200 design.
+const connectRateLimit = async (req, res, next) => {
+  const ip = req.ip || req.connection.remoteAddress;
+  const ipHash = hashIp(ip);
+  const windowMs = 15 * 60 * 1000;
+  const windowStart = new Date(Date.now() - windowMs);
+  const MAX_ATTEMPTS = 3;
+
+  try {
+    const [, recentCount] = await Promise.all([
+      db.connectAttempt.deleteMany({
+        where: { createdAt: { lt: windowStart } }
+      }),
+      db.connectAttempt.count({
+        where: { ipHash, createdAt: { gte: windowStart } }
+      })
+    ]);
+
+    if (recentCount >= MAX_ATTEMPTS) {
+      const oldestAttempt = await db.connectAttempt.findFirst({
+        where: { ipHash, createdAt: { gte: windowStart } },
+        orderBy: { createdAt: 'asc' },
+        select: { createdAt: true }
+      });
+      const resetAt = oldestAttempt
+        ? new Date(oldestAttempt.createdAt).getTime() + windowMs
+        : Date.now() + windowMs;
+      const retryAfterSecs = Math.ceil((resetAt - Date.now()) / 1000);
+      res.set('Retry-After', String(retryAfterSecs));
+      return res.status(429).json({
+        error: `Too many requests. Please try again in ${Math.ceil(retryAfterSecs / 60)} minute(s).`,
+        retryAfter: retryAfterSecs
+      });
+    }
+
+    await db.connectAttempt.create({ data: { ipHash } });
+
+  } catch (rateLimitErr) {
+    logger.error(
+      { module: 'auth', endpoint: 'connect', error: rateLimitErr.message },
+      'Rate limiter DB error — failing open'
+    );
+  }
+  next();
+};
+
+// ── Turnstile verification for /connect ─────────────────────────────────────
+const connectTurnstile = async (req, res, next) => {
+  const turnstileToken = req.body.turnstileToken || '';
+  if (!turnstileToken) {
+    return res.status(400).json({ error: 'Security check token missing.' });
+  }
+  try {
+    const turnstileRes = await fetch(
+      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          secret:   process.env.TURNSTILE_SECRET_KEY,
+          response: turnstileToken,
+          remoteip: req.ip || req.connection.remoteAddress
+        })
+      }
+    );
+    const turnstileData = await turnstileRes.json();
+    if (!turnstileData.success) {
+      return res.status(403).json({ error: 'Security check failed. Please try again.' });
+    }
+  } catch (turnstileErr) {
+    logger.error({ module: 'auth', endpoint: 'connect', error: turnstileErr.message }, 'Turnstile verification error');
+    return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
+  }
+  next();
+};
 
 /**
  * POST /api/auth/connect
  * التاجر يبعت الـ email بتاعه بس
  * الـ backend يرجعله كل حاجة تلقائياً
  */
-router.post('/connect', async (req, res) => {
+router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => {
+  const GENERIC_RESPONSE = {
+    message: 'If this email is registered and verified, a secure connect link has been sent. The link expires in 15 minutes.'
+  };
+
   try {
     const { email, siteUrl } = req.body;
 
@@ -19,68 +111,135 @@ router.post('/connect', async (req, res) => {
 
     const normalizedEmail = email.trim().toLowerCase();
 
-    // ابحث عن التاجر بالـ email
     const tenant = await db.tenant.findUnique({
       where: { email: normalizedEmail },
       select: {
         id: true,
         email: true,
-        apiKey: true,
-        webhookSecret: true,
         isActive: true,
         emailVerified: true,
         storeUrl: true,
       }
     });
 
-    if (!tenant) {
-      return res.status(404).json({
-        error: 'Email not found. Please register at chargeguard-io.netlify.app first.'
-      });
-    }
-
-    if (!tenant.isActive) {
-      return res.status(403).json({
-        error: 'Account is inactive. Please contact support.'
-      });
+    if (!tenant || !tenant.isActive) {
+      return res.status(200).json(GENERIC_RESPONSE);
     }
 
     if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-      return res.status(403).json({
-        error: 'Email not verified. Please check your inbox and click the confirmation link before connecting your store.',
-        code: 'EMAIL_NOT_VERIFIED'
-      });
+      return res.status(200).json(GENERIC_RESPONSE);
     }
 
-    // لو مفيش webhookSecret — نعمله تلقائياً ونحفظه
-    let webhookSecret = tenant.webhookSecret;
-    if (!webhookSecret) {
-      webhookSecret = crypto.randomBytes(32).toString('hex');
+  if (siteUrl && siteUrl !== tenant.storeUrl) {
+      const { normalizeDomain } = require('../lib/domainAuth');
+      const normalizedSiteDomain = normalizeDomain(siteUrl);
+
       await db.tenant.update({
         where: { email: normalizedEmail },
-        data: { webhookSecret }
+        data: {
+          storeUrl: siteUrl,
+          // Re-bind the domain allowlist whenever the merchant changes their
+          // store URL through /connect — otherwise a stale allowedDomains
+          // entry would block legitimate traffic from the new domain while
+          // the old (possibly compromised or sold) domain stayed authorized.
+          ...(normalizedSiteDomain ? { allowedDomains: [normalizedSiteDomain] } : {}),
+        }
       });
     }
 
-    // لو التاجر بعت الـ siteUrl — نحدثه
-    if (siteUrl && siteUrl !== tenant.storeUrl) {
-      await db.tenant.update({
-        where: { email: normalizedEmail },
-        data: { storeUrl: siteUrl }
-      });
-    }
+    const connectToken = crypto.randomBytes(32).toString('hex');
+    const connectTokenExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
 
-    logger.info(`Tenant connected via email: ${normalizedEmail}`);
-
-    return res.status(200).json({
-      merchantId:    tenant.id,
-      apiKey:        tenant.apiKey,
-      webhookSecret: webhookSecret,
-      email:         tenant.email,
+    await db.tenant.update({
+      where: { id: tenant.id },
+      data: { connectToken, connectTokenExpiresAt }
     });
+
+    const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
+    const confirmUrl = `${baseUrl}/api/auth/connect/confirm?token=${connectToken}`;
+
+    const { sendConfirmationEmail } = require('../lib/email');
+    sendConfirmationEmail(tenant.email, confirmUrl).catch(err => {
+      logger.error({ module: 'email', error: err.message }, 'Failed to send connect confirmation email');
+    });
+
+    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token issued');
+
+    return res.status(200).json(GENERIC_RESPONSE);
 
   } catch (err) {
     logger.error('Auth connect error:', err);
+    return res.status(200).json(GENERIC_RESPONSE);
+  }
+});
+
+router.get('/connect/confirm', async (req, res) => {
+  const { token } = req.query;
+
+  if (!token || typeof token !== 'string') {
+    return res.status(400).json({ error: 'Missing or invalid token' });
+  }
+
+  try {
+    const tenant = await db.tenant.findUnique({
+      where: { connectToken: token },
+      select: {
+        id: true,
+        email: true,
+        webhookSecret: true,
+        isActive: true,
+        connectTokenExpiresAt: true,
+      }
+    });
+
+    if (!tenant || !tenant.isActive) {
+      return res.status(401).json({ error: 'Invalid or expired connect link. Please request a new one.' });
+    }
+
+    if (!tenant.connectTokenExpiresAt || new Date() > new Date(tenant.connectTokenExpiresAt)) {
+      return res.status(410).json({ error: 'This connect link has expired. Please request a new one.' });
+    }
+
+    let webhookSecret = tenant.webhookSecret;
+    if (!webhookSecret) {
+      webhookSecret = crypto.randomBytes(32).toString('hex');
+    }
+
+    // Plaintext API keys are never persisted after their one-time delivery — only apiKeyHash is
+    // stored (OWASP ASVS V6.2.1; NIST SP 800-63B §5.1.3 look-up secret storage), which makes
+    // "recovering" a previously-issued key impossible by design, for any tenant. Since /connect
+    // already proves inbox ownership (the only signal we'd otherwise use to gate a rotation),
+    // the correct behavior — matching how GitHub, Stripe, and Twilio handle "I lost my API
+    // key" — is to issue a brand-new credential here rather than attempt to return one that
+    // structurally cannot exist in the database.
+    const newApiKey = crypto.randomBytes(32).toString('base64');
+    const newApiKeyHash = hashApiKey(newApiKey);
+
+    await db.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        connectToken: null,
+        connectTokenExpiresAt: null,
+        lastConnectVerifiedAt: new Date(),
+        webhookSecret,
+        apiKeyHash: newApiKeyHash,
+        apiKey: null,
+        keyRotatedAt: new Date(),
+      }
+    });
+
+    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token verified — new API key issued');
+
+    return res.status(200).json({
+      merchantId:    tenant.id,
+      apiKey:        newApiKey,
+      webhookSecret: webhookSecret,
+      email:         tenant.email,
+      message:       'A new API key has been issued for security reasons. Update your WooCommerce plugin settings with this key.',
+    });
+
+  } catch (err) {
+    logger.error('Connect confirm error:', err);
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
@@ -97,9 +256,8 @@ router.get('/verify', async (req, res) => {
       return res.status(401).json({ error: 'Missing x-api-key header' });
     }
 
-    const tenant = await db.tenant.findUnique({
-      where:  { apiKey },
-      select: { id: true, isActive: true, emailVerified: true },
+    const { tenant } = await resolveTenantByApiKey(apiKey, {
+      id: true, isActive: true, emailVerified: true,
     });
 
     if (!tenant || !tenant.isActive) {
@@ -239,13 +397,21 @@ router.get('/verify-email', async (req, res) => {
       ));
     }
 
-    // ✅ SUCCESS — activate account
+    // ✅ SUCCESS — activate account. The plaintext key is captured into a local variable BEFORE
+    // the purge below; the same write that flips emailVerified = true also nulls the apiKey
+    // column, so there is no committed state where the account is verified and the plaintext
+    // key still exists in the database (CWE-532 minimization; OWASP ASVS V6.2.1). This is the
+    // one and only moment the transiently-held key from /tenants/register (see routes/risk.js)
+    // is read — it never touches the database again after this line.
+    const plaintextKeyForWelcomeEmail = tenant.apiKey;
+
     await db.tenant.update({
       where: { id: tenant.id },
       data: {
         emailVerified: true,
         emailVerifyToken: null,
         emailVerifyExpiresAt: null,
+        apiKey: null,
       }
     });
 
@@ -253,7 +419,7 @@ router.get('/verify-email', async (req, res) => {
 
     // Send Welcome + API Key email (fire-and-forget)
     const { sendWelcomeWithKeyEmail } = require('../lib/email');
-    sendWelcomeWithKeyEmail(tenant.email, tenant.apiKey).catch(err => {
+    sendWelcomeWithKeyEmail(tenant.email, plaintextKeyForWelcomeEmail).catch(err => {
       logger.error({ module: 'email', error: err.message }, 'Failed to send welcome email after verification');
     });
 
