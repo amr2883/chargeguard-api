@@ -4,6 +4,8 @@ const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
+const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
+const { hashApiKey } = require('../lib/apiKeyHash');
 
 const prisma = new PrismaClient();
 
@@ -50,13 +52,19 @@ const authByApiKey = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'Missing X-Api-Key header' });
   try {
-    const tenant = await prisma.tenant.findUnique({
-      where:  { apiKey },
-      select: { id: true, email: true, plan: true, isActive: true, createdAt: true, apiKey: true, keyRotatedAt: true },
+    const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
+      id: true, email: true, plan: true, isActive: true, createdAt: true, keyRotatedAt: true,
     });
+
     if (!tenant || !tenant.isActive) {
       return setTimeout(() => res.status(401).json({ error: 'Unauthorized' }), 200);
     }
+
+    if (usedPreviousKey) {
+      res.set('X-ChargeGuard-Key-Deprecated', 'true');
+      console.warn(`[Dashboard] Request authenticated using previous (grace-period) API key — tenant ${tenant.id}`);
+    }
+
     req.tenant = tenant;
     next();
   } catch (err) {
@@ -2127,7 +2135,11 @@ const buildDashboardHtml = async (tenant, data) => {
   </div>
 
   <script>
-    const _key = ${JSON.stringify(tenant.apiKey)};
+    // Plaintext API keys are never persisted after initial delivery — only apiKeyHash is stored
+    // (OWASP ASVS V6.2.1 / NIST SP 800-63B §5.1.3). tenant.apiKey is intentionally not selected
+    // or embedded here. _key only becomes populated client-side, in-memory, immediately after a
+    // successful rotation response below, and is discarded on page reload.
+    let _key = null;
     let _visible = false;
 
     // ── BIN Sequence Polling ──────────────────────────────────────────
@@ -2261,16 +2273,22 @@ const buildDashboardHtml = async (tenant, data) => {
     _binPollingId = setInterval(fetchBINAlerts, 30000);
 
     function toggleKey() {
+      if (!_key) {
+        showMsg('⚠️ For your security, keys are never stored in plaintext after delivery. Click "Rotate Key" to issue a new one.', '#f59e0b');
+        return;
+      }
       _visible = !_visible;
       document.getElementById('apiKeyDisplay').textContent = _visible ? _key : '••••••••••••••••••••••••••••••••••••••••••••';
       document.getElementById('toggleBtn').textContent = _visible ? 'Hide' : 'Show';
     }
 
     function copyKey() {
-      const val = _visible ? _key : _key;
-      navigator.clipboard.writeText(val).then(() => showMsg('✅ Copied to clipboard!', '#16a34a'));
+      if (!_key) {
+        showMsg('⚠️ No key available to copy in this session. Click "Rotate Key" to issue a new one.', '#f59e0b');
+        return;
+      }
+      navigator.clipboard.writeText(_key).then(() => showMsg('✅ Copied to clipboard!', '#16a34a'));
     }
-
     async function rotateKey() {
       if (!confirm('⚠️ Your current API key will be invalidated immediately.\\n\\nYou must update your plugin settings after rotation.\\n\\nContinue?')) return;
       const btn = document.getElementById('rotateBtn');
@@ -2284,6 +2302,7 @@ const buildDashboardHtml = async (tenant, data) => {
         const data = await res.json();
         if (res.ok) {
           showMsg('✅ ' + data.message, '#16a34a');
+          _key = data.newApiKey;
           document.getElementById('apiKeyDisplay').textContent = data.newApiKey;
           _visible = true;
           document.getElementById('toggleBtn').textContent = 'Hide';
@@ -2327,16 +2346,16 @@ const buildDashboardHtml = async (tenant, data) => {
 };
 
 // ── monthly reports archive section ──────────────────────────────────────
-async function buildreportsarchivesection(tenantid, plan) {
-  const ispro = plan !== 'early_access' && plan !== 'free';
+async function buildReportsArchiveSection(tenantId, plan) {
+  const isPro = plan !== 'early_access' && plan !== 'free';
 
-  const reports = await prisma.monthlyreport.findmany({
-    where:   { tenantid, status: 'ready' },
-    orderby: [{ reportyear: 'desc' }, { reportmonth: 'desc' }],
-    take:    ispro ? 24 : 3,
+  const reports = await prisma.monthlyReport.findMany({
+    where:   { tenantId, status: 'ready' },
+    orderBy: [{ reportYear: 'desc' }, { reportMonth: 'desc' }],
+    take:    isPro ? 24 : 3,
     select: {
-      id: true, reportmonth: true, reportyear: true,
-      totalattacks: true, totalprotected: true, totalfeessaved: true,
+      id: true, reportMonth: true, reportYear: true,
+      totalAttacks: true, totalProtected: true, totalFeesSaved: true,
     },
   });
 
@@ -2344,90 +2363,90 @@ async function buildreportsarchivesection(tenantid, plan) {
     return '';
   }
 
-  const monthnames = ['','jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-  const fmtusd = (n) => n.tolocalestring('en-us', { style: 'currency', currency: 'usd', minimumfractiondigits: 0 });
+  const monthNames = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const fmtUsd = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 });
 
   const rows = reports.map((r, i) => {
-    const islocked   = !ispro && i > 0;
-    const monthlabel = `${monthnames[r.reportmonth]} ${r.reportyear}`;
-    const islatest   = i === 0;
+    const isLocked   = !isPro && i > 0;
+    const monthLabel = `${monthNames[r.reportMonth]} ${r.reportYear}`;
+    const isLatest   = i === 0;
 
     return `
       <div style="display:flex;align-items:center;gap:1rem;padding:.75rem 1.25rem;
                   border-bottom:1px solid var(--border2);
-                  ${islocked ? 'filter:blur(2px);pointer-events:none;user-select:none;' : ''}
+                  ${isLocked ? 'filter:blur(2px);pointer-events:none;user-select:none;' : ''}
                   transition:background .15s;"
-           ${!islocked ? 'onmouseover="this.style.background=\'rgba(255,255,255,.018)\'"' : ''}
-           ${!islocked ? 'onmouseout="this.style.background=\'transparent\'"' : ''}>
+           ${!isLocked ? 'onmouseover="this.style.background=\'rgba(255,255,255,.018)\'"' : ''}
+           ${!isLocked ? 'onmouseout="this.style.background=\'transparent\'"' : ''}>
 
         <div style="width:80px;flex-shrink:0;">
-          <div style="font-size:.82rem;font-weight:700;color:var(--text);">${monthlabel}</div>
-          ${islatest ? '<div style="font-size:.62rem;color:#60a5fa;font-weight:600;margin-top:.1rem;">latest</div>' : ''}
+          <div style="font-size:.82rem;font-weight:700;color:var(--text);">${monthLabel}</div>
+          ${isLatest ? '<div style="font-size:.62rem;color:#60a5fa;font-weight:600;margin-top:.1rem;">latest</div>' : ''}
         </div>
 
         <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;">
           <div>
-            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">attacks</div>
-            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'dm mono',monospace;">${r.totalattacks.tolocalestring('en-us')}</div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Attacks</div>
+            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'DM Mono',monospace;">${r.totalAttacks.toLocaleString('en-US')}</div>
           </div>
           <div>
-            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">protected</div>
-            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'dm mono',monospace;">${fmtusd(r.totalprotected)}</div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Protected</div>
+            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'DM Mono',monospace;">${fmtUsd(r.totalProtected)}</div>
           </div>
           <div>
-            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">fees saved</div>
-            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'dm mono',monospace;">${fmtusd(r.totalfeessaved)}</div>
+            <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Fees Saved</div>
+            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'DM Mono',monospace;">${fmtUsd(r.totalFeesSaved)}</div>
           </div>
         </div>
 
-        ${!islocked ? `
-        <a href="/api/reports/monthly?month=${r.reportmonth}&year=${r.reportyear}"
+        ${!isLocked ? `
+        <a href="/api/reports/monthly?month=${r.reportMonth}&year=${r.reportYear}"
            style="flex-shrink:0;display:inline-flex;align-items:center;gap:.35rem;
                   background:var(--surface2);border:1px solid var(--border);
                   color:var(--text-sub);font-size:.72rem;font-weight:600;
                   padding:.4rem .85rem;border-radius:6px;text-decoration:none;
                   transition:border-color .15s;"
-           onmouseover="this.style.bordercolor='#3b82f6'"
-           onmouseout="this.style.bordercolor='var(--border)'">
-          ↓ pdf
+           onmouseover="this.style.borderColor='#3b82f6'"
+           onmouseout="this.style.borderColor='var(--border)'">
+          ↓ PDF
         </a>` : ''}
       </div>`;
   });
 
-  const upgradeoverlay = !ispro && reports.length > 1 ? `
+  const upgradeOverlay = !isPro && reports.length > 1 ? `
     <div style="position:absolute;bottom:0;left:0;right:0;height:60%;
                 background:linear-gradient(180deg,transparent,var(--surface) 60%);
                 display:flex;align-items:flex-end;justify-content:center;
                 padding-bottom:1rem;pointer-events:none;">
-      <a href="mailto:support@chargeguard.io?subject=upgrade to pro"
+      <a href="mailto:support@chargeguard.io?subject=Upgrade to Pro"
          style="pointer-events:all;display:inline-flex;align-items:center;gap:.5rem;
                 background:linear-gradient(135deg,#1d4ed8,#7c3aed);color:#fff;
                 font-size:.78rem;font-weight:600;padding:.55rem 1.25rem;
                 border-radius:20px;text-decoration:none;
                 box-shadow:0 4px 16px rgba(59,130,246,.3);">
-        🔓 access full archive — upgrade to pro
+        🔓 Access full archive — Upgrade to Pro
       </a>
     </div>` : '';
 
-  const totalhistoricalprotected = reports.reduce((s, r) => s + r.totalprotected, 0);
-  const summarybadge = totalhistoricalprotected > 0 ? `
+  const totalHistoricalProtected = reports.reduce((s, r) => s + r.totalProtected, 0);
+  const summaryBadge = totalHistoricalProtected > 0 ? `
     <div style="font-size:.72rem;color:#4ade80;font-weight:600;
                 background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);
                 border-radius:20px;padding:.2rem .7rem;">
-      ${fmtusd(totalhistoricalprotected)} protected total
+      ${fmtUsd(totalHistoricalProtected)} protected total
     </div>` : '';
 
   return `
     <div class="tbl-wrap" style="margin-bottom:1.5rem;position:relative;">
       <div class="tbl-header">
-        <span class="tbl-title">📋 monthly security reports</span>
+        <span class="tbl-title">📋 Monthly Security Reports</span>
         <div style="display:flex;align-items:center;gap:.5rem;">
-          ${summarybadge}
+          ${summaryBadge}
           <span class="tbl-count">${reports.length} report${reports.length !== 1 ? 's' : ''}</span>
         </div>
       </div>
       ${rows.join('')}
-      ${upgradeoverlay}
+      ${upgradeOverlay}
     </div>`;
 }
 
@@ -2472,6 +2491,20 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
   try {
     const tenant = req.tenant;
 
+    const RECENCY_WINDOW_MS = 15 * 60 * 1000;
+    const tenantFull = await prisma.tenant.findUnique({
+      where:  { id: tenant.id },
+      select: { lastConnectVerifiedAt: true },
+    });
+
+    const lastVerified = tenantFull?.lastConnectVerifiedAt;
+    if (!lastVerified || (Date.now() - new Date(lastVerified).getTime()) > RECENCY_WINDOW_MS) {
+      return res.status(403).json({
+        error: 'Recent verification required. Please use the "Connect" flow (check your email for a confirm link) within the last 15 minutes before rotating your key.',
+        code: 'RECENT_VERIFICATION_REQUIRED'
+      });
+    }
+
     // منع التدوير المتكرر: 5 دقائق بين كل rotation
     if (tenant.keyRotatedAt) {
       const msSinceLastRotation = Date.now() - new Date(tenant.keyRotatedAt).getTime();
@@ -2485,15 +2518,38 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
       }
     }
 
-    // توليد مفتاح جديد آمن
+    // توليد مفتاح جديد آمن (256-bit CSPRNG)
     const crypto = require('crypto');
     const newApiKey = crypto.randomBytes(32).toString('base64url');
+    const newApiKeyHash = hashApiKey(newApiKey);
 
-    // Atomic update في DB
+    // Fetch current key identifiers to carry into previousApiKey/previousApiKeyHash for the
+    // grace period — fetched narrowly, only at the moment it's needed (CWE-532 minimization)
+    const currentTenant = await prisma.tenant.findUnique({
+      where:  { id: tenant.id },
+      select: { apiKeyHash: true, apiKey: true },
+    });
+
+    // Grace period — both old and new keys remain valid for this window,
+    // matching Stripe/GitHub/Twilio rotation patterns (NIST SP 800-63B
+    // authenticator lifecycle guidance: credential replacement should not
+    // require an atomic, unbuffered swap). Configurable via env var,
+    // defaults to 24 hours.
+    const GRACE_PERIOD_HOURS = parseInt(process.env.KEY_ROTATION_GRACE_HOURS || '24', 10);
+    const GRACE_PERIOD_MS = GRACE_PERIOD_HOURS * 60 * 60 * 1000;
+    const previousApiKeyExpiresAt = new Date(Date.now() + GRACE_PERIOD_MS);
+
+    // Atomic update في DB — only the new key's hash is persisted going forward (OWASP ASVS V6.2.1).
+    // previousApiKey/previousApiKeyHash are both carried forward for the grace period to support
+    // any not-yet-migrated lookup path; previousApiKey will be dropped once backfill is confirmed complete.
     await prisma.tenant.update({
       where: { id: tenant.id },
       data: {
-        apiKey: newApiKey,
+        previousApiKey: currentTenant.apiKey,
+        previousApiKeyHash: currentTenant.apiKeyHash,
+        previousApiKeyExpiresAt,
+        apiKey: null,
+        apiKeyHash: newApiKeyHash,
         keyRotatedAt: new Date()
       }
     });
@@ -2507,7 +2563,8 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
     return res.json({
       success: true,
       newApiKey,
-      message: 'API key rotated successfully. Update your plugin settings now.'
+      graceExpiresAt: previousApiKeyExpiresAt.toISOString(),
+      message: `API key rotated successfully. Your old key remains valid until ${previousApiKeyExpiresAt.toUTCString()} — update your plugin settings before then to avoid a protection gap.`
     });
 
   } catch (err) {

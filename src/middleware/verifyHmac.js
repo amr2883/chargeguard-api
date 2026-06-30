@@ -7,12 +7,31 @@ function verifyHmacSignature(req, res, next) {
   const signature  = req.headers['x-chargeguard-signature'];
   const timestamp  = req.headers['x-chargeguard-timestamp'];
 
-// Legacy mode: Plugin قديم لا يرسل الهيدرات الجديدة
+// Legacy mode — env-gated migration bypass (OWASP API8:2023 mitigation:
+// this control must be explicit, time-bounded by operator decision, and
+// loudly observable, not silently permanent). Set HMAC_LEGACY_BYPASS_ENABLED
+// to 'false' once plugin telemetry confirms HMAC adoption, then remove
+// this block entirely in a follow-up patch.
 if (!signature && !timestamp) {
+    if (process.env.HMAC_LEGACY_BYPASS_ENABLED !== 'true') {
+        logger.warn(
+          { tenantId: req.tenant?.id, path: req.path },
+          'HMAC_LEGACY_REQUEST_REJECTED — no signature headers and legacy bypass disabled'
+        );
+        return res.status(401).json({ error: 'Unauthorized — request signature required' });
+    }
+
     logger.warn(
-      { tenantId: req.tenant?.id, path: req.path },
-      'HMAC_LEGACY_REQUEST — no signature headers, allowing through'
+      {
+        tenantId:  req.tenant?.id,
+        path:      req.path,
+        userAgent: req.headers['user-agent'] || '(none)',
+        ip:        req.ip,
+      },
+      'HMAC_LEGACY_BYPASS_USED — unsigned request allowed during migration window'
     );
+    res.set('X-ChargeGuard-Unsigned-Request', 'true');
+
     // تحليل Buffer → JSON للطلبات القديمة
     if (req.body instanceof Buffer) {
         try {

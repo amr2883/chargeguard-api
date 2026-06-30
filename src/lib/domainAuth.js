@@ -143,15 +143,22 @@ const domainAuthMiddleware = async (req, res, next) => {
       });
     }
 
-    // ── ٣. السماح ببيئات التطوير ──────────────────────────────────────────
-    if (isDevDomain(normalizedDomain)) {
-      logger.debug(
+    // ── ٣. السماح ببيئات التطوير (production-gated) ─────────────────────
+    // CWE-693 / OWASP API8:2023 mitigation: this bypass must never be
+    // reachable in production. Gated on NODE_ENV, matching the existing
+    // convention used elsewhere in this codebase (app.js: /mark-fraud,
+    // /test-graph). A loud warn (not debug) fires on every trigger so a
+    // misconfigured NODE_ENV is immediately visible in monitoring rather
+    // than silently exploitable.
+    if (process.env.NODE_ENV !== 'production' && isDevDomain(normalizedDomain)) {
+      logger.warn(
         {
           module:   'domainAuth',
           domain:   normalizedDomain,
           tenantId: req.tenant?.id,
+          nodeEnv:  process.env.NODE_ENV,
         },
-        'Dev/local domain — skipping allowedDomains check'
+        'Dev/local domain bypass triggered — skipping allowedDomains check (non-production only)'
       );
       req.storeDomain = normalizedDomain;
       return next();
@@ -176,16 +183,23 @@ const domainAuthMiddleware = async (req, res, next) => {
       select: { allowedDomains: true },
     });
 
-    const allowedDomains = tenantRecord?.allowedDomains ?? [];
+ const allowedDomains = tenantRecord?.allowedDomains ?? [];
 
-    // Backward compatibility: إذا كان allowedDomains فارغًا، اسمح بالمرور
+    // Default-deny (OWASP ASVS V4.1.1; CWE-636 fix): an empty allowedDomains
+    // array means this tenant has no authorized origin, not "skip the check."
+    // With zero existing users at launch, every tenant created from this
+    // point forward has allowedDomains populated at registration/connect
+    // time, so this branch should only ever fire for a misconfigured or
+    // tampered record — and that case must reject, not bypass.
     if (allowedDomains.length === 0) {
-      logger.debug(
-        { module: 'domainAuth', tenantId: req.tenant.id },
-        'Tenant has no allowedDomains configured — allowing request (backward compatibility)'
+      logger.warn(
+        { module: 'domainAuth', tenantId: req.tenant.id, requestDomain: normalizedDomain },
+        'Tenant has no allowedDomains configured — rejecting (default-deny)'
       );
-      req.storeDomain = normalizedDomain;
-      return next();
+      return res.status(403).json({
+        error: 'No authorized domain configured for this API key. Please reconnect your store.',
+        code:  'NO_ALLOWED_DOMAINS',
+      });
     }
 
     // ── ٦. قرار السماح أو الرفض ───────────────────────────────────────────
@@ -216,14 +230,19 @@ const domainAuthMiddleware = async (req, res, next) => {
     );
     next();
 
-  } catch (err) {
+} catch (err) {
     logger.error(
       { module: 'domainAuth', error: err.message, stack: err.stack },
-      'Unexpected error in domainAuthMiddleware'
+      'Unexpected error in domainAuthMiddleware — failing closed'
     );
-    // Fail open: لا نحجب المستخدم بسبب خطأ داخلي
-    // إذا أردت Fail closed، استبدل next() بـ res.status(503).json(...)
-    next();
+    // Fail closed (CWE-636 fix): this middleware is a security boundary, not
+    // a convenience feature. A DB error must not silently disable domain
+    // verification — that was the original defect (the missing column threw
+    // on every request, and the catch block let every request through).
+    return res.status(503).json({
+      error: 'Unable to verify request origin. Please try again.',
+      code:  'DOMAIN_CHECK_UNAVAILABLE',
+    });
   }
 };
 

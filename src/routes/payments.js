@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const db = require('../lib/db');
 const logger = require('../lib/logger');
 const { sendSubscriptionConfirmationEmail } = require('../lib/email');
+const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 
 // ── PayPal Webhook Signature Verification ─────────────────────────────
 // الآلية: PayPal يوقّع (transmissionId|timestamp|webhookId|crc32(body))
@@ -88,17 +89,14 @@ const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key is required' });
 
-  const tenant = await db.tenant.findUnique({
-    where: { apiKey },
-    select: {
-      id: true,
-      email: true,
-      isActive: true,
-      emailVerified: true,
-      plan: true,
-      subscriptionStatus: true,
-      subscriptionEndDate: true,
-    },
+  const { tenant } = await resolveTenantByApiKey(apiKey, {
+    id: true,
+    email: true,
+    isActive: true,
+    emailVerified: true,
+    plan: true,
+    subscriptionStatus: true,
+    subscriptionEndDate: true,
   });
 
   if (!tenant || !tenant.isActive) {

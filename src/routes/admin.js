@@ -15,10 +15,11 @@ const escapeHtml = (str) =>
     .replace(/"/g,  '&quot;')
     .replace(/'/g,  '&#x27;');
 
-// ── إخفاء API Key (أول 12 حرف فقط) ─────────────────────────
-const maskKey = (key) => {
-  if (!key || key.length < 12) return '••••••••••••';
-  return escapeHtml(key.slice(0, 12)) + '••••••••••••';
+// ── بصمة غير قابلة للعكس للمفتاح (مشتقة من apiKeyHash فقط) ──
+// لا تستقبل ولا تتعامل مع أي قيمة نصية صريحة لمفتاح API إطلاقاً
+const keyFingerprint = (apiKeyHash) => {
+  if (!apiKeyHash) return null;
+  return escapeHtml(apiKeyHash.slice(0, 8).toUpperCase());
 };
 
 // ── Brute-force protection بسيط (in-memory) ─────────────────
@@ -85,7 +86,11 @@ const buildHtml = (tenants, total) => {
       <td>${escapeHtml(t.email)}</td>
       <td>${escapeHtml(t.storeUrl ?? '—')}</td>
       <td><span class="plan">${escapeHtml(t.plan ?? '—')}</span></td>
-      <td class="key">${maskKey(t.apiKey)}</td>
+      <td class="key">${
+        t.apiKeyHash
+          ? `<span title="بصمة غير قابلة للعكس، مشتقة من HMAC-SHA256">${keyFingerprint(t.apiKeyHash)}</span> <span class="badge-hashed">Hashed</span>`
+          : `<span class="badge-legacy">Legacy (pending migration)</span>`
+      }</td>
       <td>${escapeHtml(t.createdAt?.toISOString().replace('T', ' ').slice(0, 19))} <small>(UTC)</small></td>
     </tr>`).join('');
 
@@ -116,8 +121,9 @@ const buildHtml = (tenants, total) => {
     tr:hover td { background: #1e3a5f; transition: background .15s; }
     .plan  { background: #0e4429; color: #4ade80; border-radius: 4px;
              padding: .15rem .5rem; font-size: .75rem; font-weight: 600; }
-    .key   { font-family: monospace; color: #fbbf24; font-size: .8rem; }
-    small  { color: #64748b; font-size: .7rem; }
+  .key   { font-family: monospace; color: #fbbf24; font-size: .8rem; }
+    .badge-hashed { background:#0e4429; color:#4ade80; border-radius:4px; padding:.1rem .4rem; font-size:.7rem; margin-right:.4rem; }
+    .badge-legacy { background:#4a1d1d; color:#f87171; border-radius:4px; padding:.1rem .4rem; font-size:.7rem; }    small  { color: #64748b; font-size: .7rem; }
     footer { margin-top: 1.5rem; font-size: .75rem; color: #475569; }
   </style>
 </head>
@@ -146,7 +152,7 @@ const buildHtml = (tenants, total) => {
         <th>البريد الإلكتروني</th>
         <th>رابط المتجر</th>
         <th>الخطة</th>
-        <th>API Key</th>
+        <th>Key Fingerprint</th>
         <th>تاريخ التسجيل</th>
       </tr>
     </thead>
@@ -169,7 +175,8 @@ router.get('/', rateLimitAdmin, authAdmin, async (req, res) => {
       prisma.tenant.findMany({
         orderBy: { createdAt: 'desc' },
         take:    limit,
-        select:  { id: true, email: true, storeUrl: true, plan: true, apiKey: true, createdAt: true },
+                select:  { id: true, email: true, storeUrl: true, plan: true, apiKeyHash: true, createdAt: true },
+
       }),
       prisma.tenant.count(),
     ]);

@@ -4,6 +4,7 @@ const express = require('express');
 const router  = express.Router();
 const db      = require('../lib/db');
 const logger  = require('../lib/logger');
+const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { getAvailableCountries, calculateCountryRiskPenalty } = require('../lib/countryRisk');
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -36,16 +37,19 @@ const apiKeyAuth = async (req, res, next) => {
   const apiKey = req.headers['x-api-key'];
   if (!apiKey) return res.status(401).json({ error: 'API key is required' });
   try {
-    const tenant = await db.tenant.findUnique({
-      where:  { apiKey },
-      select: {
-        id: true, email: true, isActive: true,
-        emailVerified: true, plan: true,
-        countryOverrides: true,
-      },
+    const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
+      id: true, email: true, isActive: true,
+      emailVerified: true, plan: true,
+      countryOverrides: true,
     });
+
     if (!tenant || !tenant.isActive) {
       return setTimeout(() => res.status(401).json({ error: 'Unauthorized' }), 200);
+    }
+
+    if (usedPreviousKey) {
+      res.set('X-ChargeGuard-Key-Deprecated', 'true');
+      logger.warn({ module: 'settings', tenantId: tenant.id }, 'Request authenticated using previous (grace-period) API key');
     }
     if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
       return res.status(403).json({ error: 'Email not verified', code: 'EMAIL_NOT_VERIFIED' });

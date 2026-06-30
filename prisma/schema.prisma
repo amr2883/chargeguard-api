@@ -12,8 +12,10 @@ datasource db {
 model Tenant {
   id            String   @id @default(cuid())
   email         String   @unique
-  storeUrl      String?
-  apiKey        String   @unique
+  apiKey        String?  @unique // DEPRECATED (CWE-256) — plaintext, retained only for migration fallback. Never read for new auth checks; do not reintroduce reliance on this field.
+  apiKeyHash    String?  @unique // HMAC-SHA256(apiKey, API_KEY_HASH_SECRET) — source of truth for authentication (OWASP ASVS V6.2.1)
+storeUrl      String?
+  allowedDomains String[] @default([])
   webhookSecret String?
   plan          String   @default("early_access")
 
@@ -29,6 +31,12 @@ model Tenant {
   emailVerifyToken            String?   @unique
   emailVerifyExpiresAt        DateTime?
   keyRotatedAt                DateTime?
+  connectToken                String?   @unique
+  connectTokenExpiresAt       DateTime?
+  lastConnectVerifiedAt       DateTime?
+  previousApiKey               String?   @unique // DEPRECATED (CWE-256) — plaintext, retained only for migration fallback.
+  previousApiKeyHash           String?   @unique
+  previousApiKeyExpiresAt      DateTime?
   lastAlertSentAt             DateTime?
   lastPaypalAlertAt           DateTime?
   lastRenewalReminderSentAt   DateTime?
@@ -401,6 +409,15 @@ model WhitelistEntry {
 
 // ========== Registration Rate Limiting ==========
 model RegistrationAttempt {
+  id        Int      @id @default(autoincrement())
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([ipHash, createdAt])
+}
+
+// ========== Connect (Key Recovery) Rate Limiting ==========
+model ConnectAttempt {
   id        Int      @id @default(autoincrement())
   ipHash    String
   createdAt DateTime @default(now())
