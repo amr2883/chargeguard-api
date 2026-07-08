@@ -1,0 +1,21 @@
+﻿{
+  "id": 12345,
+  "status": "processing",
+  "currency": "USD",
+  "total": "149.99",
+  "customer_ip_address": "192.168.1.100",
+  "customer_id": 6789,
+  "date_created": "2025-04-22T10:30:00",
+  "billing": {
+    "first_name": "Ahmed",
+    "last_name": "Mohamed",
+    "email": "ahmed@example.com",
+    "country": "EG"
+  },
+  "shipping": {
+    "country": "EG"
+  },
+  "payment_details": {
+    "card_bin": "424242"
+  }
+}

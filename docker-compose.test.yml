@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  test-wp:
+    image: wordpress:php8.2-apache
+    container_name: chargeguard-test-wp
+    environment:
+      WORDPRESS_DB_HOST: test-db
+      WORDPRESS_DB_USER: test
+      WORDPRESS_DB_PASSWORD: test
+      WORDPRESS_DB_NAME: test
+      WORDPRESS_TABLE_PREFIX: wp_
+    ports:
+      - "8181:80"
+    volumes:
+      - ./woocommerce-chargeguard:/var/www/html/wp-content/plugins/chargeguard
+      - ./wp-tests-config.php:/var/www/html/wp-config.php
+    depends_on:
+      - test-db
+    networks:
+      - testnet
+
+  test-db:
+    image: mysql:8.0
+    container_name: chargeguard-test-db
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: test
+      MYSQL_USER: test
+      MYSQL_PASSWORD: test
+    networks:
+      - testnet
+
+networks:
+  testnet:
+    driver: bridge
