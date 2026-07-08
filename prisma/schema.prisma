@@ -1,58 +1,104 @@
 generator client {
   provider = "prisma-client-js"
+binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
 datasource db {
-  provider  = "postgresql"
-  url       = env("DATABASE_URL")
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
 }
 
 // ========== Tenant (SaaS Client) ==========
 model Tenant {
-  id        String            @id @default(cuid())
-  email     String            @unique
-  storeUrl  String?
-apiKey         String   @unique
-  webhookSecret  String?  plan      String            @default("early_access")
-  isActive  Boolean           @default(true)
-  createdAt DateTime          @default(now())
-  updatedAt DateTime          @updatedAt
-  profiles  MerchantProfile[]
+  id            String   @id @default(cuid())
+  email         String   @unique
+  apiKey        String?  @unique // DEPRECATED (CWE-256) — plaintext, retained only for migration fallback. Never read for new auth checks; do not reintroduce reliance on this field.
+  apiKeyHash    String?  @unique // HMAC-SHA256(apiKey, API_KEY_HASH_SECRET) — source of truth for authentication (OWASP ASVS V6.2.1)
+storeUrl      String?
+  allowedDomains String[] @default([])
+  webhookSecret String?
+  plan          String   @default("early_access")
+
+  // ========== Subscription Fields ==========
+  subscriptionStatus          String    @default("free")
+  subscriptionEndDate         DateTime?
+  billingCycle                String?
+  lastPaymentDate             DateTime?
+  lastPaymentAmount           Float?
+  lastCaptureId               String?   @unique
+  isActive                    Boolean   @default(true)
+  monthlyBlockedCount         Int       @default(0)
+  quotaResetDate               DateTime?
+  emailVerified               Boolean   @default(false)
+  emailVerifyToken            String?   @unique
+  emailVerifyExpiresAt        DateTime?
+  keyRotatedAt                DateTime?
+  connectToken                String?   @unique
+  connectTokenExpiresAt       DateTime?
+  lastConnectVerifiedAt       DateTime?
+  previousApiKey               String?   @unique // DEPRECATED (CWE-256) — plaintext, retained only for migration fallback.
+  previousApiKeyHash           String?   @unique
+  previousApiKeyExpiresAt      DateTime?
+  lastAlertSentAt             DateTime?
+  lastPaypalAlertAt           DateTime?
+  lastRenewalReminderSentAt   DateTime?
+  lastGracePeriodNoticeSentAt DateTime?
+  countryOverrides            Json?     @default("{}")
+  countryOverridesUpdatedAt   DateTime?
+  webhookUrl                  String?
+  webhookType                 String?
+  webhookLastStatus           String?
+  webhookLastSentAt           DateTime?
+  webhookFailureCount         Int       @default(0)
+  createdAt                   DateTime  @default(now())
+  updatedAt                   DateTime  @updatedAt
+
+  profiles          MerchantProfile[]  @relation("TenantProfiles")
+  blockedAttempts   BlockedAttempt[]   @relation("TenantBlockedAttempts")
+  alertLogs         AlertLog[]         @relation("TenantAlerts")
+  binSequenceAlerts BinSequenceAlert[] @relation("TenantBinAlerts")
+  monthlyReports    MonthlyReport[]    @relation("TenantMonthlyReports")
+  checkoutSessions  CheckoutSession[]  @relation("TenantCheckoutSessions")
+  payments          Payment[]          @relation("TenantPayments")
+  stores            Store[]            @relation("TenantStores")
 }
 
 // ========== Merchant Profile ==========
 model MerchantProfile {
-  id                  String        @id @default(cuid())
-  merchantId          String        @unique
-  totalOrders         Int           @default(0)
-  totalAmount         Float         @default(0)
-  avgOrderValue       Float         @default(0)
-  totalDisputes       Int           @default(0)
-  wonDisputes         Int           @default(0)
-  lostDisputes        Int           @default(0)
-  merchantWeightRatio Float         @default(0.0)
-  tenantId            String?
-  tenant              Tenant?       @relation(fields: [tenantId], references: [id])
-  
-  trustScore          Float         @default(0.3)
-  reportCount         Int           @default(0)
+  id                  String @id @default(cuid())
+  merchantId          String @unique
+  totalOrders         Int    @default(0)
+  totalAmount         Float  @default(0)
+  avgOrderValue       Float  @default(0)
+  totalDisputes       Int    @default(0)
+  wonDisputes         Int    @default(0)
+  lostDisputes        Int    @default(0)
+  merchantWeightRatio Float  @default(0.0)
 
-  createdAt           DateTime      @default(now())
+  // ===== حقول جديدة للثقة (Merchant Trust) =====
+  trustScore  Float @default(0.3)
+  reportCount Int   @default(0)
+
+  tenantId String?
+  tenant   Tenant? @relation("TenantProfiles", fields: [tenantId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 }
 
 // ========== Signal Statistics ==========
 model SignalStat {
-  id            String   @id @default(cuid())
-  merchantId    String?  // null = global
-  signalType    String
-  signalValue   String
-  rawWins       Int      @default(0)
-  rawLosses     Int      @default(0)
-  totalEvents   Int      @default(0)
-  confidence    Float    @default(0.5)
-  lastDecayAt   DateTime?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id          String    @id @default(cuid())
+  merchantId  String? // null = global
+  signalType  String
+  signalValue String
+  rawWins     Int       @default(0)
+  rawLosses   Int       @default(0)
+  totalEvents Int       @default(0)
+  confidence  Float     @default(0.5)
+  lastDecayAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
 
   @@unique([merchantId, signalType, signalValue])
   @@index([merchantId])
@@ -60,11 +106,11 @@ model SignalStat {
 
 // ========== Order (جديد) ==========
 model Order {
-  id                 String   @id @default(cuid())
-  orderId            String   @unique  // معرف الطلب من WooCommerce
+  id                 String  @id @default(cuid())
+  orderId            String  @unique // معرف الطلب من WooCommerce
   merchantId         String
   amount             Float
-  currency           String   @default("USD")
+  currency           String  @default("USD")
   email              String?
   ipAddress          String?
   customerLoginId    String?
@@ -72,30 +118,38 @@ model Order {
   fingerprintVersion String?
   fingerprintStatus  String?
   riskScore          Int?
-  riskLevel          String?  // low, medium, high
-  decision           String?  // approve, review, block
-  connectedRisk      Int?     @default(0)
-  cardHash           String?  // optional reference to CardHash.cardHash
-  enrichmentIdempotencyKey String?
-  
-  // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
-  signalsSnapshot    String?
+  riskLevel          String? // low, medium, high
+  decision           String? // approve, review, block
+  connectedRisk      Int?    @default(0)
+  cardHash           String? // optional reference to CardHash.cardHash
 
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
+  signalsSnapshot String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   // علاقات (اختيارية لكن مفيدة)
-  riskEvaluations    RiskEvaluation[]
-  disputeOutcomes    DisputeOutcome[]
+  riskEvaluations RiskEvaluation[]
+  disputeOutcomes DisputeOutcome[]
+
+  // Composite indexes for the four hot-path query patterns run on every
+  // /evaluate, /woocommerce-webhook, and /enrich request (merchant-scoped
+  // recent-order lookups and device/IP/email velocity counts). Matches the
+  // style already established on BlockedAttempt.
+  @@index([merchantId, createdAt])
+  @@index([merchantId, deviceFingerprint, createdAt])
+  @@index([merchantId, ipAddress, createdAt])
+  @@index([merchantId, email, createdAt])
 }
 
 // ========== Risk Evaluation (Flight Recorder) ==========
 model RiskEvaluation {
-  id              String   @id @default(cuid())
-  orderId         String   @unique
+  id      String @id @default(cuid())
+  orderId String @unique
   // ربط بالـ Order (جديد)
-  order           Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
-  
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
   staticScore     Float
   learningScore   Float
   finalDecision   String
@@ -106,46 +160,47 @@ model RiskEvaluation {
   createdAt       DateTime @default(now())
 
   // Economic snapshot
-  fraudProb       Float?
-  expectedLoss    Float?
-  thresholdUsed   Float?
-  decisionBefore  String?
-  decisionAfter   String?
+  fraudProb      Float?
+  expectedLoss   Float?
+  thresholdUsed  Float?
+  decisionBefore String?
+  decisionAfter  String?
 }
 
 // ========== Dispute Outcome (for learning) ==========
 model DisputeOutcome {
-  id                String   @id @default(cuid())
-  disputeId         String   @unique
-  merchantId        String
-  orderId           String?
+  id         String  @id @default(cuid())
+  disputeId  String  @unique
+  merchantId String
+  orderId    String?
   // ربط بالـ Order (جديد)
-  order             Order?   @relation(fields: [orderId], references: [id], onDelete: SetNull)
-  
-  result            String   // "won" or "lost"
-  signalsPresent    String   @default("[]")
-  caseScore         Int?
-  resolvedAt        DateTime @default(now())
+  order      Order?  @relation(fields: [orderId], references: [id], onDelete: SetNull)
+
+  result         String // "won" or "lost"
+  signalsPresent String   @default("[]")
+  caseScore      Int?
+  resolvedAt     DateTime @default(now())
 }
+
 // ========== Pattern Sharing (Cross-Merchant Learning) ==========
 model FraudPattern {
-  id             String        @id @default(cuid())
-  patternHash    String        @unique
+  id             String   @id @default(cuid())
+  patternHash    String   @unique
   patternDesc    String?
-  signalCount    Int           @default(0)
-  weightedScore  Float         @default(0)
-  fraudCount     Int           @default(0)
-  legitCount     Int           @default(0)
-  totalCount     Int           @default(0)
-  signals        String?       // JSON array of signal types
-  merchantsSeen  Int           @default(0)
-  version        Int           @default(0)
+  signalCount    Int      @default(0)
+  weightedScore  Float    @default(0)
+  fraudCount     Int      @default(0)
+  legitCount     Int      @default(0)
+  totalCount     Int      @default(0)
+  signals        String? // JSON array of signal types
+  merchantsSeen  Int      @default(0)
+  version        Int      @default(0)
   learnedAtCount Int?
   clusterId      String?
-  firstSeen      DateTime      @default(now())
-  lastSeen       DateTime      @updatedAt
+  firstSeen      DateTime @default(now())
+  lastSeen       DateTime @updatedAt
 
-  cluster        FraudCluster? @relation(fields: [clusterId], references: [id])
+  cluster FraudCluster? @relation(fields: [clusterId], references: [id])
 
   @@index([patternHash])
   @@index([clusterId])
@@ -154,17 +209,17 @@ model FraudPattern {
 }
 
 model FraudCluster {
-  id                 String         @id @default(cuid())
-  clusterHash        String         @unique
+  id                 String   @id @default(cuid())
+  clusterHash        String   @unique
   clusterDesc        String?
-  totalCount         Int            @default(0)
-  fraudCount         Int            @default(0)
-  merchantsSeen      Int            @default(0)
-  weightedFraudScore Float          @default(0)
-  firstSeen          DateTime       @default(now())
-  lastSeen           DateTime       @updatedAt
+  totalCount         Int      @default(0)
+  fraudCount         Int      @default(0)
+  merchantsSeen      Int      @default(0)
+  weightedFraudScore Float    @default(0)
+  firstSeen          DateTime @default(now())
+  lastSeen           DateTime @updatedAt
 
-  patterns           FraudPattern[]
+  patterns FraudPattern[]
 
   @@index([clusterHash])
   @@index([fraudCount])
@@ -178,25 +233,26 @@ model PatternMerchant {
   @@id([patternHash, merchantId])
   @@index([patternHash])
 }
+
 // ========== Identity Graph ==========
 model IdentityNode {
-  id                   String   @id @default(cuid())
-  merchantId           String?
-  type                 String   // DEVICE, EMAIL, IP, ADDRESS, FINGERPRINT
-  hashedValue          String
-  maskedValue          String?
-  fingerprintConfig    String?
-  fingerprintHardware  String?
-  fraudEvents          Int      @default(0)
-  successOrders        Int      @default(0)
-  chargebacks          Int      @default(0)
-  totalTransactions    Int      @default(0)
-  merchantsSeen        Int      @default(0)
-  recentMerchants      Int      @default(0)
-  flaggedAtCount       Int?
-  lastHealedAt         DateTime?
-  firstSeen            DateTime @default(now())
-  lastSeen             DateTime @default(now())
+  id                  String    @id @default(cuid())
+  merchantId          String?
+  type                String // DEVICE, EMAIL, IP, ADDRESS, FINGERPRINT
+  hashedValue         String
+  maskedValue         String?
+  fingerprintConfig   String?
+  fingerprintHardware String?
+  fraudEvents         Int       @default(0)
+  successOrders       Int       @default(0)
+  chargebacks         Int       @default(0)
+  totalTransactions   Int       @default(0)
+  merchantsSeen       Int       @default(0)
+  recentMerchants     Int       @default(0)
+  flaggedAtCount      Int?
+  lastHealedAt        DateTime?
+  firstSeen           DateTime  @default(now())
+  lastSeen            DateTime  @default(now())
 
   // علاقات مع IdentityEdge
   fromEdges IdentityEdge[] @relation("fromEdges")
@@ -208,20 +264,20 @@ model IdentityNode {
 }
 
 model IdentityEdge {
-  id            String   @id @default(cuid())
-  fromId        String
-  toId          String
-  relation      String   // LINKED_TO, USED_WITH, SHIPPED_TO, LOGGED_FROM
-  seenCount     Int      @default(1)
-  uniqueOrders  Int      @default(1)
-  orderId       String?
-  firstSeenAt   DateTime @default(now())
-  lastSeenAt    DateTime @default(now())
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  id           String   @id @default(cuid())
+  fromId       String
+  toId         String
+  relation     String // LINKED_TO, USED_WITH, SHIPPED_TO, LOGGED_FROM
+  seenCount    Int      @default(1)
+  uniqueOrders Int      @default(1)
+  orderId      String?
+  firstSeenAt  DateTime @default(now())
+  lastSeenAt   DateTime @default(now())
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
 
   from IdentityNode @relation("fromEdges", fields: [fromId], references: [id], onDelete: Cascade)
-  to   IdentityNode @relation("toEdges",   fields: [toId],   references: [id], onDelete: Cascade)
+  to   IdentityNode @relation("toEdges", fields: [toId], references: [id], onDelete: Cascade)
 
   @@unique([fromId, toId, relation])
   @@index([fromId])
@@ -232,7 +288,7 @@ model IdentityEvent {
   id            String   @id @default(cuid())
   nodeId        String
   merchantId    String?
-  type          String   // FRAUD_CONFIRMED, CHARGEBACK, CLEAN_ORDER
+  type          String // FRAUD_CONFIRMED, CHARGEBACK, CLEAN_ORDER
   eventCategory String
   weight        Float
   createdAt     DateTime @default(now())
@@ -255,48 +311,58 @@ model ComputedIdentityRisk {
 
 // ========== BIN Local Cache ==========
 model BinRecord {
-  bin            String   @id
-  brand          String?
-  cardType       String?
-  issuerName     String?
-  issuerCountry  String?
-  isPrepaid      Boolean  @default(false)
-  isCommercial   Boolean  @default(false)
-  source         String
-  hitCount       Int      @default(1)
-  lastSeenAt     DateTime @default(now())
-  createdAt      DateTime @default(now())
+  bin           String   @id
+  brand         String?
+  cardType      String?
+  cardCategory  String?
+  issuerName    String?
+  issuerCountry String?
+  isPrepaid     Boolean  @default(false)
+  isCommercial  Boolean  @default(false)
+  source        String
+  hitCount      Int      @default(1)
+  lastSeenAt    DateTime @default(now())
+  createdAt     DateTime @default(now())
 }
 
 // ========== Card Testing Velocity ==========
 model CardTestAttempt {
-  id            String   @id @default(cuid())
-  merchantId    String
-  binPrefix     String?
-  ipHash        String?
-  emailHash     String?
-  deviceHash    String?
-  amount        Float
-  wasBlocked    Boolean  @default(true)
-  createdAt     DateTime @default(now())
+  id         String   @id @default(cuid())
+  merchantId String
+  binPrefix  String?
+  ipHash     String?
+  emailHash  String?
+  deviceHash String?
+  amount     Float
+  wasBlocked Boolean  @default(true)
+  createdAt  DateTime @default(now())
 
   @@index([merchantId, createdAt])
   @@index([deviceHash, createdAt])
   @@index([ipHash, createdAt])
 }
-// ========== Pending Enrichment Queue ==========
-model PendingEnrichment {
-  id               String   @id @default(cuid())
-  orderId          String
-  paymentIntentId  String?
-  enrichData       String   // JSON مع بيانات التخصيب
-  status           String   @default("pending") // pending, processed, failed
-  createdAt        DateTime @default(now())
-  processedAt      DateTime?
 
-  @@index([orderId])
-  @@index([paymentIntentId])
-  @@index([status])
+// ========== Blocked Attempt (Dashboard) ==========
+model BlockedAttempt {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation("TenantBlockedAttempts", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Agency multi-store attribution — null for Starter/Pro (no Store rows
+  // exist) and for any Agency attempt recorded before this field's rollout.
+  storeId     String?
+  store       Store?   @relation("StoreBlockedAttempts", fields: [storeId], references: [id], onDelete: SetNull)
+
+  blockedAt   DateTime @default(now())
+  cardBin     String?  // أول 6 أرقام فقط — لا نخزن رقم البطاقة كاملاً
+  cardType    String?  // Visa, Mastercard, Amex, Unknown
+  reason      String   // card_testing, velocity, blacklist, pattern
+  ipHash      String?  // SHA-256 للـ IP — لا نخزن IP الكامل (GDPR)
+  amountAttempted Float?
+  riskScore       Int?
+
+  @@index([tenantId, blockedAt])
+  @@index([storeId, blockedAt])
 }
 
 // ========== Card Hash Tracking ==========
@@ -317,17 +383,221 @@ model CardHash {
   @@index([lastSeenAt])
 }
 
+// ========== Pending Enrichment ==========
+model PendingEnrichment {
+  id              String    @id @default(cuid())
+  orderId         String
+  paymentIntentId String?
+  enrichData      String
+  status          String    @default("pending")
+  createdAt       DateTime  @default(now())
+  processedAt     DateTime?
+
+  @@index([orderId])
+  @@index([status])
+}
+
 // ========== Blacklist (per merchant) ==========
 model BlacklistEntry {
-  id          String   @id @default(cuid())
-  merchantId  String
-  type        String   // EMAIL, IP, DEVICE_FINGERPRINT
-  value       String   // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة)
-  reason      String?  // سبب الإضافة
-  expiresAt   DateTime? // تاريخ انتهاء الحظر (اختياري)
-  createdAt   DateTime @default(now())
-  createdBy   String?  // من أضافها (مثل admin@store.com)
+  id         String    @id @default(cuid())
+  merchantId String
+  type       String // EMAIL, IP, DEVICE_FINGERPRINT, BIN
+  value      String // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة)
+  reason     String? // سبب الإضافة
+  expiresAt  DateTime? // تاريخ انتهاء الحظر (اختياري)
+  createdAt  DateTime  @default(now())
+  createdBy  String? // من أضافها (مثل admin@store.com)
 
   @@unique([merchantId, type, value])
   @@index([merchantId, type, expiresAt])
+}
+
+// ========== Whitelist (per merchant) ==========
+model WhitelistEntry {
+  id         String    @id @default(cuid())
+  merchantId String
+  type       String    // EMAIL, IP, BIN
+  value      String
+  reason     String?
+  expiresAt  DateTime?
+  createdAt  DateTime  @default(now())
+  createdBy  String?
+
+  @@unique([merchantId, type, value])
+  @@index([merchantId, type, expiresAt])
+}
+
+// ========== Registration Rate Limiting ==========
+model RegistrationAttempt {
+  id        Int      @id @default(autoincrement())
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([ipHash, createdAt])
+}
+
+// ========== Connect (Key Recovery) Rate Limiting ==========
+model ConnectAttempt {
+  id        Int      @id @default(autoincrement())
+  ipHash    String
+  createdAt DateTime @default(now())
+
+  @@index([ipHash, createdAt])
+}
+
+// ========== BIN Sequence Alert ==========
+model BinSequenceAlert {
+  id            String    @id @default(cuid())
+  tenantId      String
+  tenant        Tenant    @relation("TenantBinAlerts", fields: [tenantId], references: [id], onDelete: Cascade)
+  binPrefix     String
+  layer         Int
+  reason        String
+  cardsCount    Int
+  entitiesCount Int
+  riskAddition  Int
+  status        String    @default("active")
+  notifiedAt    DateTime?
+  detectedAt    DateTime  @default(now())
+  resolvedAt    DateTime?
+
+  @@index([tenantId, status, detectedAt])
+  @@index([tenantId, detectedAt])
+}
+// ========== Monthly Security Report ==========
+model MonthlyReport {
+  id           String   @id @default(cuid())
+  tenantId     String
+  tenant       Tenant   @relation("TenantMonthlyReports", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  reportMonth  Int      // 1–12
+  reportYear   Int
+
+  // حالة التوليد
+  status       String   @default("generating") // generating | ready | failed
+
+  // الإحصائيات المُجمَّدة وقت الإنشاء — لا تتغير لاحقاً
+  totalAttacks       Int?
+  totalProtected     Float?   // sum(amountAttempted) — القيمة الفعلية المحمية
+  totalFeesSaved     Float?   // attacks × SAVINGS_PER_ATTACK
+  securityScore      Int?
+  topCountry         String?
+  topReason          String?
+  prevMonthAttacks   Int?    // للمقارنة الشهرية
+
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([tenantId, reportMonth, reportYear])
+  @@index([tenantId, reportYear, reportMonth])
+}
+
+
+// ========== Checkout Session (مؤقت — يُحذف بعد 30 دقيقة أو إتمام الدفع) ==========
+model CheckoutSession {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation("TenantCheckoutSessions", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  planId      String
+  // القيم: pro_monthly | pro_annual | agency_monthly | agency_annual
+
+  amount      Float
+  // المبلغ المتوقع بالدولار — هذا هو Source of Truth
+
+  billingCycle String
+  // monthly | annual
+
+  status      String   @default("pending")
+  // pending | completed | expired | failed
+
+  expiresAt   DateTime
+  // وقت انتهاء صلاحية الجلسة (عادةً 30 دقيقة من الإنشاء)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  // ربط بالدفعة بعد اكتمالها
+  payment     Payment?
+
+  @@index([tenantId, status])
+  @@index([expiresAt])
+  // لتسهيل حذف الجلسات المنتهية بـ Cron Job
+}
+
+// ========== Payment (سجل دائم لكل عملية دفع ناجحة) ==========
+model Payment {
+  id                String   @id @default(cuid())
+  tenantId          String
+  tenant            Tenant   @relation("TenantPayments", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  checkoutSessionId String   @unique
+  checkoutSession   CheckoutSession @relation(fields: [checkoutSessionId], references: [id])
+
+  captureId         String   @unique
+  // PayPal capture ID — المعرف الفريد للدفعة من PayPal
+
+  amount            Float
+  // المبلغ الفعلي الذي دفعه التاجر (من PayPal Webhook)
+
+  expectedAmount    Float
+  // المبلغ الذي كان متوقعاً (من CheckoutSession) — للمقارنة والتدقيق
+
+  planId            String
+  billingCycle      String
+  status            String   @default("completed")
+  // completed | refunded | disputed
+
+  paypalOrderId     String?
+  // PayPal Order ID (مختلف عن Capture ID)
+
+  paypalPayerId     String?
+  // معرف المشتري على PayPal
+
+  createdAt         DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([captureId])
+}
+// ========== Store (Agency multi-store) ==========
+model Store {
+  id               String    @id @default(cuid())
+  tenantId         String
+  tenant           Tenant    @relation("TenantStores", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  storeUrl         String    // as submitted by the merchant, unnormalized
+  normalizedDomain String    // output of normalizeDomain() — source of truth for auth matching
+  label            String?   // merchant-facing name, e.g. "Client A — woo.clienta.com"
+
+  // Soft-delete pattern (matches existing status-field conventions in this
+  // schema — BinSequenceAlert.status, CheckoutSession.status, Payment.status —
+  // rather than a hard DELETE, so historical BlockedAttempt/Order rows keep
+  // a valid FK and dashboard history isn't silently orphaned.
+  isActive         Boolean   @default(true)
+  deactivatedAt    DateTime?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastActivityAt   DateTime? // bumped on each /blocked-attempt or /evaluate hit — used for dashboard "last seen"
+
+  blockedAttempts  BlockedAttempt[] @relation("StoreBlockedAttempts")
+
+  // One domain per tenant, active or not — re-adding a previously removed
+  // domain reactivates this row (see §2) rather than creating a duplicate.
+  @@unique([tenantId, normalizedDomain])
+  @@index([tenantId, isActive])
+  @@index([normalizedDomain])
+}
+
+// ========== Attack Alert Log ==========
+model AlertLog {
+  id         String   @id @default(cuid())
+  tenantId   String
+  tenant     Tenant   @relation("TenantAlerts", fields: [tenantId], references: [id], onDelete: Cascade)
+  alertType  String   @default("attack_detected")
+  attackCount Int
+  savedAmount Float
+  sentAt     DateTime @default(now())
+
+  @@index([tenantId, sentAt])
 }
