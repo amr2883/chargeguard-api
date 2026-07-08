@@ -29,17 +29,22 @@ const THRESHOLDS = {
 };
 
 // --- In-Memory Store ---
-// key: binPrefix (أول 4 أرقام)
+// key: `${tenantId}:${binPrefix}` — tenant-scoped composite key (CWE-653 fix).
+// Previously keyed on bare binPrefix, which meant Tenant A's card-testing
+// attack could block Tenant B's legitimate customers using the same BIN
+// range, and getBINStats() leaked platform-wide attack telemetry into every
+// tenant's dashboard. See risk.js / dashboard.js call sites for the
+// tenantId threading that makes this composite key possible.
 // value: { bins: Map<bin, timestamp[]>, entities: Map<entity, timestamp>, blockedUntil? }
 const prefixStore = new Map();
 
 // تنظيف دوري كل 5 دقائق
 setInterval(() => {
   const now = Date.now();
-  for (const [prefix, data] of prefixStore.entries()) {
+  for (const [key, data] of prefixStore.entries()) {
     // لو محظور وخلص وقت الحظر → امسحه
     if (data.blockedUntil && data.blockedUntil < now) {
-      prefixStore.delete(prefix);
+      prefixStore.delete(key);
       continue;
     }
     // نظف الـ BINs القديمة من كل prefix
@@ -50,11 +55,10 @@ setInterval(() => {
     }
     // لو الـ prefix فاضي تماماً → امسحه
     if (data.bins.size === 0 && !data.blockedUntil) {
-      prefixStore.delete(prefix);
+      prefixStore.delete(key);
     }
   }
 }, 5 * 60 * 1000).unref();
-
 // --- Helper: استخراج الـ prefix ---
 function extractPrefix(bin) {
   if (!bin || typeof bin !== 'string') return null;
@@ -92,21 +96,24 @@ function detectSequentialScan(bins) {
 
 // --- تسجيل طلب جديد ---
 // entity = IP أو device fingerprint (أي identifier)
-function recordBINAttempt({ bin, entity }) {
+function recordBINAttempt({ tenantId, bin, entity }) {
   const prefix = extractPrefix(bin);
   if (!prefix) return;
 
+  // Composite key enforces tenant isolation at the storage layer — no call
+  // site can accidentally read/write another tenant's threat state.
+  const storeKey = `${tenantId}:${prefix}`;
   const now = Date.now();
 
-  if (!prefixStore.has(prefix)) {
-    prefixStore.set(prefix, {
+  if (!prefixStore.has(storeKey)) {
+    prefixStore.set(storeKey, {
       bins: new Map(),
       entities: new Map(),
       blockedUntil: null,
     });
   }
 
-  const data = prefixStore.get(prefix);
+  const data = prefixStore.get(storeKey);
 
   // سجل الـ BIN
   const existingTimestamps = data.bins.get(bin) || [];
@@ -117,14 +124,13 @@ function recordBINAttempt({ bin, entity }) {
   data.entities.set(entity, now);
 
   // تحقق من الـ thresholds وحدد حظر لو لزم
-  const { triggered } = checkPrefix(prefix, data, now);
+  const { triggered } = checkPrefix(tenantId, prefix, data, now);
   if (triggered) {
     data.blockedUntil = now + BLOCK_DURATION_MS;
   }
 }
-
 // --- فحص prefix معين ---
-function checkPrefix(prefix, data, now = Date.now()) {
+function checkPrefix(tenantId, prefix, data, now = Date.now()) {
   const windowStart = now - WINDOW_MS;
 
   // BINs نشطة في الـ window
@@ -175,12 +181,16 @@ function checkPrefix(prefix, data, now = Date.now()) {
 
 // --- الدالة الرئيسية: يستخدمها الـ risk scoring ---
 // بترجع { blocked, riskAddition, reason, layer }
-function checkBINSequence({ bin, ipAddress, deviceFingerprint }) {
+function checkBINSequence({ tenantId, bin, ipAddress, deviceFingerprint }) {
   const prefix = extractPrefix(bin);
   if (!prefix) return { blocked: false, riskAddition: 0, reason: null };
 
+  // Tenant-scoped lookup (CWE-653 fix): without this, a block triggered by
+  // one tenant's card-testing attack on BIN prefix 4111xx would silently
+  // block a completely unrelated tenant's legitimate 4111xx customers.
+  const storeKey = `${tenantId}:${prefix}`;
   const now = Date.now();
-  const data = prefixStore.get(prefix);
+  const data = prefixStore.get(storeKey);
 
   // لو محظور من قبل
   if (data?.blockedUntil && data.blockedUntil > now) {
@@ -194,13 +204,13 @@ function checkBINSequence({ bin, ipAddress, deviceFingerprint }) {
 
   // entity = IP أو device (أيهما متاح)
   const entity = ipAddress || deviceFingerprint || 'unknown';
-  recordBINAttempt({ bin, entity });
+  recordBINAttempt({ tenantId, bin, entity });
 
   // إعادة الفحص بعد التسجيل
-  const freshData = prefixStore.get(prefix);
+  const freshData = prefixStore.get(storeKey);
   if (!freshData) return { blocked: false, riskAddition: 0, reason: null };
 
-  const result = checkPrefix(prefix, freshData, now);
+  const result = checkPrefix(tenantId, prefix, freshData, now);
 
   return {
     blocked: result.triggered,
@@ -211,13 +221,20 @@ function checkBINSequence({ bin, ipAddress, deviceFingerprint }) {
 }
 
 // --- إحصائيات للـ dashboard ---
-function getBINStats() {
+function getBINStats(tenantId) {
   const now = Date.now();
   let activePrefixes = 0;
   let blockedPrefixes = 0;
   let totalActiveBINs = 0;
 
-  for (const [, data] of prefixStore.entries()) {
+  // Keys are `${tenantId}:${prefix}` — filter to only this tenant's entries
+  // so dashboard stats never leak another merchant's attack telemetry
+  // (CWE-653: Improper Isolation of Shared Resources / multi-tenancy fix).
+  const tenantKeyPrefix = `${tenantId}:`;
+
+  for (const [key, data] of prefixStore.entries()) {
+    if (!key.startsWith(tenantKeyPrefix)) continue;
+
     const windowStart = now - WINDOW_MS;
     const activeBins = [...data.bins.values()].filter(ts =>
       ts.some(t => t > windowStart)

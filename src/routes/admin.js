@@ -49,8 +49,13 @@ const rateLimitAdmin = (req, res, next) => {
 // ── التحقق من مفتاح الـ Admin ────────────────────────────────
 const authAdmin = (req, res, next) => {
   const ip        = req.ip || 'unknown';
-  const secret    = req.headers['x-admin-key'] || req.query.secret;
-  const expected  = process.env.ADMIN_SECRET;
+ // Admin secret is accepted ONLY via the x-admin-key header. Query strings
+  // are logged by browsers (history), servers/proxies/CDNs (access logs),
+  // and forwarded via Referer headers on outbound requests — CWE-598 (Use of
+  // GET Request Method With Sensitive Query Strings). Header-only auth
+  // matches the pattern used by every other authenticated route in this
+  // codebase (x-api-key).
+  const secret    = req.headers['x-admin-key'];  const expected  = process.env.ADMIN_SECRET;
 
   if (!expected) {
     console.error('[Admin] ADMIN_SECRET غير مضبوط في متغيرات البيئة');

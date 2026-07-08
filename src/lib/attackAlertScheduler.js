@@ -15,6 +15,7 @@
 
 const db                      = require('./db');
 const { notifyTenant } = require('./notify');
+const { isProOrAbove, PRO_PLUS_PLANS } = require('./planAccess');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const SCHEDULER_INTERVAL_MS = 2  * 60 * 1000;  // run every 2 minutes
@@ -37,9 +38,12 @@ async function runAttackAlertCheck(prisma) {
 
   let tenants;
   try {
-    tenants = await prisma.tenant.findMany({
-      where: { isActive: true },
-      select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true },
+     tenants = await prisma.tenant.findMany({
+      where: {
+        isActive: true,
+        plan: { in: PRO_PLUS_PLANS },
+      },
+      select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true, plan: true },
     });
   } catch (err) {
     console.error(`${label} ❌ Failed to fetch tenants:`, err.message);
@@ -56,6 +60,15 @@ async function runAttackAlertCheck(prisma) {
   // with a concurrency limiter.
   for (const tenant of tenants) {
     try {
+      // Defense-in-depth: re-verify plan eligibility even though the DB
+      // query above already filters by plan. Never rely on a single
+      // enforcement point for a revenue-critical gate — this protects
+      // against future query regressions (OWASP layered-defense principle).
+      if (!isProOrAbove(tenant.plan)) {
+        console.warn(`${label} ⚠️  Non-qualifying plan '${tenant.plan}' reached alert loop for ${tenant.email} — skipping (check query filter)`);
+        continue;
+      }
+
       // 1. Count attacks in the look-back window
       const attackCount = await prisma.blockedAttempt.count({
         where: {

@@ -1,7 +1,7 @@
 const nodemailer = require('nodemailer');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
-
+const { isProOrAbove } = require('./planAccess');
 const oauth2Client = new google.auth.OAuth2(
   process.env.GMAIL_OAUTH_CLIENT_ID,
   process.env.GMAIL_OAUTH_CLIENT_SECRET,
@@ -658,8 +658,12 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
     style: 'currency', currency: 'USD', minimumFractionDigits: 0,
   });
 
-  const isPro = tenant.plan !== 'early_access' && tenant.plan !== 'free';
-
+ // Centralized helper (planAccess.js) instead of a hand-rolled exclusion
+  // check — the old check (`!== 'early_access' && !== 'free'`) incorrectly
+  // evaluated 'starter' tenants as Pro, suppressing the upgrade CTA they
+  // should see. isProOrAbove() is the single source of truth for plan
+  // gating elsewhere in the codebase (dashboard.js, notify.js, risk.js).
+  const isPro = isProOrAbove(tenant.plan);
   // ── Week-over-month badge ──────────────────────────────────────────────
   let momBadge = '';
   if (monthOverMonthPct === null) {
