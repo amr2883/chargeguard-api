@@ -4,6 +4,7 @@ const express = require('express');
 const router = express.Router();
 const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
+const { checkBINSequence } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
 const { normalizeBin } = require('../lib/binIntelligence');
 const { buildGraphFromOrder } = require('../lib/identityGraph');
@@ -120,6 +121,19 @@ router.post('/evaluate', apiKeyAuth, async (req, res) => {
         reason: velocityCheck.reason,
         decision: 'block'
       });
+    }
+
+    // 1b. BIN Sequence Detection
+    if (bin) {
+      const binSeq = checkBINSequence({ bin, ipAddress, deviceFingerprint });
+      if (binSeq.blocked) {
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious card testing pattern',
+          reason: binSeq.reason,
+          decision: 'block',
+          flags: [{ severity: 'critical', text: binSeq.reason }]
+        });
+      }
     }
 
     // 1. بناء كائن order
@@ -1379,37 +1393,6 @@ router.post('/enrich', apiKeyAuth, async (req, res) => {
 const registrationAttempts = new Map(); // key: ip, value: { count, lastReset }
 
 router.post('/tenants/register', async (req, res) => {
-  // ── Turnstile verification — must pass before anything else ──────────
-  const turnstileToken = req.body.turnstileToken || '';
-
-  if (!turnstileToken) {
-    return res.status(400).json({ error: 'Security check token missing.' });
-  }
-
-  try {
-    const turnstileRes = await fetch(
-      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          secret:   process.env.TURNSTILE_SECRET_KEY,
-          response: turnstileToken,
-          remoteip: req.ip || req.connection.remoteAddress
-        })
-      }
-    );
-    const turnstileData = await turnstileRes.json();
-
-    if (!turnstileData.success) {
-      return res.status(403).json({ error: 'Security check failed. Please try again.' });
-    }
-  } catch (turnstileErr) {
-    console.error('Turnstile verification error:', turnstileErr);
-    return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
-  }
-  // ── End Turnstile verification ────────────────────────────────────────
-
   // Rate limiting: max 5 registrations per IP per hour
   const ip = req.ip || req.connection.remoteAddress;
   const now = Date.now();
