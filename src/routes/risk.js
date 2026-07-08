@@ -1,9 +1,13 @@
 ﻿const crypto = require('crypto');
 
 // ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
+const RISK_SECRET_SALT = process.env.SECRET_SALT;
+if (!RISK_SECRET_SALT) {
+  throw new Error('[risk] SECRET_SALT environment variable is required');
+}
+
 const hashIp = (ip) => {
-  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
-  return crypto.createHmac('sha256', salt).update(ip).digest('hex');
+  return crypto.createHmac('sha256', RISK_SECRET_SALT).update(ip).digest('hex');
 };
 // ?????????????????????????????????????????????????????????????????????????
 const logger = require('../lib/logger');
@@ -21,6 +25,7 @@ const prometheus = require('../lib/prometheus');
 
 const { domainAuthMiddleware, normalizeDomain } = require('../lib/domainAuth');
 const { notifyBINSequenceAlert }               = require('../lib/notify');
+const { isAgency, FREE_PLANS }                  = require('../lib/planAccess');
 
 // ── BIN Sequence Alert Persistence ───────────────────────────────────────
 const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
@@ -60,7 +65,7 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
       // إشعار التاجر — fire-and-forget مع cooldown
       const tenant = await db.tenant.findUnique({
         where:  { id: tenantId },
-        select: { id: true, email: true, webhookUrl: true, webhookType: true },
+        select: { id: true, email: true, webhookUrl: true, webhookType: true, plan: true },
       });
       if (tenant) {
         notifyBINSequenceAlert(tenant, newAlert)
@@ -72,38 +77,30 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
   }
 };
 
-const apiKeyAuth = async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) {
-    return res.status(401).json({ error: 'API key is required' });
-  }
+const { requireAuth } = require('../middleware/authenticate');
+const verifyHmacSignature = require('../middleware/verifyHmac');
 
-  const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
-    id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true, countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true
-  });
+const apiKeyAuth = requireAuth({
+  id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true,
+  countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true,
+  monthlyBlockedCount: true, quotaResetDate: true,
+});
 
-  if (!tenant || !tenant.isActive) {
-    return res.status(401).json({ error: 'Invalid or inactive API key' });
-  }
+// Shared auth middleware for the WooCommerce webhook, reusing the same
+// centralized requireAuth() the rest of the file uses, instead of a manual
+// resolveTenantByApiKey/isActive/emailVerified copy (CWE-1059 drift fix).
+const webhookAuth = requireAuth({ id: true, isActive: true, emailVerified: true });
 
-  if (usedPreviousKey) {
-    res.set('X-ChargeGuard-Key-Deprecated', 'true');
-    logger.warn({ module: 'risk', tenantId: tenant.id }, 'Request authenticated using previous (grace-period) API key — plugin should be updated');
-  }
-
-  if (!tenant.emailVerified) {
-    // Allow in development mode
-    if (process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-      return res.status(403).json({
-        error: 'Email not verified. Please check your inbox and click the confirmation link.',
-        code: 'EMAIL_NOT_VERIFIED'
-      });
-    }
-  }
-
-  req.tenant = { id: tenant.id, email: tenant.email, webhookSecret: tenant.webhookSecret, countryOverrides: tenant.countryOverrides || {}, plan: tenant.plan, subscriptionStatus: tenant.subscriptionStatus, subscriptionEndDate: tenant.subscriptionEndDate };
-  next();
-};
+// Invokes an Express-style middleware inline and resolves true/false
+// depending on whether next() was called or the middleware sent its own
+// response (e.g. requireAuth's 401/403). Needed because the webhook route
+// can't take requireAuth as a normal router-level middleware — it must run
+// after the raw-body buffer is already on req.body.
+const runAuthMiddleware = (req, res, mw) => new Promise((resolve) => {
+  let settled = false;
+  res.once('finish', () => { if (!settled) { settled = true; resolve(false); } });
+  mw(req, res, () => { if (!settled) { settled = true; resolve(true); } });
+});
 /**
  * @swagger
  * /risk/evaluate:
@@ -135,62 +132,80 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     // هذا الفحص هو نقطة التحكم الوحيدة الفعّالة — الـ plugin لا يفحص الاشتراك
     // لذلك نرفض هنا على مستوى الخادم قبل أي معالجة
 
-    const tenantPlan   = req.tenant.plan;
-    const subStatus    = req.tenant.subscriptionStatus;
-    const subEndDate   = req.tenant.subscriptionEndDate;
+       const tenantPlan   = req.tenant.plan;
+        // ب. Starter/early_access أو Pro — فحص الـ monthly quota (500 أو 5,000 هجوم/شهر)
+       // Agency stays exempt: excluded both by omission from PLAN_QUOTA_LIMITS
+       // and by the explicit isAgency() guard below (defense-in-depth — same
+       // pattern as the Pro-feature gates in dashboard.js/notify.js).
 
-    // أ. لو الاشتراك منتهي — نرفض فوراً
-    if (subStatus === 'expired') {
-      logger.warn(
-        { module: 'risk', tenantId: req.tenant.id, plan: tenantPlan },
-        'Evaluate blocked — subscription expired'
-      );
-      return res.status(403).json({
-        decision:    'block',
-        score:       100,
-        flags:       [{ severity: 'critical', text: 'Subscription expired — please renew your ChargeGuard plan.' }],
-        connectedRisk: 0,
-        blocked_reason: 'subscription_expired',
-      });
-    }
-
-    // ب. Starter أو early_access — فحص الـ monthly quota (500 هجوم/شهر)
-    const isLimitedPlan = tenantPlan === 'starter' || tenantPlan === 'early_access';
+  // Free-tier entries are derived from the centralized FREE_PLANS list
+  // (planAccess.js) rather than hardcoded here, so a new free-tier plan
+  // added there automatically inherits the 500-attack quota instead of
+  // silently getting unlimited access via this map (the same drift risk
+  // that caused the dashboard.js isPro bug that forgot 'starter').
+  const PLAN_QUOTA_LIMITS = {
+    ...Object.fromEntries(FREE_PLANS.map(plan => [plan, 500])),
+    pro: 5000,
+  };
+  const monthlyLimitForPlan = PLAN_QUOTA_LIMITS[tenantPlan];
+  const isLimitedPlan = !isAgency(tenantPlan) && monthlyLimitForPlan !== undefined;
     if (isLimitedPlan) {
-      const MONTHLY_LIMIT = 500;
-      const startOfMonth  = new Date();
-      startOfMonth.setUTCDate(1);
-      startOfMonth.setUTCHours(0, 0, 0, 0);
+      const MONTHLY_LIMIT = monthlyLimitForPlan;
+      const now = new Date();
+      const startOfNextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
 
-      const monthlyCount = await db.blockedAttempt.count({
-        where: {
-          tenantId:  req.tenant.id,
-          blockedAt: { gte: startOfMonth },
-        },
-      });
+      let monthlyCount = req.tenant.monthlyBlockedCount;
+      const needsReset = !req.tenant.quotaResetDate || new Date(req.tenant.quotaResetDate) <= now;
+
+      if (needsReset) {
+        // Conditional reset: only commits if quotaResetDate is still stale at
+        // write time. Guards against two concurrent requests both observing a
+        // stale req.tenant snapshot and both attempting the reset.
+        const resetResult = await db.tenant.updateMany({
+          where: {
+            id: req.tenant.id,
+            OR: [{ quotaResetDate: null }, { quotaResetDate: { lte: now } }],
+          },
+          data: { monthlyBlockedCount: 0, quotaResetDate: startOfNextMonth },
+        });
+
+        if (resetResult.count > 0) {
+          monthlyCount = 0;
+        } else {
+          // Lost the race — another request already reset it. Re-read the
+          // authoritative value instead of assuming 0.
+          const refreshed = await db.tenant.findUnique({
+            where:  { id: req.tenant.id },
+            select: { monthlyBlockedCount: true },
+          });
+          monthlyCount = refreshed?.monthlyBlockedCount ?? 0;
+        }
+      }
 
       if (monthlyCount >= MONTHLY_LIMIT) {
         logger.warn(
-          { module: 'risk', tenantId: req.tenant.id, plan: tenantPlan, monthlyCount },
+          { module: 'risk', tenantId: req.tenant.id, plan: tenantPlan, monthlyCount, monthlyLimit: MONTHLY_LIMIT },
           'Evaluate blocked — monthly quota exceeded'
         );
+        const upgradeMessage = tenantPlan === 'pro'
+          ? 'Monthly Pro protection limit (5,000) reached — upgrade to Agency for unlimited coverage.'
+          : 'Monthly protection limit reached — upgrade to Pro for unlimited coverage.';
         return res.status(403).json({
           decision:    'block',
           score:       100,
-          flags:       [{ severity: 'critical', text: 'Monthly protection limit reached — upgrade to Pro for unlimited coverage.' }],
+          flags:       [{ severity: 'critical', text: upgradeMessage }],
           connectedRisk: 0,
-          blocked_reason: 'quota_exceeded',
+          blocked_reason: tenantPlan === 'pro' ? 'pro_quota_exceeded' : 'quota_exceeded',
         });
       }
-    }
-    // ── End Subscription & Quota Gate ────────────────────────────────────
+    }    // ── End Subscription & Quota Gate ────────────────────────────────────
 
     // ������� ��������
-    const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, merchantId: bodyMerchantId } = req.body;
-    const merchantId = bodyMerchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
+    const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer } = req.body;
+    // merchantId is derived from the authenticated tenant (CWE-639 / OWASP API1:2023 fix).
+    // It is never read from the request body or x-merchant-id header.
+    const merchantId = req.tenant.id;
+
 
         // Idempotency: ������ �� ������� ������� ���� ��� 5 �����
     const idempotencyWindow = 5 * 60 * 1000; // 5 �����
@@ -288,8 +303,10 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 
     // 1b. BIN Sequence Detection
     if (bin) {
-      const binSeq = checkBINSequence({ bin, ipAddress, deviceFingerprint });
-
+      // tenantId is required here for tenant-scoped storage in
+      // binSequenceDetector.js — without it, attacks against one tenant
+      // could false-block a different tenant's legitimate customers (CWE-653).
+      const binSeq = checkBINSequence({ tenantId: req.tenant.id, bin, ipAddress, deviceFingerprint });
       if (binSeq.blocked || binSeq.riskAddition > 0) {
         persistBinSequenceAlert(req.tenant.id, bin, binSeq)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
@@ -429,11 +446,75 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       connectedRisk: 0,
     };
 
-     // ������� connectedRisk ������ �� ����� Identity Graph
+    // ������� connectedRisk ������ �� ����� Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
    // تسجيل المحاولة الفاشلة عند block
     if (response.decision === 'block') {
       recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, amount: amount || 0 });
+
+      // ── Quota Counter: coupled to the enforcement decision ─────────────
+      // BlockedAttempt logging + monthlyBlockedCount increment happen here,
+      // atomically, because this is the authoritative point where the block
+      // decision is made — not in the separate, best-effort /blocked-attempt
+      // call from the plugin, which can under-count under load (its own
+      // 60/min rate limiter) or drop silently on network failure. The
+      // counter must never depend on a less-trusted client's follow-up call
+      // for a control that gates paid-tier revenue.
+      let evalCardBin = null;
+      if (bin != null) {
+        const b = String(bin).replace(/\D/g, '').slice(0, 6);
+        if (b.length === 6) evalCardBin = b;
+      }
+
+      let evalCardType = null;
+      if (req.body.cardType != null) {
+        const ct = String(req.body.cardType).toLowerCase().trim();
+        evalCardType = VALID_CARD_TYPES.has(ct) ? ct : 'unknown';
+      }
+
+      const evalIpHash = ipAddress ? hashIp(ipAddress) : null;
+
+      let evalAmount = null;
+      if (amount != null) {
+        const amt = parseFloat(amount);
+        if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) evalAmount = amt;
+      }
+
+      let evalRiskScore = null;
+      if (riskResult.score != null) {
+        const rs = parseInt(riskResult.score, 10);
+        if (!isNaN(rs) && rs >= 0 && rs <= 100) evalRiskScore = rs;
+      }
+
+      try {
+        await db.$transaction([
+          db.blockedAttempt.create({
+            data: {
+              tenantId:        req.tenant.id,
+              storeId:         req.storeId ?? null,
+              cardBin:         evalCardBin,
+              cardType:        evalCardType,
+              reason:          'pattern',
+              ipHash:          evalIpHash,
+              amountAttempted: evalAmount,
+              riskScore:       evalRiskScore,
+            },
+          }),
+          db.tenant.update({
+            where: { id: req.tenant.id },
+            data:  { monthlyBlockedCount: { increment: 1 } },
+          }),
+        ]);
+      } catch (counterErr) {
+        // Logged, not fatal: a failed counter write shouldn't turn an
+        // already-computed, correct block decision into a 500 for the
+        // merchant. This is the one residual drift window in this design —
+        // see write-up for the tradeoff.
+        logger.error(
+          { module: 'risk', endpoint: 'evaluate', tenantId: req.tenant.id, error: counterErr.message },
+          'Failed to record BlockedAttempt / increment quota counter from /evaluate'
+        );
+      }
     }
 
     // 6. ��� ����� �� ����� ��������
@@ -516,6 +597,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
             topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
             positiveSignals: JSON.stringify(riskResult.positives || []),
             scoringVersion: riskResult.scoringVersion || 'v1.0',
+            fraudProb: riskResult.economicData?.fraudProb ?? null,
+            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
           },
           update: {
             staticScore: riskResult.score,
@@ -523,6 +609,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
             finalDecision: response.decision === 'approve' ? 'low' : (response.decision === 'review' ? 'medium' : 'high'),
             topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
             positiveSignals: JSON.stringify(riskResult.positives || []),
+            fraudProb: riskResult.economicData?.fraudProb ?? null,
+            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
           },
         });
       }
@@ -584,11 +675,9 @@ router.post('/mark-fraud', apiKeyAuth, verifyHmacSignature, async (req, res) => 
       fingerprintVersion: 'v3',
     };
 
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
+     const merchantId = req.tenant.id;
     await markOrderAsFraud(mockOrder, merchantId);
+
     
     res.json({ success: true, message: `Device ${deviceFingerprint} marked as fraud` });
   } catch (error) {
@@ -622,7 +711,7 @@ const { processFeedback } = require('../lib/feedbackLoop');
  *       500:
  *         description: Internal error
  */
-router.post('/feedback', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { orderId, isFraud } = req.body;
 
@@ -692,12 +781,8 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
       fingerprintVersion: 'v3',
     };
 
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
-    await buildGraphFromOrder(mockOrder, merchantId);
-    
+   const merchantId = req.tenant.id;
+    await buildGraphFromOrder(mockOrder, merchantId);    
     res.json({ success: true, message: 'Graph built' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'test-graph', error: error.message }, error.message);
@@ -731,11 +816,12 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
  *       400:
  *         description: Invalid input
  */
-router.post('/blacklist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
-    const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
-    if (!merchantId || !type || !value) {
-      return res.status(400).json({ error: 'merchantId, type, and value are required' });
+    const { type, value, reason, expiresAt, createdBy } = req.body;
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
+    if (!type || !value) {
+      return res.status(400).json({ error: 'type and value are required' });
     }
     // ������ �� ��� �����
     const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
@@ -787,13 +873,10 @@ router.post('/blacklist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
  *       404:
  *         description: Entry not found
  */
-router.delete('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { id } = req.params;
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     // ������ �� �� ������ ����� ��� ��� ������
     const existing = await db.blacklistEntry.findFirst({
@@ -803,8 +886,7 @@ router.delete('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res
       return res.status(404).json({ error: 'Blacklist entry not found or not owned by this merchant' });
     }
 
-    await db.blacklistEntry.delete({ where: { id } });
-    prometheus.recordAccessControlAction('delete', 'blacklist');
+    await db.blacklistEntry.delete({ where: { id } });    prometheus.recordAccessControlAction('delete', 'blacklist');
     res.json({ success: true, message: 'Blacklist entry deleted' });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
@@ -840,12 +922,9 @@ router.delete('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res
  *                 success: { type: boolean }
  *                 entries: { type: array, items: { $ref: '#/components/schemas/BlacklistEntry' } }
  */
-router.get('/blacklist', apiKeyAuth, async (req, res) => {
+router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
-    const merchantId = req.query.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required (as query param or header)' });
-    }
+   const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     const { type, includeExpired } = req.query;
     const where = { merchantId };
@@ -907,13 +986,10 @@ router.get('/blacklist', apiKeyAuth, async (req, res) => {
  *       404:
  *         description: Entry not found or not owned by this merchant
  */
-router.put('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.put('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
-    const { id } = req.params;
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
+     const { id } = req.params;
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     // ������ �� ����� ������
     const existing = await db.blacklistEntry.findFirst({
@@ -944,11 +1020,12 @@ router.put('/blacklist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) =
 
 // ========== Whitelist Management Endpoints ==========
 
-router.post('/whitelist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.post('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
-    const { merchantId, type, value, reason, expiresAt, createdBy } = req.body;
-    if (!merchantId || !type || !value) {
-      return res.status(400).json({ error: 'merchantId, type, and value are required' });
+    const { type, value, reason, expiresAt, createdBy } = req.body;
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
+    if (!type || !value) {
+      return res.status(400).json({ error: 'type and value are required' });
     }
     const validTypes = ['EMAIL', 'IP', 'BIN'];
     if (!validTypes.includes(type)) {
@@ -984,12 +1061,9 @@ router.post('/whitelist', apiKeyAuth, verifyHmacSignature, async (req, res) => {
   }
 });
 
-router.get('/whitelist', apiKeyAuth, async (req, res) => {
+router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
   try {
-    const merchantId = req.query.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required (as query param or header)' });
-    }
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     const { type, includeExpired } = req.query;
     const where = { merchantId };
@@ -1016,18 +1090,14 @@ router.get('/whitelist', apiKeyAuth, async (req, res) => {
 
     res.json({ success: true, entries: whitelistEntries });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'whitelist-get', error: error.message }, 'Error fetching whitelist');
-    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'whitelist-get', error: error.message }, 'Error fetching whitelist');    res.status(500).json({ error: error.message });
   }
 });
 
-router.delete('/whitelist/:id', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.delete('/whitelist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { id } = req.params;
-    const merchantId = req.body.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'merchantId is required' });
-    }
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     const existing = await db.whitelistEntry.findFirst({
       where: { id, merchantId },
@@ -1064,12 +1134,19 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Invalid JSON payload' });
     }
 
-    // 3. ������� merchantId (����� ������ parsedBody)
-    let merchantId = parsedBody.merchantId || req.headers['x-merchant-id'];
-    if (!merchantId) {
-      merchantId = 'test_merchant_001'; // default for testing
-      logger.warn({ module: 'risk', endpoint: 'woocommerce-webhook' }, 'Merchant ID missing, using default');
-    }
+      // merchantId is derived from the authenticated tenant via x-api-key, never from the
+    // webhook payload (CWE-639 / OWASP API1:2023). The WooCommerce plugin is configured
+    // with the tenant's API key and must send it on every webhook delivery.
+    //
+    // Tenant resolution now goes through the same centralized requireAuth()
+    // middleware used by every other route in this file, instead of a manual
+    // resolveTenantByApiKey/isActive/emailVerified copy (CWE-1059 drift fix —
+    // see runAuthMiddleware/webhookAuth definitions above). This also gives
+    // the webhook endpoint the same standardized 401/403 response shape and
+    // uniform 200ms auth-failure timing delay as every other endpoint.
+    const authOk = await runAuthMiddleware(req, res, webhookAuth);
+    if (!authOk) return; // webhookAuth already sent the response (401/403/500)
+    const merchantId = req.tenant.id;
 
     // 4. Verify WooCommerce signature (if secret is configured)
     const wcSecret = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
@@ -1174,17 +1251,24 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // 7b. BIN Sequence Detection
+     // 7b. BIN Sequence Detection
     if (extracted.bin) {
+      // tenantId is required here for tenant-scoped storage in
+      // binSequenceDetector.js (CWE-653 fix) — merchantId is already
+      // resolved above from the authenticated tenant (req.tenant.id).
       const binSeq = checkBINSequence({
+        tenantId: merchantId,
         bin: extracted.bin,
         ipAddress: extracted.ipAddress,
         deviceFingerprint: riskRequest.deviceFingerprint
       });
-
-      // TODO: تمرير tenantId هنا عند ربط webhook بالـ Tenant
+      // tenantId resolved from the authenticated tenant (merchantId, derived
+      // from req.tenant.id via the webhook's requireAuth resolution above) —
+      // previously hardcoded to null, which meant BinSequenceAlert rows from
+      // this path had no tenant association and were invisible to the
+      // dashboard and to notifyBINSequenceAlert's tenant lookup.
       if (binSeq.blocked || binSeq.riskAddition > 0) {
-        persistBinSequenceAlert(null, extracted.bin, binSeq)
+        persistBinSequenceAlert(merchantId, extracted.bin, binSeq)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
       }
 
@@ -1361,6 +1445,11 @@ router.post('/woocommerce-webhook', async (req, res) => {
             topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
             positiveSignals: JSON.stringify(riskResult.positives || []),
             scoringVersion: riskResult.scoringVersion || 'v1.0',
+            fraudProb: riskResult.economicData?.fraudProb ?? null,
+            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
           },
           update: {
             staticScore: riskResult.score,
@@ -1368,6 +1457,11 @@ router.post('/woocommerce-webhook', async (req, res) => {
             finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
             topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
             positiveSignals: JSON.stringify(riskResult.positives || []),
+            fraudProb: riskResult.economicData?.fraudProb ?? null,
+            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
           },
         });
       }
@@ -1396,13 +1490,9 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
       return res.status(400).json({ error: 'fingerprint is required' });
     }
 
-    const merchantId = req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'x-merchant-id header is required' });
-    }
+  const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // 1. ����� �� ���� ������ �� Identity Graph
-    const { getConnectedRisk } = require('../lib/identityGraph');
+    // 1. ����� �� ���� ������ �� Identity Graph    const { getConnectedRisk } = require('../lib/identityGraph');
     const mockOrder = {
       deviceFingerprint: fingerprint,
       fingerprintVersion: 'v3',
@@ -1476,12 +1566,9 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
       return res.status(400).json({ error: 'bin or last4 is required' });
     }
 
-    const merchantId = req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'x-merchant-id header is required' });
-    }
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // ??? CardHash generation (if last4+expiry+brand provided) ???
+    // ??? CardHash generation (if last4+expiry+brand provided) ???rovided) ???
     let cardHashRecord = null;
     if (last4 && expMonth && expYear && brand && merchantId) {
 
@@ -1664,6 +1751,11 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
         topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
         positiveSignals: JSON.stringify(riskResult.positives || []),
         scoringVersion: riskResult.scoringVersion || 'v1.0',
+        fraudProb: riskResult.economicData?.fraudProb ?? null,
+        expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+        thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+        decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+        decisionAfter: riskResult.economicData?.decisionAfter ?? null,
       },
       update: {
         staticScore: riskResult.score,
@@ -1671,6 +1763,11 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
         finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
         topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
         positiveSignals: JSON.stringify(riskResult.positives || []),
+        fraudProb: riskResult.economicData?.fraudProb ?? null,
+        expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+        thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+        decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+        decisionAfter: riskResult.economicData?.decisionAfter ?? null,
       },
     });
 
@@ -1688,9 +1785,9 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     if (enrichSource === 'paypal' && riskResult.score >= 70) {
       const { notifyPaypalAlert } = require('../lib/notify');
 
-      db.tenant.findUnique({
+       db.tenant.findUnique({
         where:  { id: req.tenant.id },
-        select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true },
+        select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true, plan: true },
       }).then(tenantFull => {
         if (!tenantFull) return;
 
@@ -1836,7 +1933,26 @@ router.post('/tenants/register', async (req, res) => {
         console.error('Turnstile verification error:', turnstileErr);
         return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
       }
-      // ?? End Turnstile ?????????????????????????????????????????????????????
+// ?? End Turnstile ?????????????????????????????????????????????????????
+
+  // ?? Honeypot check ????????????????????????????????????????????????????
+  // A hidden field (name="website") that only bots reliably fill in. Real
+  // users never see or complete it (CSS-hidden in index.html). Any
+  // non-empty value here is treated as a bot signal — respond with a
+  // generic success-shaped message (not an error) to avoid teaching a bot
+  // it tripped a filter, and skip tenant creation entirely.
+  const honeypotValue = req.body.website || '';
+  if (honeypotValue.trim() !== '') {
+    logger.warn({ module: 'risk', endpoint: 'register' }, 'Honeypot field filled — likely bot submission, rejecting silently');
+    return res.status(200).json({
+      email: req.body.email || null,
+      plan: 'early_access',
+      verified: false,
+      requiresVerification: true,
+      message: 'Almost there! We sent a confirmation link to your email. Click it to activate your account and receive your API key.'
+    });
+  }
+  // ?? End honeypot check ???????????????????????????????????????????????      
 
 
   try {
@@ -1877,11 +1993,19 @@ router.post('/tenants/register', async (req, res) => {
     // In development mode, skip email verification
     const skipVerification = process.env.EMAIL_VERIFICATION_DISABLED === 'true';
 
+    // Webhook signing secret — required by verifyHmacSignature on every mutating
+    // route. Must be generated here at tenant-creation time (not deferred to a
+    // later recovery flow), otherwise req.tenant.webhookSecret stays null forever
+    // and /evaluate, /enrich, /blacklist, /whitelist, /blocked-attempt all 401.
+    // Same pattern as /connect/confirm in src/routes/auth.js.
+    const webhookSecret = crypto.randomBytes(32).toString('hex');
+
    const tenant = await db.tenant.create({
       data: {
         email,
         storeUrl: storeUrl || null,
         allowedDomains, // Domain-binding allowlist (CWE-636 fix) — enforced by domainAuthMiddleware
+        webhookSecret, // HMAC request-signing secret — provisioned at tenant creation, not deferred
         apiKeyHash, // Source of truth for authentication (OWASP ASVS V6.2.1)
         // Production path only: apiKey plaintext is held transiently so the post-verification
         // welcome email (sent from /verify-email, only after inbox ownership is proven) can
@@ -1939,12 +2063,9 @@ router.post('/tenants/register', async (req, res) => {
   }
 });
 // ========== Auto-Cleanup Blocked Orders ==========
-router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
+router.post('/cleanup-blocked', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
-    const merchantId = req.headers['x-merchant-id'];
-    if (!merchantId) {
-      return res.status(400).json({ error: 'x-merchant-id header is required' });
-    }
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
     // ����� �� ������� �������� (decision = 'block')
     const blockedOrders = await db.order.findMany({
@@ -2007,6 +2128,42 @@ router.post('/cleanup-blocked', apiKeyAuth, async (req, res) => {
  *       500:
  *         description: Internal server error
  */
+// SANCTIONED EXCEPTION to the centralized requireAuth() pattern (CWE-1059
+// drift-prevention documentation — same rationale as the /connect/confirm
+// no-grace-period note in routes/auth.js). Do NOT "fix" this to use
+// requireAuth() without re-reading this comment in full.
+//
+// This is a lightweight HEALTH-CHECK endpoint: the WooCommerce plugin calls
+// it to ask "is my API key still valid?" before doing anything else,
+// including before it has fetched webhookSecret. Three deliberate
+// deviations from the standard pattern follow from that:
+//
+//   a) No requireAuth() AUTH_FAIL_DELAY_MS (200ms) on failure. That delay
+//      exists to blunt key-enumeration timing attacks against mutating,
+//      capability-granting endpoints (CWE-208). A pure validity probe is a
+//      much lower-value timing oracle — knowing a key is "valid" grants no
+//      capability an attacker couldn't get more directly by trying the key
+//      against a real endpoint — and this route is polled frequently, so
+//      artificial latency here has a real operational cost with no
+//      proportionate security benefit (cf. Kubernetes liveness/readiness
+//      probes, which are intentionally excluded from the full
+//      auth/authz chain the live application enforces, for the same
+//      cost/benefit reason).
+//   b) No domainAuthMiddleware. The plugin calls this from the merchant's
+//      own server process, not a browser subject to origin enforcement —
+//      there is no "origin" to bind in the way there is for browser-facing
+//      mutating calls.
+//   c) No verifyHmacSignature. The plugin may not have fetched
+//      webhookSecret yet — requiring an HMAC signature here would be
+//      circular (the secret needed to sign isn't available until after a
+//      successful authenticated call).
+//
+// What is NOT relaxed: this handler still manually enforces tenant.isActive
+// and tenant.emailVerified (mirroring requireAuth's policy exactly), and
+// returns no sensitive data — only plan/subscription metadata, never a
+// secret. If those manual checks and requireAuth's checks ever diverge,
+// that is the one thing to fix; the missing delay/domain/HMAC layers above
+// are by design and should stay missing.
 router.get('/verify-key', async (req, res) => {
   try {
     // 1. ������ �� ���� ��� header
@@ -2113,9 +2270,7 @@ const blockedAttemptRateLimit = (req, res, next) => {
 const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern']);
 const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
 
-const verifyHmacSignature = require('../middleware/verifyHmac');
-
-router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
+router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { cardBin, cardType, reason, ipHash, amountAttempted } = req.body;
 
@@ -2160,9 +2315,22 @@ router.post('/blocked-attempt', blockedAttemptRateLimit, apiKeyAuth, verifyHmacS
       if (!isNaN(rs) && rs >= 0 && rs <= 100) safeRiskScore = rs;
     }
 
+    // monthlyBlockedCount is NO LONGER incremented here. The quota counter
+    // is now driven solely by the /evaluate block-decision path (see the
+    // $transaction there), which is the authoritative enforcement point.
+    // Incrementing it here too would double-count every attack that goes
+    // through /evaluate → block → plugin calls /blocked-attempt. This
+    // endpoint still creates BlockedAttempt rows for dashboard/reporting —
+    // e.g. plugin-local firewall blocks that never reach /evaluate — just
+    // without touching the counter.
     await db.blockedAttempt.create({
       data: {
         tenantId:        req.tenant.id,
+        // Agency multi-store attribution — req.storeId is set by
+        // domainAuthMiddleware only for store-managed tenants; null for
+        // Starter/Pro (no Store rows exist for them), which is the correct
+        // "no store to attribute to" value, not an error.
+        storeId:         req.storeId ?? null,
         cardBin:         safeBin,
         cardType:        safeCardType,
         reason:          reason,

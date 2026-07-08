@@ -7,47 +7,16 @@ function verifyHmacSignature(req, res, next) {
   const signature  = req.headers['x-chargeguard-signature'];
   const timestamp  = req.headers['x-chargeguard-timestamp'];
 
-// Legacy mode — env-gated migration bypass (OWASP API8:2023 mitigation:
-// this control must be explicit, time-bounded by operator decision, and
-// loudly observable, not silently permanent). Set HMAC_LEGACY_BYPASS_ENABLED
-// to 'false' once plugin telemetry confirms HMAC adoption, then remove
-// this block entirely in a follow-up patch.
-if (!signature && !timestamp) {
-    if (process.env.HMAC_LEGACY_BYPASS_ENABLED !== 'true') {
-        logger.warn(
-          { tenantId: req.tenant?.id, path: req.path },
-          'HMAC_LEGACY_REQUEST_REJECTED — no signature headers and legacy bypass disabled'
-        );
-        return res.status(401).json({ error: 'Unauthorized — request signature required' });
-    }
-
+// Both signature headers are mandatory on every mutating request — no
+// legacy/unsigned bypass exists. A togglable security bypass is itself a
+// misconfiguration risk (OWASP API8:2023): it can be silently re-enabled
+// by an env-var mistake. Leaving deactivated bypass code in place is also
+// CWE-561 (Dead Code) — removed entirely rather than gated off, per the
+// pre-launch security audit verdict.
+if (!signature || !timestamp) {
     logger.warn(
-      {
-        tenantId:  req.tenant?.id,
-        path:      req.path,
-        userAgent: req.headers['user-agent'] || '(none)',
-        ip:        req.ip,
-      },
-      'HMAC_LEGACY_BYPASS_USED — unsigned request allowed during migration window'
-    );
-    res.set('X-ChargeGuard-Unsigned-Request', 'true');
-
-    // تحليل Buffer → JSON للطلبات القديمة
-    if (req.body instanceof Buffer) {
-        try {
-            req.body = JSON.parse(req.body.toString('utf8'));
-        } catch (_) {
-            return res.status(400).json({ error: 'Invalid JSON body' });
-        }
-    }
-    return next();
-}
-
-  // إذا أرسل أحد الهيدرين فقط، هذا خطأ
-  if (!signature || !timestamp) {
-    logger.warn(
-      { tenantId: req.tenant?.id, signature: !!signature, timestamp: !!timestamp },
-      'HMAC_PARTIAL_HEADERS'
+      { tenantId: req.tenant?.id, signature: !!signature, timestamp: !!timestamp, path: req.path },
+      'HMAC_HEADERS_MISSING — request signature required'
     );
     return res.status(401).json({ error: 'Unauthorized' });
   }

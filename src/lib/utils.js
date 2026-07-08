@@ -26,7 +26,10 @@ function normalizeEmail(email) {
 function hashValue(type, value) {
   const normalized = normalizeValue(type, value);
   if (!normalized) return null;
-  const secret = process.env.IDENTITY_GRAPH_SECRET || 'dev-secret-key-change-in-production';
+  const secret = process.env.IDENTITY_GRAPH_SECRET;
+  if (!secret) {
+    throw new Error('[utils] IDENTITY_GRAPH_SECRET environment variable is required');
+  }
   return crypto.createHmac('sha256', secret).update(`${type}:${normalized}`).digest('hex');
 }
 

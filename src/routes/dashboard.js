@@ -6,6 +6,7 @@ const { PrismaClient } = require('@prisma/client');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
+const { isProOrAbove } = require('../lib/planAccess');
 
 const prisma = new PrismaClient();
 
@@ -48,30 +49,12 @@ const rateLimit = (req, res, next) => {
 };
 
 // ── API Key Auth ──────────────────────────────────────────────
-const authByApiKey = async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'Missing X-Api-Key header' });
-  try {
-    const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
-      id: true, email: true, plan: true, isActive: true, createdAt: true, keyRotatedAt: true,
-    });
+const { requireAuth } = require('../middleware/authenticate');
 
-    if (!tenant || !tenant.isActive) {
-      return setTimeout(() => res.status(401).json({ error: 'Unauthorized' }), 200);
-    }
-
-    if (usedPreviousKey) {
-      res.set('X-ChargeGuard-Key-Deprecated', 'true');
-      console.warn(`[Dashboard] Request authenticated using previous (grace-period) API key — tenant ${tenant.id}`);
-    }
-
-    req.tenant = tenant;
-    next();
-  } catch (err) {
-    console.error('[Dashboard] Auth error:', err.message);
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-};
+const authByApiKey = requireAuth({
+  id: true, email: true, plan: true, isActive: true, emailVerified: true,
+  createdAt: true, keyRotatedAt: true,
+});
 
 // ── Connection status ─────────────────────────────────────────
 const getConnectionStatus = (lastActivityAt) => {
@@ -209,8 +192,11 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
     .sort((a, b) => b.count - a.count)
     .slice(0, 5);
 
-  const binSequenceStats = getBINStats();
-
+ // tenantId is required here (CWE-653 fix) — without it, getBINStats()
+  // aggregated attack telemetry across every tenant on the platform,
+  // meaning every merchant's dashboard showed platform-wide data instead
+  // of their own store's data.
+  const binSequenceStats = getBINStats(tenantId);
   // ── PayPal Shield Stats (from AlertLog) ───────────────────────────────
   const sevenDaysAgoPaypal = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
@@ -282,6 +268,25 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
 router.get('/', rateLimit, authByApiKey, async (req, res) => {
   try {
     const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+
+    // Broken Object Level Authorization fix (OWASP API1:2023): the HTML
+    // renderer (buildDashboardHtml) already soft-locks BIN intelligence
+    // behind isProOrAbove(tenant.plan) — this endpoint must enforce the
+    // same gate on the raw data, not just on the rendered markup, since
+    // any authenticated tenant can call this JSON route directly and
+    // bypass the UI-only lock entirely.
+    const tenantIsPro = isProOrAbove(req.tenant.plan);
+    if (!tenantIsPro) {
+      const proLocked = {
+        locked:          true,
+        upgradeRequired: true,
+        message:         'Upgrade to Pro to unlock this feature.',
+      };
+      data.binActivity      = proLocked;
+      data.binSequenceStats = proLocked;
+      data.threatOrigins    = proLocked;
+    }
+
     res.json({
       tenant: {
         email:       req.tenant.email,
@@ -1836,6 +1841,43 @@ const buildDashboardHtml = async (tenant, data) => {
   <!-- ── BIN Sequence Alert Panel ── -->
   <div id="cg-bin-seq-panel" style="margin-bottom:1.5rem;">
     ${(() => {
+      // Broken Object Level Authorization fix (OWASP API1:2023): this IIFE
+      // used to render real BIN sequence attack data (active prefixes, BIN
+      // counts, progress %) unconditionally into server-rendered HTML. The
+      // client-side fetchBINAlerts() overwrite is not a substitute for
+      // server-side gating — curl/scrapers/view-source/disabled-JS clients
+      // bypass it entirely and see raw Pro-tier intelligence. Gated here the
+      // same way the BIN Intelligence Panel and Threat Origins sections
+      // already are, reusing the same .pro-lock / .pro-lock-overlay /
+      // .pro-lock-cta classes for consistency.
+      const isPro = isProOrAbove(tenant.plan);
+
+      if (!isPro) {
+        const stats = data.binSequenceStats || { activePrefixes: 0, blockedPrefixes: 0, totalActiveBINs: 0 };
+        const hasActivity = stats.blockedPrefixes > 0 || stats.activePrefixes > 0;
+        if (!hasActivity) return '';
+        return `<div class="bin-panel pro-lock">
+          <div class="tbl-header">
+            <span class="tbl-title">⚠️ BIN Sequence Monitoring</span>
+            <span class="tbl-count" style="color:#8b5cf6;border-color:#4c1d95;background:#1e1b4b;">Pro Feature</span>
+          </div>
+          <div class="bin-panel-inner" style="filter:blur(1.5px);pointer-events:none;user-select:none;">
+            <div class="bin-alert">
+              <div class="bin-alert-icon">⚠️</div>
+              <div class="bin-alert-body">
+                <div class="bin-alert-title">BIN sequence activity detected</div>
+                <div class="bin-alert-sub">Real-time prefix velocity tracking · <strong>Upgrade to Pro for full details</strong></div>
+              </div>
+            </div>
+          </div>
+          <div class="pro-lock-overlay">
+            <a class="pro-lock-cta" href="mailto:support@chargeguard.io?subject=Upgrade to Pro">
+              🔓 Unlock BIN Sequence Monitoring — Upgrade to Pro
+            </a>
+          </div>
+        </div>`;
+      }
+
       const stats = data.binSequenceStats || { activePrefixes: 0, blockedPrefixes: 0, totalActiveBINs: 0 };
       if (stats.blockedPrefixes > 0 || stats.activePrefixes > 0) {
         const threshold    = 8;
@@ -1868,7 +1910,7 @@ const buildDashboardHtml = async (tenant, data) => {
   <!-- ── BIN Intelligence Panel ── -->
   ${(() => {
     const bin   = data.binActivity;
-    const isPro = tenant.plan !== 'early_access' && tenant.plan !== 'free';
+    const isPro = isProOrAbove(tenant.plan);
 
     // Soft Lock للـ early_access — يُظهر رقم الأنماط، يحجب التفاصيل
     if (!isPro) {
@@ -2001,7 +2043,34 @@ const buildDashboardHtml = async (tenant, data) => {
 
   <!-- ── Threat Origins ── -->
   ${(() => {
-    const origins = data.threatOrigins || [];
+   const origins = data.threatOrigins || [];
+
+    // Pro gate — Threat Origins exposes geographic attack-source intelligence,
+    // the same class of data GET /api/dashboard already treats as Pro-only
+    // (see the proLocked assignment to data.threatOrigins in that route).
+    // This keeps the HTML page consistent with that route instead of
+    // silently exposing more than its JSON sibling endpoint does.
+    if (!isProOrAbove(tenant.plan)) {
+      if (data.totalBlocked === 0) return '';
+      return `<div class="origins-wrap pro-lock">
+        <div class="tbl-header">
+          <span class="tbl-title">🌍 Card Issuer Origins</span>
+          <span class="tbl-count" style="color:#8b5cf6;border-color:#4c1d95;background:#1e1b4b;">Pro Feature</span>
+        </div>
+        <div style="padding:1.25rem 1.5rem;filter:blur(2px);pointer-events:none;user-select:none;">
+          <div style="font-size:.78rem;color:var(--text-dim);line-height:1.6;">
+            Geographic breakdown of where attacks originate — helps you spot
+            coordinated fraud rings by issuer country.
+          </div>
+        </div>
+        <div class="pro-lock-overlay">
+          <a class="pro-lock-cta" href="mailto:support@chargeguard.io?subject=Upgrade to Pro">
+            🔓 Unlock Threat Origins — Upgrade to Pro
+          </a>
+        </div>
+      </div>`;
+    }
+
     if (origins.length === 0) {
       if (data.totalBlocked === 0) return '';
       return `<div class="origins-wrap">
@@ -2347,7 +2416,7 @@ const buildDashboardHtml = async (tenant, data) => {
 
 // ── monthly reports archive section ──────────────────────────────────────
 async function buildReportsArchiveSection(tenantId, plan) {
-  const isPro = plan !== 'early_access' && plan !== 'free';
+  const isPro = isProOrAbove(plan);
 
   const reports = await prisma.monthlyReport.findMany({
     where:   { tenantId, status: 'ready' },
@@ -2400,7 +2469,7 @@ async function buildReportsArchiveSection(tenantId, plan) {
         </div>
 
         ${!isLocked ? `
-        <a href="/api/reports/monthly?month=${r.reportMonth}&year=${r.reportYear}"
+        <a href="/api/dashboard/monthly-report-preview?month=${r.reportMonth}&year=${r.reportYear}"
            style="flex-shrink:0;display:inline-flex;align-items:center;gap:.35rem;
                   background:var(--surface2);border:1px solid var(--border);
                   color:var(--text-sub);font-size:.72rem;font-weight:600;
@@ -2408,7 +2477,7 @@ async function buildReportsArchiveSection(tenantId, plan) {
                   transition:border-color .15s;"
            onmouseover="this.style.borderColor='#3b82f6'"
            onmouseout="this.style.borderColor='var(--border)'">
-          ↓ PDF
+          View Report
         </a>` : ''}
       </div>`;
   });
@@ -2454,8 +2523,35 @@ async function buildReportsArchiveSection(tenantId, plan) {
 // ── GET /api/dashboard/monthly-report-preview ──────────────────────────
 router.get('/monthly-report-preview', rateLimit, authByApiKey, async (req, res) => {
   try {
+    // Broken Function Level Authorization fix (OWASP API5:2023): this endpoint
+    // is fetched directly by the dashboard UI and returns the same Pro-only
+    // report stats that buildReportsArchiveSection() soft-locks in the HTML
+    // (blurred rows + upgrade CTA for non-Pro tenants). Without this check,
+    // any authenticated Starter tenant could call this route directly and
+    // receive full report data, bypassing the UI-only lock entirely.
+    // Return 200 (not 403) with a locked/teaser payload so the existing
+    // client-side fetch path keeps working without new error handling.
+    if (!isProOrAbove(req.tenant.plan)) {
+      return res.json({
+        available:       false,
+        locked:          true,
+        upgradeRequired: true,
+        message:         'Monthly reports are a Pro feature. Upgrade to unlock.',
+      });
+    }
+
+    // Optional ?month=&year= — falls back to most recent report when absent,
+    // so the archive can deep-link into any specific past report instead of
+    // every row resolving to the same "latest" record.
+    const reqMonth = req.query.month ? parseInt(req.query.month, 10) : null;
+    const reqYear  = req.query.year  ? parseInt(req.query.year, 10)  : null;
+    const hasValidQuery = Number.isInteger(reqMonth) && Number.isInteger(reqYear)
+      && reqMonth >= 1 && reqMonth <= 12;
+
     const latest = await prisma.monthlyReport.findFirst({
-      where:   { tenantId: req.tenant.id, status: 'ready' },
+      where: hasValidQuery
+        ? { tenantId: req.tenant.id, status: 'ready', reportMonth: reqMonth, reportYear: reqYear }
+        : { tenantId: req.tenant.id, status: 'ready' },
       orderBy: [{ reportYear: 'desc' }, { reportMonth: 'desc' }],
       select: {
         reportMonth: true, reportYear: true,
@@ -2467,7 +2563,12 @@ router.get('/monthly-report-preview', rateLimit, authByApiKey, async (req, res) 
     });
 
     if (!latest) {
-      return res.json({ available: false, message: 'First report generates on the 1st of next month.' });
+      return res.json({
+        available: false,
+        message: hasValidQuery
+          ? 'No report found for that month.'
+          : 'First report generates on the 1st of next month.',
+      });
     }
 
     const monthOverMonthPct = latest.prevMonthAttacks
@@ -2478,7 +2579,7 @@ router.get('/monthly-report-preview', rateLimit, authByApiKey, async (req, res) 
       available: true,
       ...latest,
       monthOverMonthPct,
-      downloadUrl: `/api/reports/monthly?month=${latest.reportMonth}&year=${latest.reportYear}`,
+      downloadUrl: `/api/dashboard/monthly-report-preview?month=${latest.reportMonth}&year=${latest.reportYear}`,
     });
 
   } catch (err) {
@@ -2577,6 +2678,37 @@ router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/bin-sequence-alerts ────────────────────────────────
 router.get('/bin-sequence-alerts', rateLimit, authByApiKey, async (req, res) => {
   try {
+    // Broken Function Level Authorization fix (OWASP API5:2023): this endpoint
+    // is polled directly by the dashboard's own client-side JS (fetchBINAlerts)
+    // every 15-30s for every tenant, Starter included. The HTML soft-lock on
+    // the BIN panel only hides rendering — it never stopped this endpoint from
+    // returning real BIN attack data to non-Pro tenants. Return a 200 teaser
+    // (not 403) so the existing polling loop keeps working without new
+    // client-side error handling; updateBINPanel() safely renders nothing
+    // when activeAlert is null and liveStats.activePrefixes is 0.
+    if (!isProOrAbove(req.tenant.plan)) {
+      return res.json({
+        success:         true,
+        locked:          true,
+        upgradeRequired: true,
+        message:         'Upgrade to Pro to unlock BIN sequence intelligence.',
+        activeAlert:     null,
+        liveStats: {
+          activePrefixes:    0,
+          blockedPrefixes:   0,
+          totalActiveBINs:   0,
+          thresholdForAlert: THRESHOLDS.UNIQUE_BINS_PER_PREFIX,
+          progressPercent:   0,
+          progressColor:     'blue',
+        },
+        recentAlerts: [],
+        metadata: {
+          lastCheckedAt:      new Date().toISOString(),
+          nextRefreshSeconds: 60,
+        },
+      });
+    }
+
     const tenantId = req.tenant.id;
     const now      = Date.now();
 
@@ -2612,7 +2744,7 @@ router.get('/bin-sequence-alerts', rateLimit, authByApiKey, async (req, res) => 
       }),
 
       // إحصائيات حية من الـ in-memory store
-      Promise.resolve(getBINStats()),
+      Promise.resolve(getBINStats(req.tenant.id)),
     ]);
 
     // ── حساب activeForSeconds ─────────────────────────────────────────────

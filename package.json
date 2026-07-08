@@ -2,10 +2,10 @@
   "name": "chargeguard-woocommerce-backend",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "src/server.js",
   "scripts": {
-    "dev": "nodemon src/app.js",
-    "start": "prisma db push --accept-data-loss && node src/app.js",
+    "dev": "nodemon src/server.js",
+    "start": "prisma db push --accept-data-loss && node src/server.js",
     "test": "jest",
     "test:coverage": "jest --coverage"
   },
@@ -29,8 +29,9 @@
     "swagger-ui-express": "^5.0.1"
   },
   "devDependencies": {
-    "jest": "^30.3.0",
+    "jest": "^30.4.2",
     "nodemon": "^3.1.14",
-    "prisma": "^5.22.0"
+    "prisma": "^5.22.0",
+    "supertest": "^7.2.2"
   }
 }

@@ -34,6 +34,14 @@ class ChargeGuard_Stripe_Webhook {
      * @return WP_REST_Response
      */
     public function handle_webhook($request) {
+        $stripe_init = __DIR__ . '/../vendor/stripe-php/init.php';
+        if (file_exists($stripe_init)) {
+            require_once $stripe_init;
+        } else {
+            error_log('[ChargeGuard] Stripe webhook received but vendor/stripe-php/init.php is missing — run composer install.');
+            return new \WP_REST_Response(['error' => 'Stripe SDK not installed'], 500);
+        }
+
         $payload   = $request->get_body();
         $sig_header = $request->get_header('stripe_signature');
         $endpoint_secret = get_option('chargeguard_stripe_webhook_secret');

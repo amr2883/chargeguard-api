@@ -177,13 +177,56 @@ const domainAuthMiddleware = async (req, res, next) => {
       });
     }
 
-    // ── ٥. استعلام Prisma للتحقق من allowedDomains ────────────────────────
+    // ── ٥. Store-aware resolution (Agency multi-store) ────────────────────
+    // A tenant is "store-managed" if it has ANY Store rows, active or not —
+    // that's the signal we use instead of tenant.plan, so this security path
+    // never drifts out of sync with a billing field. Starter/Pro tenants
+    // (zero Store rows) fall through unchanged to the legacy allowedDomains
+    // check below (step ٦).
+    const matchedStore = await db.store.findFirst({
+      where: {
+        tenantId:         req.tenant.id,
+        normalizedDomain: normalizedDomain,
+        isActive:         true,
+      },
+      select: { id: true },
+    });
+
+    if (matchedStore) {
+      req.storeId     = matchedStore.id;
+      req.storeDomain = normalizedDomain;
+      logger.debug(
+        { module: 'domainAuth', domain: normalizedDomain, tenantId: req.tenant.id, storeId: matchedStore.id },
+        'Domain verified against Store table'
+      );
+      return next();
+    }
+
+    const tenantHasStores = await db.store.count({
+      where: { tenantId: req.tenant.id, isActive: true },
+    }) > 0;
+
+    if (tenantHasStores) {
+      // Store-managed tenant, but this domain isn't one of their registered
+      // stores. Do NOT fall back to allowedDomains here — that would let a
+      // stale single-store entry bypass the per-store allowlist entirely.
+      logger.warn(
+        { module: 'domainAuth', tenantId: req.tenant.id, requestDomain: normalizedDomain },
+        'Domain mismatch — request rejected (store-managed tenant)'
+      );
+      return res.status(403).json({
+        error: 'Domain not authorized for this API key. Add this domain as a Store first.',
+        code:  'DOMAIN_MISMATCH',
+      });
+    }
+
+    // ── ٦. Legacy allowedDomains check (Starter/Pro — unchanged) ──────────
     const tenantRecord = await db.tenant.findUnique({
       where:  { id: req.tenant.id },
       select: { allowedDomains: true },
     });
 
- const allowedDomains = tenantRecord?.allowedDomains ?? [];
+    const allowedDomains = tenantRecord?.allowedDomains ?? [];
 
     // Default-deny (OWASP ASVS V4.1.1; CWE-636 fix): an empty allowedDomains
     // array means this tenant has no authorized origin, not "skip the check."
@@ -202,7 +245,6 @@ const domainAuthMiddleware = async (req, res, next) => {
       });
     }
 
-    // ── ٦. قرار السماح أو الرفض ───────────────────────────────────────────
     if (!allowedDomains.includes(normalizedDomain)) {
       logger.warn(
         {

@@ -1183,4 +1183,5 @@ module.exports = {
   calculateEconomicRisk,
   rescoreOrder,
   normalizeEmail,
+  getMerchantAdjustment,
 };

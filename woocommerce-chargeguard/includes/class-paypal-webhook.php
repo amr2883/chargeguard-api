@@ -394,25 +394,7 @@ class ChargeGuard_PayPal_Webhook {
         $order_id = $orders[0];
 
         // إرسال feedback للـ ChargeGuard Backend (isFraud = true)
-        $api_key     = get_option( 'chargeguard_api_key' );
-        $merchant_id = get_option( 'chargeguard_merchant_id' );
-
-        if ( ! $api_key || ! $merchant_id ) {
-            return;
-        }
-
-        wp_remote_post( 'https://chargeguard-api.onrender.com/api/risk/feedback', [
-            'timeout' => 5,
-            'headers' => [
-                'Content-Type'   => 'application/json',
-                'x-api-key'      => $api_key,
-                'x-merchant-id'  => $merchant_id,
-            ],
-            'body' => json_encode( [
-                'orderId' => (string) $order_id,
-                'isFraud' => true,
-            ] ),
-        ] );
+        $this->api_client->send_feedback( $order_id, true );
     }
 
     /**

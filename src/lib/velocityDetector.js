@@ -14,9 +14,13 @@ const THRESHOLDS = {
 };
 
 // GDPR-safe hashing — نفس نمط risk.js
+const SECRET_SALT = process.env.SECRET_SALT;
+if (!SECRET_SALT) {
+  throw new Error('[velocityDetector] SECRET_SALT environment variable is required');
+}
+
 const hashValue = (val) => {
-  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
-  return crypto.createHmac('sha256', salt).update(String(val)).digest('hex');
+  return crypto.createHmac('sha256', SECRET_SALT).update(String(val)).digest('hex');
 };
 
 /**
@@ -51,7 +55,7 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown' }) 
     if (ip) {
       const ipHash  = hashValue(ip);
       const ipCount = await db.cardTestAttempt.count({
-        where: { ipHash, createdAt: { gte: since } },
+        where: { merchantId: merchantId || 'unknown', ipHash, createdAt: { gte: since } },
       });
       if (ipCount >= THRESHOLDS.IP) {
         return {
@@ -64,7 +68,7 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown' }) 
     if (deviceFingerprint) {
       const deviceHash  = hashValue(deviceFingerprint);
       const deviceCount = await db.cardTestAttempt.count({
-        where: { deviceHash, createdAt: { gte: since } },
+        where: { merchantId: merchantId || 'unknown', deviceHash, createdAt: { gte: since } },
       });
       if (deviceCount >= THRESHOLDS.DEVICE) {
         return {
