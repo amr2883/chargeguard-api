@@ -1,10 +1,5 @@
 require('dotenv').config();
-const { runFastCleanup, runDailyRetention } = require('./lib/retention');
-const { startAttackAlertScheduler } = require('./lib/attackAlertScheduler');
-const { startWeeklySummaryScheduler } = require('./jobs/weeklySummaryScheduler');
-const { startMonthlyReportScheduler }      = require('./jobs/monthlyReportScheduler');
-const { startPaypalWeeklyReportScheduler } = require('./jobs/paypalWeeklyReportScheduler');
-const { startSubscriptionScheduler }       = require('./jobs/subscriptionScheduler');
+const { runFastCleanup } = require('./lib/retention');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -13,7 +8,6 @@ const prometheus = require('./lib/prometheus');
 
 const app = express();
 app.set('trust proxy', true);
-const PORT = process.env.PORT || 3000;
 
 // Middlewares
 app.use(helmet());
@@ -34,6 +28,18 @@ try {
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
 app.use('/api/payments/paypal-webhook', express.raw({ type: 'application/json' }));
+app.use('/api/risk/evaluate', express.raw({ type: 'application/json' }));
+app.use('/api/risk/mark-fraud', express.raw({ type: 'application/json' }));
+app.use('/api/risk/feedback', express.raw({ type: 'application/json' }));
+app.use('/api/risk/blacklist', express.raw({ type: 'application/json' }));
+app.use('/api/risk/blacklist/:id', express.raw({ type: 'application/json' }));
+app.use('/api/risk/whitelist', express.raw({ type: 'application/json' }));
+app.use('/api/risk/whitelist/:id', express.raw({ type: 'application/json' }));
+app.use('/api/risk/check-device', express.raw({ type: 'application/json' }));
+app.use('/api/risk/enrich', express.raw({ type: 'application/json' }));
+app.use('/api/risk/cleanup-blocked', express.raw({ type: 'application/json' }));
+app.use('/api/settings/webhook', express.raw({ type: 'application/json' }));
+app.use('/api/settings/webhook/test', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
@@ -53,13 +59,14 @@ app.use('/api/auth',      authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/settings',  settingsRoutes);
 app.use('/api/payments',  paymentsRoutes);
+app.use('/api/stores',    require('./routes/stores'));
 // Morgan ����� �� /admin ���� ����� ��� secret �� �����
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
 }, adminRoutes);
 
-// ?? Global error handler � MUST be after all routes ??????????
+// ?? Global error handler ? MUST be after all routes ??????????
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
     return next(err);
@@ -77,7 +84,7 @@ app.get('/metrics', async (req, res) => {
 });
 
 // ============================================================
-//  ���� GET ������ ������� �������� ������ ������ ��������
+//  ???? GET ?????? ??????? ???????? ?????? ?????? ????????
 // ============================================================
 app.get('/api/retention-config', (req, res) => {
   const { RETENTION } = require('./lib/retention');
@@ -85,7 +92,7 @@ app.get('/api/retention-config', (req, res) => {
 });
 
 app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ? External ping � running fast cleanup...`);
+  console.log(`[${new Date().toISOString()}] ? External ping ? running fast cleanup...`);
   try {
     await runFastCleanup(prismaForCleanup);
     res.json({ success: true });
@@ -95,74 +102,4 @@ app.get('/api/cleanup-now', async (req, res) => {
   }
 });
 
-// ============================================================
-//  Cleanup Intervals
-// ============================================================
-const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-const DAILY_RETENTION_MS  = 24 * 60 * 60 * 1000;
-
-// prisma ����� �� FastCleanup ��� (���� ������� ��� ��� ������)
-const { PrismaClient } = require('@prisma/client');
-const prismaForCleanup = new PrismaClient();
-
-app.listen(PORT, () => {
-  console.log(`?? Server running on http://localhost:${PORT}`);
-
-  // ?? 1) Fast cleanup (every 10 min) � blocked orders, expired blacklist, stale pending
-  setTimeout(() => {
-    console.log(`[${new Date().toISOString()}] ?? Fast cleanup scheduler started (every 10 min)`);
-    setInterval(() => runFastCleanup(prismaForCleanup), CLEANUP_INTERVAL_MS);
-  }, 30 * 1000);
-
-  // ?? 2) Daily retention (every 24h) � full data retention policy
-  setTimeout(() => {
-    const { RETENTION } = require('./lib/retention');
-    console.log(`[${new Date().toISOString()}] ???  Daily retention scheduler started (every 24h)`);
-    console.log(`[${new Date().toISOString()}] ?? Retention config (days):`, RETENTION);
-    runDailyRetention();
-    setInterval(runDailyRetention, DAILY_RETENTION_MS);
-  }, 5 * 60 * 1000); // ��� 5 ����� �� ��� ������ (���� ������ ��� ���������)
-
-  // ?? 3) Keep-alive self-ping (every 14 min) ????????????????????
-  // Render Free tier ���� ��� 15 ����� �� ���� HTTP requests ������.
-  // ��� ��� ping ���� request ����� �� ������ ����� ��� ������
-  // ��� ������ Render �� activity ����� ��� cold start.
-  // �� ������ �� ����� ������ � http/https ������� ���.
-  const KEEP_ALIVE_MS = 14 * 60 * 1000;
-  const RENDER_URL = process.env.RENDER_EXTERNAL_URL || `http://localhost:${PORT}`;
-
-  setTimeout(() => {
-    const httpModule = RENDER_URL.startsWith('https') ? require('https') : require('http');
-
-    const selfPing = () => {
-      const targetUrl = `${RENDER_URL}/health`;
-      const req = httpModule.get(targetUrl, (res) => {
-        console.log(`[${new Date().toISOString()}] ?? Keep-alive ping ? ${res.statusCode} OK`);
-        res.resume();
-      });
-      req.on('error', (err) => {
-        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping failed: ${err.message}`);
-      });
-      req.setTimeout(10000, () => {
-        console.warn(`[${new Date().toISOString()}] ?? Keep-alive ping timeout � destroying request`);
-        req.destroy();
-      });
-    };
-
-    setInterval(selfPing, KEEP_ALIVE_MS);
-    console.log(`[${new Date().toISOString()}] ?? Keep-alive started � pinging ${RENDER_URL}/health every 14 min`);
-  }, 60 * 1000);
-    // 🚨 4) Attack Alert Scheduler (every 2 min)
-  startAttackAlertScheduler(prismaForCleanup);
-
-  // 📅 5) Weekly Summary Scheduler (checks hourly, sends Sundays 09:xx UTC)
-  startWeeklySummaryScheduler(prismaForCleanup);
-
-  // 📊 6) Monthly Report Scheduler (checks hourly, runs on 1st of month 10:xx UTC)
-  startMonthlyReportScheduler(prismaForCleanup);
-
-  // 🛡️ 7) PayPal Weekly Shield Scheduler (checks hourly, sends Sundays 09:30 UTC)
-  startPaypalWeeklyReportScheduler(prismaForCleanup);
-  // 🔄 8) Subscription Lifecycle Scheduler (hourly)
-  startSubscriptionScheduler(prismaForCleanup);
-});
+module.exports = app;

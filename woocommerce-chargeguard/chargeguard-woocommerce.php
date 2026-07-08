@@ -15,11 +15,16 @@ require_once __DIR__ . '/includes/class-admin-settings.php';
 require_once __DIR__ . '/includes/class-stripe-webhook.php';
 require_once __DIR__ . '/includes/class-paypal-webhook.php';
 require_once __DIR__ . '/includes/class-dynamic-firewall.php';
-require_once __DIR__ . '/vendor/stripe-php/init.php';
+
 
 add_action('plugins_loaded', 'chargeguard_init');
 function chargeguard_init() {
     if (!class_exists('WooCommerce')) { return; }
+
+    if (is_admin() && !file_exists(__DIR__ . '/vendor/stripe-php/init.php')) {
+        add_action('admin_notices', 'chargeguard_missing_stripe_sdk_notice');
+    }
+
     if (is_admin()) { new ChargeGuard_Admin_Settings(); }
     new ChargeGuard_Stripe_Webhook();
 new ChargeGuard_PayPal_Webhook();
@@ -46,4 +51,18 @@ function chargeguard_add_fingerprint_to_webhook_payload($payload, $resource, $re
     }
     return $payload;
 }
+}
+
+function chargeguard_missing_stripe_sdk_notice() {
+    ?>
+    <div class="notice notice-warning is-dismissible">
+        <p>
+            <strong>ChargeGuard:</strong>
+            The Stripe SDK (<code>vendor/stripe-php</code>) was not found. Stripe webhook enrichment
+            (BIN/card intelligence for Stripe orders) is currently disabled. If you installed this
+            plugin from source, run <code>composer install</code> in the plugin directory. All other
+            ChargeGuard protection features are unaffected.
+        </p>
+    </div>
+    <?php
 }

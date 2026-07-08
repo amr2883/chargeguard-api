@@ -1,72 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const crypto = require('crypto');
-// crypto built-in — used for crc32 in local cert verification (reserved)
 const db = require('../lib/db');
 const logger = require('../lib/logger');
 const { sendSubscriptionConfirmationEmail } = require('../lib/email');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
-
-// ── PayPal Webhook Signature Verification ─────────────────────────────
-// الآلية: PayPal يوقّع (transmissionId|timestamp|webhookId|crc32(body))
-//         بـ RSA private key، ونحن نتحقق بـ public cert من PayPal
-// ──────────────────────────────────────────────────────────────────────
-const CRC32_TABLE = (() => {
-  const table = new Uint32Array(256);
-  for (let i = 0; i < 256; i++) {
-    let c = i;
-    for (let j = 0; j < 8; j++) {
-      c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
-    }
-    table[i] = c;
-  }
-  return table;
-})();
-
-const crc32 = (buf) => {
-  let crc = 0xFFFFFFFF;
-  for (const byte of buf) {
-    crc = CRC32_TABLE[(crc ^ byte) & 0xFF] ^ (crc >>> 8);
-  }
-  return ((crc ^ 0xFFFFFFFF) >>> 0);
-};
-
-const certCache = new Map();
-
-const fetchCert = (url) => new Promise((resolve, reject) => {
-  if (!url.startsWith('https://api.paypal.com/') &&
-      !url.startsWith('https://api.sandbox.paypal.com/')) {
-    return reject(new Error('Invalid cert URL — not from PayPal domain'));
-  }
-  if (certCache.has(url)) return resolve(certCache.get(url));
-  https.get(url, (res) => {
-    let data = '';
-    res.on('data', chunk => data += chunk);
-    res.on('end', () => {
-      certCache.set(url, data);
-      setTimeout(() => certCache.delete(url), 60 * 60 * 1000);
-      resolve(data);
-    });
-  }).on('error', reject);
-});
-
-const verifyPayPalWebhook = async ({
-  transmissionId,
-  transmissionTime,
-  webhookId,
-  certUrl,
-  authAlgo,
-  transmissionSig,
-  rawBody,
-}) => {
-  const bodyHash   = crc32(rawBody);
-  const signString = `${transmissionId}|${transmissionTime}|${webhookId}|${bodyHash}`;
-  const cert       = await fetchCert(certUrl);
-  const algo       = authAlgo?.includes('256') ? 'SHA256' : 'SHA1';
-  const verifier   = createVerify(`${algo}withRSA`);
-  verifier.update(signString);
-  return verifier.verify(cert, transmissionSig, 'base64');
-};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // خريطة الخطط — المصدر الوحيد للحقيقة (Source of Truth) للأسعار
@@ -82,37 +20,21 @@ const PLAN_CONFIG = {
 const SESSION_TTL_MS = 30 * 60 * 1000; // 30 دقيقة
 
 // ══════════════════════════════════════════════════════════════════════════════
-// apiKeyAuth — نسخة مخففة مخصصة لـ payments
-// لا تُستخدم domainAuthMiddleware هنا لأن الدفع يتم من صفحة خارجية
+// apiKeyAuth — now backed by the shared requireAuth middleware
+// (no domainAuthMiddleware here — payment confirmation happens from an
+// external PayPal-hosted page, not the merchant's own storefront domain)
 // ══════════════════════════════════════════════════════════════════════════════
-const apiKeyAuth = async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'API key is required' });
+const { requireAuth } = require('../middleware/authenticate');
 
-  const { tenant } = await resolveTenantByApiKey(apiKey, {
-    id: true,
-    email: true,
-    isActive: true,
-    emailVerified: true,
-    plan: true,
-    subscriptionStatus: true,
-    subscriptionEndDate: true,
-  });
-
-  if (!tenant || !tenant.isActive) {
-    return res.status(401).json({ error: 'Invalid or inactive API key' });
-  }
-
-  if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-    return res.status(403).json({
-      error: 'Email not verified.',
-      code: 'EMAIL_NOT_VERIFIED',
-    });
-  }
-
-  req.tenant = tenant;
-  next();
-};
+const apiKeyAuth = requireAuth({
+  id: true,
+  email: true,
+  isActive: true,
+  emailVerified: true,
+  plan: true,
+  subscriptionStatus: true,
+  subscriptionEndDate: true,
+});
 
 // ══════════════════════════════════════════════════════════════════════════════
 // POST /api/payments/create-checkout-session

@@ -230,6 +230,7 @@ async function persistBinData(cacheKey, data) {
         bin: binPrefix,
         brand: data.brand,
         cardType: data.cardType,
+        cardCategory: data.cardCategory ?? null,
         issuerName: data.issuerName,
         issuerCountry: data.issuerCountry,
         isPrepaid: data.isPrepaid ?? false,
@@ -242,6 +243,7 @@ async function persistBinData(cacheKey, data) {
       update: {
         brand: data.brand,
         cardType: data.cardType,
+        cardCategory: data.cardCategory ?? null,
         issuerName: data.issuerName,
         issuerCountry: data.issuerCountry,
         isPrepaid: data.isPrepaid ?? false,

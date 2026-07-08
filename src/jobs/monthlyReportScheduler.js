@@ -236,16 +236,13 @@ async function processTenant(prisma, tenant, reportMonth, reportYear, label) {
         status:      'generating',
       },
       update: {
-        status:      'generating',
-        // Reset data fields so stale data from a previous failed attempt
-        // doesn't linger alongside the new 'generating' status
-        totalAttacks:    null,
-        totalProtected:  null,
-        totalFeesSaved:  null,
-        securityScore:   null,
-        topCountry:      null,
-        topReason:       null,
-        prevMonthAttacks: null,
+        status: 'generating',
+        // Data fields (totalAttacks, etc.) are now nullable in the schema,
+        // so we don't need to reset them to null — they'll be overwritten
+        // with real data when the report is generated. Prisma leaves
+        // unspecified fields unchanged on update, so any stale values from
+        // a previous failed attempt simply get replaced in Step 4 once
+        // buildMonthlyReportData succeeds.
       },
       select: { id: true },
     });

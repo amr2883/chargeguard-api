@@ -10,13 +10,13 @@
 class ChargeGuard_API_Client {
 
     private $api_key;
-    private $merchant_id;
+    
     private $webhook_secret;
-    private $base_url = 'https://Amr453-chargeguard-space.hf.space/api';
+    private $base_url = 'https://chargeguard-api.onrender.com/api';
 
     public function __construct() {
         $this->api_key       = get_option('chargeguard_api_key');
-        $this->merchant_id   = get_option('chargeguard_merchant_id');
+        
         $this->webhook_secret = get_option('chargeguard_webhook_secret');
     }
 
@@ -47,8 +47,7 @@ class ChargeGuard_API_Client {
             'headers' => [
                 'Content-Type'              => 'application/json',
                 'X-API-Key'                 => $this->api_key,
-                'X-Merchant-Id'             => $this->merchant_id,
-                'X-WC-Webhook-Signature'    => $signature,
+                'X-Store-Domain'            => wp_parse_url( home_url(), PHP_URL_HOST ),
                 'X-ChargeGuard-Signature'   => $signature,
                 'X-ChargeGuard-Timestamp'   => $timestamp,
             ],
@@ -96,8 +95,7 @@ class ChargeGuard_API_Client {
             'headers' => [
                 'Content-Type'              => 'application/json',
                 'X-API-Key'                 => $this->api_key,
-                'X-Merchant-Id'             => $this->merchant_id,
-                'X-WC-Webhook-Signature'    => $signature,
+                'X-Store-Domain'            => wp_parse_url( home_url(), PHP_URL_HOST ),
                 'X-ChargeGuard-Signature'   => $signature,
                 'X-ChargeGuard-Timestamp'   => $timestamp,
             ],
@@ -112,6 +110,52 @@ class ChargeGuard_API_Client {
             sleep(1);
             $response = wp_remote_post($url, $args);
         }
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+
+        if ($code >= 200 && $code < 300) {
+            return $body;
+        } else {
+            return new WP_Error('api_error', $body['error'] ?? 'Unknown error');
+        }
+    }
+
+    /**
+     * Send feedback on a previous evaluation to the ChargeGuard backend.
+     *
+     * @param string $order_id The WooCommerce order ID.
+     * @param bool   $is_fraud Whether the order was fraudulent.
+     * @return array|WP_Error Result from the API.
+     */
+    public function send_feedback($order_id, $is_fraud) {
+        $endpoint = '/risk/feedback';
+        $url      = $this->base_url . $endpoint;
+        $body      = json_encode([
+            'orderId'  => (string) $order_id,
+            'isFraud'  => (bool) $is_fraud,
+        ]);
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac($body, $timestamp);
+
+        $args = [
+            'method'  => 'POST',
+            'headers' => [
+                'Content-Type'              => 'application/json',
+                'X-API-Key'                 => $this->api_key,
+                'X-Store-Domain'            => wp_parse_url( home_url(), PHP_URL_HOST ),
+                'X-ChargeGuard-Signature'   => $signature,
+                'X-ChargeGuard-Timestamp'   => $timestamp,
+            ],
+            'body'    => $body,
+            'timeout' => 5,
+        ];
+
+        $response = wp_remote_post($url, $args);
 
         if (is_wp_error($response)) {
             return $response;
@@ -156,8 +200,7 @@ class ChargeGuard_API_Client {
             'headers' => [
                 'Content-Type'              => 'application/json',
                 'X-API-Key'                 => $this->api_key,
-                'X-Merchant-Id'             => $this->merchant_id,
-                'X-WC-Webhook-Signature'    => $signature,
+                'X-Store-Domain'            => wp_parse_url( home_url(), PHP_URL_HOST ),
                 'X-ChargeGuard-Signature'   => $signature,
                 'X-ChargeGuard-Timestamp'   => $timestamp,
             ],

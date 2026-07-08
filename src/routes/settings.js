@@ -6,7 +6,8 @@ const db      = require('../lib/db');
 const logger  = require('../lib/logger');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { getAvailableCountries, calculateCountryRiskPenalty } = require('../lib/countryRisk');
-
+const { domainAuthMiddleware } = require('../lib/domainAuth');
+const verifyHmacSignature = require('../middleware/verifyHmac');
 // ── Constants ─────────────────────────────────────────────────────────────
 const SETTINGS_RATE  = new Map();
 const MAX_REQ        = 20;
@@ -33,34 +34,13 @@ const rateLimit = (req, res, next) => {
 };
 
 // ── Auth Middleware ───────────────────────────────────────────────────────
-const apiKeyAuth = async (req, res, next) => {
-  const apiKey = req.headers['x-api-key'];
-  if (!apiKey) return res.status(401).json({ error: 'API key is required' });
-  try {
-    const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, {
-      id: true, email: true, isActive: true,
-      emailVerified: true, plan: true,
-      countryOverrides: true,
-    });
+const { requireAuth } = require('../middleware/authenticate');
 
-    if (!tenant || !tenant.isActive) {
-      return setTimeout(() => res.status(401).json({ error: 'Unauthorized' }), 200);
-    }
-
-    if (usedPreviousKey) {
-      res.set('X-ChargeGuard-Key-Deprecated', 'true');
-      logger.warn({ module: 'settings', tenantId: tenant.id }, 'Request authenticated using previous (grace-period) API key');
-    }
-    if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-      return res.status(403).json({ error: 'Email not verified', code: 'EMAIL_NOT_VERIFIED' });
-    }
-    req.tenant = tenant;
-    next();
-  } catch (err) {
-    logger.error({ module: 'settings', err: err.message }, 'Auth error');
-    res.status(500).json({ error: 'Internal Server Error' });
-  }
-};
+const apiKeyAuth = requireAuth({
+  id: true, email: true, isActive: true,
+  emailVerified: true, plan: true,
+  countryOverrides: true, webhookSecret: true, webhookUrl: true, webhookType: true, webhookLastStatus: true, webhookLastSentAt: true, webhookFailureCount: true,
+});
 
 // ── Validation Middleware ─────────────────────────────────────────────────
 const validateCountryOverrides = (req, res, next) => {
@@ -139,7 +119,7 @@ router.get('/country-overrides', rateLimit, apiKeyAuth, async (req, res) => {
 });
 
 // ── PUT /api/settings/country-overrides ──────────────────────────────────
-router.put('/country-overrides', rateLimit, apiKeyAuth, validateCountryOverrides, async (req, res) => {
+router.put('/country-overrides', rateLimit, apiKeyAuth, verifyHmacSignature, validateCountryOverrides, async (req, res) => {
   try {
     const { updates }      = req.body;
     const currentOverrides = { ...(req.tenant.countryOverrides || {}) };
@@ -192,6 +172,106 @@ router.put('/country-overrides', rateLimit, apiKeyAuth, validateCountryOverrides
   } catch (err) {
     logger.error({ module: 'settings', err: err.message }, 'PUT country-overrides error');
     res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// ── Webhook Settings Routes ──────────────────────────────────────────
+
+router.get('/webhook', rateLimit, apiKeyAuth, async (req, res) => {
+  try {
+    res.json({
+      success: true,
+      webhookUrl: req.tenant.webhookUrl || '',
+      webhookType: req.tenant.webhookType || '',
+      webhookLastStatus: req.tenant.webhookLastStatus || '',
+      webhookLastSentAt: req.tenant.webhookLastSentAt || null,
+      webhookFailureCount: req.tenant.webhookFailureCount || 0,
+    });
+  } catch (err) {
+    logger.error({ module: 'settings', err: err.message }, 'GET webhook error');
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+router.post('/webhook', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
+  try {
+    const { webhookUrl, webhookType } = req.body;
+
+    if (!webhookUrl || typeof webhookUrl !== 'string') {
+      return res.status(400).json({ error: 'webhookUrl is required.' });
+    }
+
+    if (!['slack', 'discord', 'custom'].includes(webhookType)) {
+      return res.status(400).json({ error: 'webhookType must be slack, discord, or custom.' });
+    }
+
+    const { valid, error } = require('../lib/webhook').validateWebhookUrl(webhookUrl);
+    if (!valid) {
+      return res.status(400).json({ error: error || 'Invalid webhook URL.' });
+    }
+
+    await db.tenant.update({
+      where: { id: req.tenant.id },
+      data: {
+        webhookUrl,
+        webhookType,
+        webhookLastStatus: null,
+        webhookLastSentAt: null,
+        webhookFailureCount: 0,
+      },
+    });
+
+    logger.info({ module: 'settings', tenantId: req.tenant.id }, 'Webhook settings saved');
+
+    res.json({ success: true });
+  } catch (err) {
+    logger.error({ module: 'settings', err: err.message }, 'PUT webhook error');
+    res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+router.post('/webhook/test', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
+  try {
+    if (!req.tenant.webhookUrl) {
+      return res.status(400).json({ error: 'No webhook URL configured. Save one first.' });
+    }
+
+    const testTenant = {
+      id: req.tenant.id,
+      email: req.tenant.email,
+      storeUrl: null,
+      webhookUrl: req.tenant.webhookUrl,
+      webhookType: req.tenant.webhookType || 'custom',
+    };
+
+    const { sendWebhookAlert } = require('../lib/webhook');
+
+    try {
+      await sendWebhookAlert(testTenant, 1, 0.30, 0, { alertType: 'test', isTest: true });
+
+      await db.tenant.update({
+        where: { id: req.tenant.id },
+        data: {
+          webhookLastStatus: 'success',
+          webhookLastSentAt: new Date(),
+        },
+      });
+
+      res.json({ success: true });
+    } catch (sendErr) {
+      await db.tenant.update({
+        where: { id: req.tenant.id },
+        data: {
+          webhookLastStatus: 'failed',
+          webhookFailureCount: { increment: 1 },
+        },
+      });
+
+      throw sendErr;
+    }
+  } catch (err) {
+    logger.error({ module: 'settings', err: err.message }, 'POST webhook/test error');
+    res.status(500).json({ error: err.message || 'Test failed. Check your webhook URL.' });
   }
 });
 

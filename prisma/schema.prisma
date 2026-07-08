@@ -27,6 +27,8 @@ storeUrl      String?
   lastPaymentAmount           Float?
   lastCaptureId               String?   @unique
   isActive                    Boolean   @default(true)
+  monthlyBlockedCount         Int       @default(0)
+  quotaResetDate               DateTime?
   emailVerified               Boolean   @default(false)
   emailVerifyToken            String?   @unique
   emailVerifyExpiresAt        DateTime?
@@ -58,6 +60,7 @@ storeUrl      String?
   monthlyReports    MonthlyReport[]    @relation("TenantMonthlyReports")
   checkoutSessions  CheckoutSession[]  @relation("TenantCheckoutSessions")
   payments          Payment[]          @relation("TenantPayments")
+  stores            Store[]            @relation("TenantStores")
 }
 
 // ========== Merchant Profile ==========
@@ -129,6 +132,15 @@ model Order {
   // علاقات (اختيارية لكن مفيدة)
   riskEvaluations RiskEvaluation[]
   disputeOutcomes DisputeOutcome[]
+
+  // Composite indexes for the four hot-path query patterns run on every
+  // /evaluate, /woocommerce-webhook, and /enrich request (merchant-scoped
+  // recent-order lookups and device/IP/email velocity counts). Matches the
+  // style already established on BlockedAttempt.
+  @@index([merchantId, createdAt])
+  @@index([merchantId, deviceFingerprint, createdAt])
+  @@index([merchantId, ipAddress, createdAt])
+  @@index([merchantId, email, createdAt])
 }
 
 // ========== Risk Evaluation (Flight Recorder) ==========
@@ -302,6 +314,7 @@ model BinRecord {
   bin           String   @id
   brand         String?
   cardType      String?
+  cardCategory  String?
   issuerName    String?
   issuerCountry String?
   isPrepaid     Boolean  @default(false)
@@ -334,6 +347,12 @@ model BlockedAttempt {
   id          String   @id @default(cuid())
   tenantId    String
   tenant      Tenant   @relation("TenantBlockedAttempts", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  // Agency multi-store attribution — null for Starter/Pro (no Store rows
+  // exist) and for any Agency attempt recorded before this field's rollout.
+  storeId     String?
+  store       Store?   @relation("StoreBlockedAttempts", fields: [storeId], references: [id], onDelete: SetNull)
+
   blockedAt   DateTime @default(now())
   cardBin     String?  // أول 6 أرقام فقط — لا نخزن رقم البطاقة كاملاً
   cardType    String?  // Visa, Mastercard, Amex, Unknown
@@ -343,6 +362,7 @@ model BlockedAttempt {
   riskScore       Int?
 
   @@index([tenantId, blockedAt])
+  @@index([storeId, blockedAt])
 }
 
 // ========== Card Hash Tracking ==========
@@ -457,10 +477,10 @@ model MonthlyReport {
   status       String   @default("generating") // generating | ready | failed
 
   // الإحصائيات المُجمَّدة وقت الإنشاء — لا تتغير لاحقاً
-  totalAttacks       Int
-  totalProtected     Float   // sum(amountAttempted) — القيمة الفعلية المحمية
-  totalFeesSaved     Float   // attacks × SAVINGS_PER_ATTACK
-  securityScore      Int
+  totalAttacks       Int?
+  totalProtected     Float?   // sum(amountAttempted) — القيمة الفعلية المحمية
+  totalFeesSaved     Float?   // attacks × SAVINGS_PER_ATTACK
+  securityScore      Int?
   topCountry         String?
   topReason          String?
   prevMonthAttacks   Int?    // للمقارنة الشهرية
@@ -538,6 +558,35 @@ model Payment {
 
   @@index([tenantId, createdAt])
   @@index([captureId])
+}
+// ========== Store (Agency multi-store) ==========
+model Store {
+  id               String    @id @default(cuid())
+  tenantId         String
+  tenant           Tenant    @relation("TenantStores", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  storeUrl         String    // as submitted by the merchant, unnormalized
+  normalizedDomain String    // output of normalizeDomain() — source of truth for auth matching
+  label            String?   // merchant-facing name, e.g. "Client A — woo.clienta.com"
+
+  // Soft-delete pattern (matches existing status-field conventions in this
+  // schema — BinSequenceAlert.status, CheckoutSession.status, Payment.status —
+  // rather than a hard DELETE, so historical BlockedAttempt/Order rows keep
+  // a valid FK and dashboard history isn't silently orphaned.
+  isActive         Boolean   @default(true)
+  deactivatedAt    DateTime?
+
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  lastActivityAt   DateTime? // bumped on each /blocked-attempt or /evaluate hit — used for dashboard "last seen"
+
+  blockedAttempts  BlockedAttempt[] @relation("StoreBlockedAttempts")
+
+  // One domain per tenant, active or not — re-adding a previously removed
+  // domain reactivates this row (see §2) rather than creating a duplicate.
+  @@unique([tenantId, normalizedDomain])
+  @@index([tenantId, isActive])
+  @@index([normalizedDomain])
 }
 
 // ========== Attack Alert Log ==========

@@ -200,7 +200,7 @@ router.get('/connect/confirm', async (req, res) => {
       return res.status(410).json({ error: 'This connect link has expired. Please request a new one.' });
     }
 
-    let webhookSecret = tenant.webhookSecret;
+      let webhookSecret = tenant.webhookSecret;
     if (!webhookSecret) {
       webhookSecret = crypto.randomBytes(32).toString('hex');
     }
@@ -212,6 +212,22 @@ router.get('/connect/confirm', async (req, res) => {
     // the correct behavior — matching how GitHub, Stripe, and Twilio handle "I lost my API
     // key" — is to issue a brand-new credential here rather than attempt to return one that
     // structurally cannot exist in the database.
+    //
+    // NOTE — no grace period here, by design (do not "fix" this to match /rotate-key):
+    // /connect/confirm is a RECOVERY flow, not a planned rotation. A merchant only reaches
+    // this endpoint because their key is lost or suspected compromised. We deliberately do
+    // NOT set previousApiKeyHash / previousApiKeyExpiresAt here, so the old key is killed
+    // the instant the new one is issued, with no overlap window.
+    //
+    // Contrast with /dashboard/rotate-key: that endpoint IS a planned rotation initiated by
+    // a merchant with full account access and no indication of compromise, so it sets
+    // previousApiKeyHash with a 24h grace window to avoid a protection outage while the
+    // WooCommerce plugin config is updated.
+    //
+    // Giving /connect/confirm the same grace period would mean a potentially-leaked key
+    // stays valid for 24h after the owner explicitly signaled it might be compromised —
+    // defeating the purpose of the recovery flow (NIST SP 800-63B §6.1: compromised/lost
+    // authenticators must be invalidated immediately, not given a renewal overlap).
     const newApiKey = crypto.randomBytes(32).toString('base64');
     const newApiKeyHash = hashApiKey(newApiKey);
 
@@ -248,6 +264,42 @@ router.get('/connect/confirm', async (req, res) => {
  * GET /api/auth/verify
  * Plugin يتحقق إن الـ API Key لا يزال صالحاً
  */
+// SANCTIONED EXCEPTION to the centralized requireAuth() pattern (CWE-1059
+// drift-prevention documentation — same rationale as the /connect/confirm
+// no-grace-period note further down this file). Do NOT "fix" this to use
+// requireAuth() without re-reading this comment in full.
+//
+// This is a lightweight HEALTH-CHECK endpoint: the WooCommerce plugin calls
+// it to ask "is my API key still valid?" before doing anything else,
+// including before it has fetched webhookSecret. Three deliberate
+// deviations from the standard pattern follow from that:
+//
+//   a) No requireAuth() AUTH_FAIL_DELAY_MS (200ms) on failure. That delay
+//      exists to blunt key-enumeration timing attacks against mutating,
+//      capability-granting endpoints (CWE-208). A pure validity probe is a
+//      much lower-value timing oracle — knowing a key is "valid" grants no
+//      capability an attacker couldn't get more directly by trying the key
+//      against a real endpoint — and this route is polled frequently, so
+//      artificial latency here has a real operational cost with no
+//      proportionate security benefit (cf. Kubernetes liveness/readiness
+//      probes, which are intentionally excluded from the full
+//      auth/authz chain the live application enforces, for the same
+//      cost/benefit reason).
+//   b) No domainAuthMiddleware. The plugin calls this from the merchant's
+//      own server process, not a browser subject to origin enforcement —
+//      there is no "origin" to bind in the way there is for browser-facing
+//      mutating calls.
+//   c) No verifyHmacSignature. The plugin may not have fetched
+//      webhookSecret yet — requiring an HMAC signature here would be
+//      circular (the secret needed to sign isn't available until after a
+//      successful authenticated call).
+//
+// What is NOT relaxed: this handler still manually enforces tenant.isActive
+// and tenant.emailVerified (mirroring requireAuth's policy exactly), and
+// returns no sensitive data — only { valid: true }, never a secret. If
+// those manual checks and requireAuth's checks ever diverge, that is the
+// one thing to fix; the missing delay/domain/HMAC layers above are by
+// design and should stay missing.
 router.get('/verify', async (req, res) => {
   try {
     const apiKey = req.headers['x-api-key'];
@@ -405,8 +457,17 @@ router.get('/verify-email', async (req, res) => {
     // is read — it never touches the database again after this line.
     const plaintextKeyForWelcomeEmail = tenant.apiKey;
 
-    await db.tenant.update({
-      where: { id: tenant.id },
+    // Atomic, conditional update — guards against two concurrent requests
+    // for the same token both passing the emailVerified/expiry checks
+    // above before either commits (CWE-362 TOCTOU). Mirrors the
+    // conditional-update + re-read-on-lost-race pattern already used for
+    // quota resets in risk.js's /evaluate route.
+    const updateResult = await db.tenant.updateMany({
+      where: {
+        id: tenant.id,
+        emailVerifyToken: token,
+        emailVerified: false,
+      },
       data: {
         emailVerified: true,
         emailVerifyToken: null,
@@ -414,6 +475,20 @@ router.get('/verify-email', async (req, res) => {
         apiKey: null,
       }
     });
+
+    if (updateResult.count === 0) {
+      // Lost the race — a concurrent request already verified this
+      // tenant between our read and our write attempt. Do not resend the
+      // welcome email or treat this as a fresh success; show the same
+      // page a genuine double-click would see.
+      logger.info({ module: 'auth', tenantId: tenant.id }, 'Verification lost race — already verified by concurrent request');
+      return res.status(200).send(renderPage(
+        'Already Verified', '✅', { bg: '#dcfce7', text: '#16a34a' },
+        'Account already active',
+        'Your email has already been verified. Check your inbox for your API key and start protecting your store.',
+        `<a href="https://master.chargeguard-landing.pages.dev" class="btn btn-primary">Go to ChargeGuard →</a>`
+      ));
+    }
 
     logger.info({ module: 'auth', tenantId: tenant.id }, 'Email verified successfully');
 

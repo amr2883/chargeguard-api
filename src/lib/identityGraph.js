@@ -686,7 +686,7 @@ async function getConnectedRisk(order, merchantId) {
       ];
 
       const globalCandidates = await prisma.identityNode.findMany({
-        where: { merchantId: null, type: "DEVICE", OR: orConditions },
+        where: { merchantId: 'global', type: "DEVICE", OR: orConditions },
       });
 
       const globalDeviceNode =
@@ -881,7 +881,7 @@ async function markOrderAsFraud(order, merchantId, patternContext = {}) {
         select: { to: { select: { id: true } } },
       }),
       prisma.identityNode.findFirst({
-        where: { merchantId: null, type: "DEVICE", hashedValue: hashedDevice },
+        where: { merchantId: 'global', type: "DEVICE", hashedValue: hashedDevice },
         select: { id: true },
       }),
       merchantId ? prisma.merchantProfile.findUnique({

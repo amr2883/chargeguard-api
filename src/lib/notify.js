@@ -13,6 +13,7 @@
 const { sendAttackAlertEmail, sendPaypalAlertEmail } = require('./email');
 const { sendWebhookAlert }    = require('./webhook');
 const db                      = require('./db');
+const { isProOrAbove }        = require('./planAccess');
 
 /**
  * Sends attack alert to all configured channels for a single tenant.
@@ -55,9 +56,25 @@ async function notifyTenant(tenant, attackCount, savedAmount, windowMinutes = 10
  * @returns {Promise<void>}
  */
 async function notifyBINSequenceAlert(tenant, alert) {
-  // ── Cooldown Check (30 دقيقة) ─────────────────────────────────────
+  // Plan gate — must be the FIRST check in this function, before any
+  // cooldown logic or DB queries, so non-Pro tenants never trigger a
+  // wasted lastAlertSentAt read/write for an alert they can't receive.
+  // Defense-in-depth: risk.js's call site has no plan check of its own,
+  // so this is the only gate standing between detection and dispatch.
+  if (!isProOrAbove(tenant.plan)) {
+    console.log(`[Notify] BIN sequence alert suppressed for ${tenant.id} — plan '${tenant.plan}' is not Pro/Agency`);
+    return;
+  }
+
+   // ── Cooldown Check (30 دقيقة) ─────────────────────────────────────
+  // tenantData is declared here (function scope), not inside the try block,
+  // because it's read later for the webhook-merge check and the webhookTenant
+  // spread. A `const` declared inside try{} is block-scoped and throws a
+  // ReferenceError once referenced outside — that was silently breaking
+  // webhook delivery and cooldown persistence on every non-suppressed alert.
+  let tenantData = null;
   try {
-    const tenantData = await db.tenant.findUnique({
+    tenantData = await db.tenant.findUnique({
       where:  { id: tenant.id },
       select: { lastAlertSentAt: true, webhookUrl: true, webhookType: true },
     });
@@ -151,6 +168,15 @@ async function notifyBINSequenceAlert(tenant, alert) {
  * @returns {Promise<void>}
  */
 async function notifyPaypalAlert(tenant, alertData) {
+  // Plan gate — must be the FIRST check in this function, before the
+  // risk-tier check and before any cooldown DB query. Defense-in-depth:
+  // risk.js's /enrich call site has no plan check of its own, so this
+  // is the only gate standing between detection and dispatch.
+  if (!isProOrAbove(tenant.plan)) {
+    console.log(`[Notify] PayPal alert suppressed for ${tenant.id} — plan '${tenant.plan}' is not Pro/Agency`);
+    return;
+  }
+
   const { riskScore = 0 } = alertData;
 
   // ── Tier check — suppress low-risk silently ───────────────────────
