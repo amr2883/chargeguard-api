@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: chargeguard-api
+    runtime: docker
+    repo: https://github.com/amr2883/chargeguard-api.git
+    branch: main
+    dockerContext: .
+    dockerfilePath: ./Dockerfile
+    preDeployCommand: "npx prisma db push --skip-generate --accept-data-loss"
+    dockerCommand: "node src/app.js"
+    envVars:
+      - key: DATABASE_URL
+        sync: false
