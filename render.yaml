@@ -6,7 +6,6 @@ services:
     branch: main
     dockerContext: .
     dockerfilePath: ./Dockerfile
-    preDeployCommand: "npx prisma db push --skip-generate --accept-data-loss"
     dockerCommand: "node src/app.js"
     envVars:
       - key: DATABASE_URL
