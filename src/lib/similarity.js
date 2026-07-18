@@ -12,6 +12,8 @@
 // - Used to augment exact matching, not replace it
 
 const { normalizeIP } = require('./ipIntelligence');
+const { maskValue } = require('./utils');
+const logger = require('./logger');
 
 // ─── Levenshtein Distance ─────────────────────────────────────────────────
 // Classic edit distance algorithm
@@ -337,7 +339,7 @@ function buildAddressString(parsed) {
 }
 
 function findSimilarDisputes(currentEmail, currentIP, currentAddress, disputes) {
-  console.log(`[SIMILARITY] findSimilarDisputes called with email=${currentEmail}, ip=${currentIP}, disputes.length=${disputes.length}`);
+  logger.debug({ module: 'similarity', email: maskValue('EMAIL', currentEmail), ip: maskValue('IP', currentIP), disputesCount: disputes.length }, 'findSimilarDisputes called');
   const results = {
     similarEmail: [],
     similarIP:    [],

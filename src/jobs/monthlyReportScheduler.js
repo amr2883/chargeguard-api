@@ -31,6 +31,7 @@
 // We do NOT import db.js — prisma always comes from the caller (app.js).
 const { buildMonthlyReportData }  = require('../lib/reportDataService');
 const { sendMonthlyReportEmail }  = require('../lib/email');
+const { acquireLock }             = require('../lib/distributedLock');
 
 // ─── Tuneable Constants ──────────────────────────────────────────────────────
 // Thought: group every magic number here so ops can tune without reading logic.
@@ -114,6 +115,12 @@ async function runMonthlyReportCheck(prisma) {
 
   // ── Derive report period (always previous month) ─────────────────────────
   const { reportMonth, reportYear } = getReportPeriod(now);
+
+  const lock = await acquireLock('scheduler:monthlyReport', 300_000);
+  if (!lock) {
+    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    return;
+  }
 
   console.log(
     `${label} 📊 1st of month, 10:xx UTC — generating ${reportMonth}/${reportYear} reports`

@@ -14,7 +14,7 @@ const prisma = require('./db');
 const { invalidateIPCache } = require('./ipIntelligence');
 const { invalidateEmailCache } = require('./emailIntelligence');
 const logger = require('../lib/logger');
-const { maskDeviceId } = require('../lib/utils');
+const { maskDeviceId, normalizeValue: normalizeEmailShared } = require('../lib/utils');
 // ─── Constants ────────────────────────────────────────────────────────────
 
 // Relation weights — how strongly each connection propagates risk
@@ -69,17 +69,14 @@ function getSecret() {
 function normalizeValue(type, value) {
   if (!value) return "";
   switch (type) {
-    case "EMAIL": {
-      const lower = value.normalize("NFKC").toLowerCase().trim();
-      const [local, domain] = lower.split("@");
-      if (!domain) return lower;
-      const cleanLocal = local.split("+")[0];
-      const gmailDomains = ["gmail.com", "googlemail.com"];
-      const finalLocal = gmailDomains.includes(domain)
-        ? cleanLocal.replace(/\./g, "")
-        : cleanLocal;
-      return `${finalLocal}@${domain}`;
-    }
+    case "EMAIL":
+      // L1 fix: delegate to the single shared implementation in utils.js
+      // instead of maintaining a second, independently-drifting copy.
+      // utils.js's EMAIL case also canonicalizes googlemail.com -> gmail.com,
+      // which this inline version previously omitted, causing
+      // a.b@googlemail.com and ab@gmail.com to hash to different
+      // IdentityNode rows for what is the same real-world identity.
+      return normalizeEmailShared("EMAIL", value);
     case "IP":
       return value.trim();
     case "DEVICE":
@@ -351,10 +348,19 @@ async function buildGraphFromOrder
     }
 
     // ─── Upsert anchor node (DEVICE) — بعد الـ rate limit check ─────
-       const deviceNode = await upsertNode(merchantId, "DEVICE", deviceId, fingerprintTiers);
-    logger.debug(`[GRAPH] buildGraphFromOrder: Failed to create deviceNode. Exiting.`);
+    const deviceNode = await upsertNode(merchantId, "DEVICE", deviceId, fingerprintTiers);
+
+    // Same guard pattern as getConnectedRisk: upsertNode's catch-fallback
+    // (prisma.identityNode.findFirst) can legitimately return null. Without
+    // this check, the next line's property access throws a TypeError that's
+    // swallowed by the outer generic catch, silently skipping graph
+    // construction for this order with no clear signal of the root cause.
+    if (!deviceNode) {
+      logger.warn({ module: 'identityGraph', deviceMasked: maskDeviceId(deviceId) }, 'buildGraphFromOrder: Failed to create/find deviceNode. Exiting.');
+      return;
+    }
     logger.debug(`[GRAPH] buildGraphFromOrder: deviceNode created with id=${deviceNode.id}`);
-  logger.debug(`[GRAPH] buildGraphFromOrder: deviceNode found. Current fraudEvents=${deviceNode.fraudEvents}`);
+    logger.debug(`[GRAPH] buildGraphFromOrder: deviceNode found. Current fraudEvents=${deviceNode.fraudEvents}`);
 
     // 2. Upsert connected nodes and create edges
     const connections = [
@@ -895,18 +901,38 @@ async function markOrderAsFraud(order, merchantId, patternContext = {}) {
 
    const DEVICE_MIN_FRAUD = 2;
 
+    // M7 fix: scale fraudEvents/chargebacks increments by merchantTrust,
+    // mirroring how IdentityEvent.weight already scales by the same value
+    // later in this function. Computed here — before the transaction —
+    // from merchantTrustData already fetched in Batch 1, so the counter
+    // increments below and the IdentityEvent weight recorded afterward
+    // are guaranteed to use one single, consistent trust value for this
+    // call rather than two independently-computed ones.
+    //
+    // Math.max(1, Math.round(...)) rather than a raw fractional or
+    // possibly-zero value: identityNode.fraudEvents/chargebacks are
+    // integer counters read directly by computeNodeRisk(), so the
+    // increment must be a whole number. Flooring/rounding to 0 for a
+    // very low-trust tenant (e.g. a brand-new merchant with trust ~0.05)
+    // would let a fabricated report be silently ignored rather than
+    // merely down-weighted — the goal here is to blunt a low-trust
+    // tenant's influence on the shared graph, not to give it a free
+    // pass to submit fraud reports with zero effect.
+    const merchantTrust = computeMerchantTrust(merchantTrustData);
+    const fraudIncrement = Math.max(1, Math.round(merchantTrust));
+
     await prisma.$transaction(async (tx) => {
       // Device node
       await tx.identityNode.update({
         where: { id: deviceNode.id },
-        data: { fraudEvents: { increment: 1 }, chargebacks: { increment: 1 } },
+        data: { fraudEvents: { increment: fraudIncrement }, chargebacks: { increment: fraudIncrement } },
       });
 
       // Connected nodes — bulk update
       if (connectedNodeIds.length > 0) {
         await tx.identityNode.updateMany({
           where: { id: { in: connectedNodeIds } },
-          data: { fraudEvents: { increment: 1 }, chargebacks: { increment: 1 } },
+          data: { fraudEvents: { increment: fraudIncrement }, chargebacks: { increment: fraudIncrement } },
         });
       }
 
@@ -916,8 +942,8 @@ if (globalNode) {
   await tx.identityNode.update({
     where: { id: globalNode.id },
     data: {
-      fraudEvents: { increment: 1 },
-      chargebacks: { increment: 1 },
+      fraudEvents: { increment: fraudIncrement },
+      chargebacks: { increment: fraudIncrement },
       totalTransactions: { increment: 1 },
       lastSeen: new Date(),
     },
@@ -938,8 +964,12 @@ if (globalNode) {
     // ─── Batch 3: Identity Event + Computed Risk ──────────────────────
     // منفصلة عن الـ transaction الأولى — لأنها تعتمد على الـ recentEvents
     try {
-      const merchantTrust = computeMerchantTrust(merchantTrustData);
-
+      // merchantTrust is already computed above (before the transaction)
+      // and reused here as-is, so IdentityEvent.weight and the fraud
+      // counter increments applied earlier are guaranteed to reflect the
+      // exact same trust value for this call — not two independently
+      // computed numbers that could drift apart if merchantTrustData
+      // were re-fetched or recomputed differently at two points in time.
       const [, recentEvents] = await Promise.all([
         prisma.identityEvent.create({
           data: {

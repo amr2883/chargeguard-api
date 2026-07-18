@@ -1,10 +1,398 @@
 <?php
+
+defined('ABSPATH') || exit;
+
+/**
+ * True if $host is a literal private/reserved IP, or a hostname that
+ * resolves to one — guards ajax_webhook_save() against SSRF, including
+ * DNS-rebinding style attacks where the hostname itself looks public.
+ */
+/**
+ * @param string      $host
+ * @param string|null &$resolved_ip Output parameter (by reference, optional).
+ *                                  On return, set to the IP address this
+ *                                  host was validated against (whether the
+ *                                  host was itself a literal IP, or was
+ *                                  resolved via gethostbyname()), or ''
+ *                                  if resolution failed. Callers that
+ *                                  need to forward the validated IP to
+ *                                  another system (see ajax_webhook_save())
+ *                                  should capture this rather than
+ *                                  re-resolving the host a second time —
+ *                                  a second lookup could itself return a
+ *                                  different address than the one just
+ *                                  validated here, reopening a small
+ *                                  version of the same TOCTOU gap this
+ *                                  value exists to help close downstream.
+ */
+function chargeguard_host_is_private_or_reserved($host, &$resolved_ip = null) {
+    $host = trim($host, '[]'); // strip IPv6 literal brackets, if present
+    $resolved_ip = '';
+
+    // IPv4-mapped IPv6 unwrap (::ffff:a.b.c.d, RFC 4291 §2.5.5.2). PHP's
+    // FILTER_FLAG_NO_PRIV_RANGE / FILTER_FLAG_NO_RES_RANGE checks below
+    // are applied against $host as an IPv6-format string when it
+    // contains colons, and whether that correctly recognizes an
+    // embedded IPv4 private/reserved address (e.g. ::ffff:169.254.169.254
+    // for the cloud metadata endpoint) is inconsistent across PHP
+    // versions/builds — this is a known SSRF bypass vector for exactly
+    // this class of target. An IPv4-mapped IPv6 address IS the same
+    // network address as its IPv4 form (not merely related to it), so
+    // unwrapping it here and letting every check below operate on the
+    // plain IPv4 dotted-quad — which PHP's range flags handle reliably
+    // — closes the ambiguity rather than trying to special-case around
+    // it downstream.
+    $packed = @inet_pton($host);
+    if ($packed !== false && strlen($packed) === 16 && substr($packed, 0, 10) === str_repeat("\x00", 10) && substr($packed, 10, 2) === "\xff\xff") {
+        $ipv4_binary = substr($packed, 12, 4);
+        $unwrapped   = inet_ntop($ipv4_binary);
+        if ($unwrapped !== false) {
+            $host = $unwrapped;
+        }
+    }
+
+    if (filter_var($host, FILTER_VALIDATE_IP)) {
+        $ip = $host;
+    } else {
+        if (strtolower($host) === 'localhost') {
+            return true;
+        }
+        // PERFORMANCE NOTE (Low severity, accepted for v1.0):
+        // gethostbyname() is a blocking, synchronous call with no built-in
+        // timeout. A slow, unresponsive, or malicious DNS server for this
+        // hostname can tie up this PHP-FPM worker for an unbounded duration
+        // (up to max_execution_time). Accepted as-is because:
+        //   - This runs only inside ajax_webhook_save(), which is admin-only
+        //     and capability-gated (manage_woocommerce) — not reachable by
+        //     storefront visitors and not on the checkout hot path.
+        //   - It fires rarely (a merchant saving/changing a webhook URL),
+        //     not on every request.
+        //   - PHP has no clean, universal async DNS primitive: pcntl_alarm()
+        //     is frequently unavailable on shared/managed FPM hosts, and
+        //     shelling out to an external resolver with a timeout trades this
+        //     narrow risk for a new exec()/argument-escaping dependency that
+        //     is itself often disabled on hardened hosts. Neither is a net
+        //     improvement over the status quo.
+        // If this needs tightening in a future hardening pass, the correct
+        // fix is architectural, not a timeout hack: move webhook-URL
+        // validation into a WP-Cron job or background queue so any DNS
+        // slowdown is isolated from the web request entirely, rather than
+        // trying to force a timeout onto PHP's native synchronous resolver.
+        $resolved = gethostbyname($host);
+        // gethostbyname() returns the input unchanged on failure to resolve.
+        if ($resolved === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
+            return true; // couldn't resolve — fail closed
+        }
+        $ip = $resolved;
+
+        // A hostname's A record passing the check below says nothing
+        // about its AAAA record. An attacker controlling DNS for the
+        // host can publish a public A record (which will pass) next to
+        // a private/link-local AAAA record; if the backend's HTTP
+        // client later prefers or falls back to IPv6 when delivering
+        // the webhook, it connects to an address this function never
+        // inspected. Every resolvable address family must be checked,
+        // not just whichever one gethostbyname() happens to return.
+        if (function_exists('dns_get_record')) {
+            $aaaa_records = @dns_get_record($host, DNS_AAAA);
+            if (is_array($aaaa_records)) {
+                foreach ($aaaa_records as $record) {
+                    if (empty($record['ipv6'])) {
+                        continue;
+                    }
+                    $aaaa_is_private = filter_var(
+                        $record['ipv6'],
+                        FILTER_VALIDATE_IP,
+                        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+                    ) === false;
+                    if ($aaaa_is_private) {
+                        return true; // private/reserved AAAA record — reject regardless of the A record
+                    }
+                }
+            }
+        } else {
+            static $ipv6_ssrf_check_warning_logged = false;
+            if (!$ipv6_ssrf_check_warning_logged) {
+                error_log('[ChargeGuard] dns_get_record() is unavailable on this host — webhook URL validation cannot inspect AAAA (IPv6) records for SSRF and is falling back to IPv4-only (gethostbyname()) validation.');
+                $ipv6_ssrf_check_warning_logged = true;
+            }
+        }
+    }
+
+    $resolved_ip = $ip;
+
+    return filter_var(
+        $ip,
+        FILTER_VALIDATE_IP,
+        FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
+    ) === false;
+}
+
+/**
+ * ChargeGuard - Secret Storage Encryption
+ *
+ * Brings third-party secrets (Stripe/PayPal) up to the same at-rest
+ * protection standard already applied to chargeguard_api_key.
+ *
+ * AES-256-GCM (authenticated encryption) with a key derived from
+ * WordPress's own wp_salt('auth') — no new secret material needs to be
+ * generated, stored, or rotated by the plugin itself. wp_salt() already
+ * falls back to a DB-stored value when AUTH_KEY/AUTH_SALT constants are
+ * undefined, so this works on every WP install with zero configuration.
+ */
+class ChargeGuard_Secret_Crypto {
+
+    const PREFIX = 'cgenc1:'; // format + version marker
+
+    /**
+     * Derive the AES-256-GCM key.
+     *
+     * If CHARGEGUARD_ENCRYPTION_KEY is defined (wp-config.php or an OS
+     * environment variable read into a constant), it is used exclusively
+     * — this keeps key material outside the database entirely, even on
+     * hosts that never set AUTH_KEY/AUTH_SALT.
+     *
+     * Otherwise falls back to wp_salt('auth'), matching the original
+     * behavior. This is safe when AUTH_KEY/AUTH_SALT are hardcoded in
+     * wp-config.php, but on installs where WordPress generated and
+     * stored those salts in wp_options itself, the key material and the
+     * ciphertext live in the same database — see
+     * ChargeGuard_Admin_Settings::maybe_show_key_derivation_notice().
+     */
+    private static function get_key() {
+        if (defined('CHARGEGUARD_ENCRYPTION_KEY') && CHARGEGUARD_ENCRYPTION_KEY) {
+            return hash('sha256', CHARGEGUARD_ENCRYPTION_KEY, true);
+        }
+        return self::get_legacy_key();
+    }
+
+    /**
+     * The pre-CHARGEGUARD_ENCRYPTION_KEY derivation, kept as its own
+     * method so decrypt() can fall back to it once, transparently, when
+     * migrating existing ciphertext to a newly-defined
+     * CHARGEGUARD_ENCRYPTION_KEY (see decrypt()).
+     */
+    private static function get_legacy_key() {
+        return hash('sha256', wp_salt('auth'), true); // 32 raw bytes
+    }
+
+    public static function encrypt($plaintext) {
+        if (!is_string($plaintext) || $plaintext === '') {
+            return $plaintext;
+        }
+        $key = self::get_key();
+        $iv  = random_bytes(12); // GCM standard nonce size
+        $tag = '';
+        $ciphertext = openssl_encrypt($plaintext, 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $iv, $tag);
+        if ($ciphertext === false) {
+            // Fail loud, never silently fall back to storing plaintext
+            // mislabeled as encrypted.
+            return false;
+        }
+        return self::PREFIX . base64_encode($iv . $tag . $ciphertext);
+    }
+
+    /**
+     * @param string $stored
+     * @param bool   $migrated Set true (by reference) if this value only
+     *                         decrypted successfully under the legacy
+     *                         wp_salt('auth')-derived key, meaning the
+     *                         caller should re-encrypt it under the
+     *                         current key (see chargeguard_get_secret_option()).
+     */
+    public static function decrypt($stored, &$migrated = false) {
+        $migrated = false;
+        if (!is_string($stored) || $stored === '') {
+            return $stored;
+        }
+        if (strpos($stored, self::PREFIX) !== 0) {
+            return $stored; // legacy plaintext, not our format
+        }
+        $raw = base64_decode(substr($stored, strlen(self::PREFIX)), true);
+        if ($raw === false || strlen($raw) < 12 + 16) {
+            return false;
+        }
+        $iv         = substr($raw, 0, 12);
+        $tag        = substr($raw, 12, 16);
+        $ciphertext = substr($raw, 28);
+
+        $plaintext = openssl_decrypt($ciphertext, 'aes-256-gcm', self::get_key(), OPENSSL_RAW_DATA, $iv, $tag);
+        if ($plaintext !== false) {
+            return $plaintext;
+        }
+
+        // Current key failed. If CHARGEGUARD_ENCRYPTION_KEY is now
+        // configured, this ciphertext may predate that change and still
+        // be under the old wp_salt('auth')-derived key — try that once
+        // as a migration path rather than treating it as corrupt.
+        if (defined('CHARGEGUARD_ENCRYPTION_KEY') && CHARGEGUARD_ENCRYPTION_KEY) {
+            $legacy_plaintext = openssl_decrypt($ciphertext, 'aes-256-gcm', self::get_legacy_key(), OPENSSL_RAW_DATA, $iv, $tag);
+            if ($legacy_plaintext !== false) {
+                $migrated = true;
+                return $legacy_plaintext;
+            }
+        }
+
+        return false;
+        // returns false on authentication failure under every key we
+        // tried (tampered/corrupt data, or a changed wp_salt with no
+        // CHARGEGUARD_ENCRYPTION_KEY fallback available) — never returns
+        // garbage plaintext.
+    }
+
+    public static function is_encrypted($value) {
+        return is_string($value) && strpos($value, self::PREFIX) === 0;
+    }
+}
+
+/**
+ * Transparent get/update wrappers for third-party secret options.
+ * Call sites use these exactly like get_option()/update_option() —
+ * encryption/decryption is invisible to the rest of the codebase.
+ *
+ * Self-healing migration: a legacy plaintext value is still returned
+ * correctly on read, and is opportunistically re-saved encrypted at
+ * that point — no separate upgrade routine needed.
+ */
+function chargeguard_get_secret_option($name, $default = '') {
+    static $cache = [];
+    if (array_key_exists($name, $cache)) {
+        return $cache[$name];
+    }
+
+    $stored = get_option($name, $default);
+
+    if (!is_string($stored) || $stored === '') {
+        $cache[$name] = $stored;
+        return $stored;
+    }
+
+    if (ChargeGuard_Secret_Crypto::is_encrypted($stored)) {
+        $migrated  = false;
+        $plaintext = ChargeGuard_Secret_Crypto::decrypt($stored, $migrated);
+        if ($plaintext === false) {
+            chargeguard_flag_secret_decrypt_failure($name);
+            $cache[$name] = '';
+            return '';
+        }
+        chargeguard_clear_secret_decrypt_failure($name);
+        if ($migrated) {
+            // Was still encrypted under the legacy wp_salt('auth')-derived
+            // key; re-save under the current (CHARGEGUARD_ENCRYPTION_KEY)
+            // key now that we've proven we can read it.
+            chargeguard_update_secret_option($name, $plaintext);
+            error_log('[ChargeGuard] Migrated option ' . $name . ' from wp_salt-derived key to CHARGEGUARD_ENCRYPTION_KEY.');
+        }
+        $cache[$name] = $plaintext;
+        return $plaintext;
+    }
+
+    // Legacy plaintext — self-heal in place; still return plaintext now.
+    chargeguard_update_secret_option($name, $stored);
+    $cache[$name] = $stored;
+    return $stored;
+}
+
+/**
+ * Record a persistent, merchant-visible flag when a secret fails to
+ * decrypt on read (see chargeguard_get_secret_option()). Mirrors the
+ * existing chargeguard_signing_self_test option pattern: a single
+ * source-of-truth option that admin_notices checks, cleared the moment
+ * the same option decrypts successfully again (see
+ * chargeguard_clear_secret_decrypt_failure()). update_option() is used
+ * rather than a transient for this flag — exactly like
+ * chargeguard_signing_self_test — because a transient would silently
+ * expire and make a still-broken config look "fixed" to the merchant
+ * purely because time passed, which is the wrong failure mode for a
+ * security notice.
+ *
+ * A short-lived transient is used separately, only to throttle the
+ * error_log write below, so a broken secret being read many times per
+ * minute (e.g. by risk-evaluation code on every order) doesn't flood
+ * the log.
+ */
+function chargeguard_flag_secret_decrypt_failure($name) {
+    // Gate the update_option() write behind the same hourly throttle
+    // that already protects the error_log() call below. Without this,
+    // a persistent decrypt failure (e.g. post-migration salt change with
+    // no CHARGEGUARD_ENCRYPTION_KEY defined) causes a full get_option()/
+    // update_option() round trip on wp_options for every single read
+    // attempt — every checkout, admin page load, and AJAX request that
+    // touches the affected secret — even though the merchant-visible
+    // notice only needs the option written once per failure window.
+    // Checking the transient first, before any DB write, keeps both
+    // throttles synchronized on the exact same one-per-hour cadence.
+    $log_throttle_key = 'chargeguard_secret_decrypt_logged_' . $name;
+    if (get_transient($log_throttle_key)) {
+        return;
+    }
+
+    $failures = get_option('chargeguard_secret_decrypt_failures', []);
+    if (!is_array($failures)) {
+        $failures = [];
+    }
+    $failures[$name] = time();
+    update_option('chargeguard_secret_decrypt_failures', $failures);
+
+    error_log('[ChargeGuard] Failed to decrypt option ' . $name . ' — data may be corrupt or wp_salt() has changed.');
+    set_transient($log_throttle_key, 1, HOUR_IN_SECONDS);
+}
+
+/**
+ * Clear a previously-flagged decrypt failure once the same option is
+ * read successfully again (e.g. after the merchant re-enters the
+ * credential and it round-trips through the current wp_salt()).
+ */
+function chargeguard_clear_secret_decrypt_failure($name) {
+    $failures = get_option('chargeguard_secret_decrypt_failures', []);
+    if (!is_array($failures) || !isset($failures[$name])) {
+        return;
+    }
+    unset($failures[$name]);
+    update_option('chargeguard_secret_decrypt_failures', $failures);
+}
+
+function chargeguard_update_secret_option($name, $value) {
+    if (!is_string($value) || $value === '') {
+        return update_option($name, $value);
+    }
+    $encrypted = ChargeGuard_Secret_Crypto::encrypt($value);
+    if ($encrypted === false) {
+        error_log('[ChargeGuard] Failed to encrypt option ' . $name . ' — refusing to store plaintext.');
+        return false;
+    }
+    return update_option($name, $encrypted);
+}
+
 class ChargeGuard_Admin_Settings {
+
+    /**
+     * TTL for the chargeguard_merchant_plan_cache transient (see
+     * settings_page() and merchant_is_pro_or_above_cached()). Both call
+     * sites read/write the SAME transient key and must use the SAME TTL —
+     * defined once here rather than as two independent literals, so they
+     * cannot silently drift out of sync (the class of bug already flagged
+     * elsewhere in this codebase as CWE-1059).
+     *
+     * 60 seconds (down from a prior 5 minutes) bounds how long the WP
+     * admin UI can show a stale plan tier after a backend-side upgrade/
+     * downgrade. This is a UI-freshness knob only — every actual
+     * entitlement decision (PayPal alert delivery, quota enforcement,
+     * plan-gated API responses) is re-checked against the backend at the
+     * point of use and is never affected by this cache.
+     */
+    const PLAN_CACHE_TTL = 60; // seconds
 
     public function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
+        add_action('admin_enqueue_scripts', [$this, 'enqueue_admin_assets']);
         add_action('admin_init', [$this, 'register_settings']);
+        add_action('admin_notices', [$this, 'maybe_show_signing_self_test_notice']);
+        add_action('admin_notices', [$this, 'maybe_show_secret_decrypt_notice']);
+        add_action('admin_notices', [$this, 'maybe_show_key_derivation_notice']);
+        add_action('admin_notices', [$this, 'maybe_show_turnstile_notice']);
         add_action('wp_ajax_chargeguard_connect', [$this, 'ajax_connect']);
+        add_action('wp_ajax_chargeguard_connect_poll', [$this, 'ajax_connect_poll']);
         add_action('wp_ajax_chargeguard_disconnect', [$this, 'ajax_disconnect']);
         add_action('wp_ajax_chargeguard_verify_key',  [$this, 'ajax_verify_key']);
         add_action('wp_ajax_chargeguard_whitelist_get',    [$this, 'ajax_whitelist_get']);
@@ -20,10 +408,31 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_geo_override_save',     [$this, 'ajax_geo_override_save']);
         add_action('wp_ajax_chargeguard_paypal_save',           [$this, 'ajax_paypal_save']);
         add_action('wp_ajax_chargeguard_paypal_test',           [$this, 'ajax_paypal_test']);
+        add_action('wp_ajax_chargeguard_stripe_save',           [$this, 'ajax_stripe_save']);
+        add_action('wp_ajax_chargeguard_stripe_test',           [$this, 'ajax_stripe_test']);
+        add_action('wp_ajax_chargeguard_stores_get',            [$this, 'ajax_stores_get']);
+        add_action('wp_ajax_chargeguard_store_add',             [$this, 'ajax_store_add']);
+        add_action('wp_ajax_chargeguard_store_rename',          [$this, 'ajax_store_rename']);
+        add_action('wp_ajax_chargeguard_store_deactivate',      [$this, 'ajax_store_deactivate']);
+        add_action('wp_ajax_chargeguard_store_reactivate',      [$this, 'ajax_store_reactivate']);
+        add_action('wp_ajax_chargeguard_check_for_updates',     [$this, 'ajax_check_for_updates']);
+
+        // Align the Settings API's save-time capability check with the
+        // capability actually required to reach this settings page
+        // (manage_woocommerce, set on add_submenu_page() in
+        // add_admin_menu()). Without this, register_setting() calls in
+        // register_settings() below default to requiring manage_options
+        // when the form POSTs to options.php — a capability Shop
+        // Managers (manage_woocommerce but not manage_options) do not
+        // have — even though the page itself already let them in. See
+        // the option_page_capability_{$option_page} filter in
+        // WordPress core's wp-admin/options.php.
+        add_filter('option_page_capability_chargeguard_firewall_settings', fn() => 'manage_woocommerce');
+        add_filter('option_page_capability_chargeguard_autoblock_settings', fn() => 'manage_woocommerce');
     }
 
     public function add_admin_menu() {
-        add_submenu_page(
+        $this->settings_page_hook = add_submenu_page(
             'woocommerce',
             'ChargeGuard',
             'ChargeGuard',
@@ -33,13 +442,106 @@ class ChargeGuard_Admin_Settings {
         );
     }
 
+    /**
+     * The hook suffix WordPress assigns to this settings page, captured
+     * from add_submenu_page()'s own return value rather than guessed —
+     * since this page is a WooCommerce submenu, its real hook suffix is
+     * `woocommerce_page_chargeguard-settings`, not the more commonly
+     * assumed `toplevel_page_...` pattern used by top-level menu pages.
+     * Using the actual returned value avoids that mismatch entirely.
+     *
+     * @var string|false|null
+     */
+    private $settings_page_hook = null;
+
+    /**
+     * Enqueue the settings page's CSS/JS only on the ChargeGuard settings
+     * screen — never plugin-wide — and only as properly registered
+     * assets, so the admin area works under a strict Content-Security-
+     * Policy without needing 'unsafe-inline'.
+     *
+     * @param string $hook_suffix The current admin page's hook suffix,
+     *                            as passed by the admin_enqueue_scripts hook.
+     */
+    public function enqueue_admin_assets($hook_suffix) {
+        if (!$this->settings_page_hook || $hook_suffix !== $this->settings_page_hook) {
+            return;
+        }
+
+        $version = defined('CHARGEGUARD_VERSION') ? CHARGEGUARD_VERSION : '1.0.0';
+
+        wp_enqueue_style(
+            'chargeguard-admin',
+            plugin_dir_url(__FILE__) . '../assets/css/admin.css',
+            [],
+            $version
+        );
+
+        wp_enqueue_script(
+            'chargeguard-admin-settings',
+            plugin_dir_url(__FILE__) . '../assets/js/admin-settings.js',
+            ['jquery'],
+            $version,
+            true
+        );
+
+        $current_admin_ip = '';
+        if (class_exists('ChargeGuard_Dynamic_Firewall') && method_exists('ChargeGuard_Dynamic_Firewall', 'get_client_ip')) {
+            $current_admin_ip = ChargeGuard_Dynamic_Firewall::get_client_ip();
+        } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
+            $current_admin_ip = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
+        }
+
+        wp_localize_script('chargeguard-admin-settings', 'chargeguardAdmin', [
+            // Per-action nonces (WordPress Plugin Security Handbook nonce
+            // guidance): each state-changing AJAX action gets its own
+            // nonce action string, so a nonce leaked for one action
+            // (referrer headers, browser extensions, server/proxy logs)
+            // cannot be replayed against a higher-value action like
+            // disconnecting the store or changing payment credentials.
+            // Read-only/test actions continue to share 'chargeguard_connect_nonce'
+            // (kept under its original name for backward compatibility)
+            // since leaking one of those only exposes read access the
+            // requesting admin already has.
+            'nonce'             => wp_create_nonce('chargeguard_connect_nonce'), // shared: read-only actions
+            'nonces'            => [
+                'connect'         => wp_create_nonce('chargeguard_connect_action_nonce'),
+                'disconnect'      => wp_create_nonce('chargeguard_disconnect_nonce'),
+                'whitelistAdd'    => wp_create_nonce('chargeguard_whitelist_add_nonce'),
+                'whitelistDelete' => wp_create_nonce('chargeguard_whitelist_delete_nonce'),
+                'blacklistAdd'    => wp_create_nonce('chargeguard_blacklist_add_nonce'),
+                'blacklistDelete' => wp_create_nonce('chargeguard_blacklist_delete_nonce'),
+                'webhookSave'     => wp_create_nonce('chargeguard_webhook_save_nonce'),
+                'paypalSave'      => wp_create_nonce('chargeguard_paypal_save_nonce'),
+                'stripeSave'      => wp_create_nonce('chargeguard_stripe_save_nonce'),
+                'geoOverrideSave' => wp_create_nonce('chargeguard_geo_override_save_nonce'),
+                'storeAdd'        => wp_create_nonce('chargeguard_store_add_nonce'),
+                'storeRename'     => wp_create_nonce('chargeguard_store_rename_nonce'),
+                'storeDeactivate' => wp_create_nonce('chargeguard_store_deactivate_nonce'),
+            ],
+            'currentIp'         => $current_admin_ip,
+            'merchantId'        => get_option('chargeguard_merchant_id'),
+            'isConnected'       => (bool) chargeguard_get_secret_option('chargeguard_api_key'),
+            'hasPendingConnect' => (bool) get_transient('chargeguard_pending_connect'),
+        ]);
+    }
+
     public function register_settings() {
         register_setting('chargeguard_firewall_settings', 'chargeguard_enable_firewall', 'intval');
         register_setting('chargeguard_firewall_settings', 'chargeguard_firewall_block_duration', 'intval');
-        // Trust Badge options
-        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_enabled',  'sanitize_text_field' );
-        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_location', 'sanitize_text_field' );
-        register_setting( 'chargeguard_badge_settings', 'chargeguard_badge_color',    'sanitize_text_field' );
+        register_setting('chargeguard_firewall_settings', 'chargeguard_trust_proxy_headers', 'intval');
+        
+        // Auto-block on fraud decision
+        register_setting( 'chargeguard_autoblock_settings', 'chargeguard_auto_block', [
+            'type'              => 'string',
+            'sanitize_callback' => function( $value ) { return $value === 'yes' ? 'yes' : 'no'; },
+            'default'           => 'no',
+        ] );
+        register_setting( 'chargeguard_autoblock_settings', 'chargeguard_block_min_amount', [
+            'type'              => 'number',
+            'sanitize_callback' => 'floatval',
+            'default'           => 0,
+        ] );
     }
     public function ajax_verify_key() {
         check_ajax_referer('chargeguard_connect_nonce', 'nonce');
@@ -48,31 +550,177 @@ class ChargeGuard_Admin_Settings {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
 
-        $api_key = get_option('chargeguard_api_key');
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
         if (!$api_key) {
             wp_send_json_error(['message' => 'No API key found.']);
         }
 
-        $response = wp_remote_get('https://chargeguard-api.onrender.com/api/auth/verify', [
-            'timeout' => 15,
-            'headers' => ['x-api-key' => $api_key],
-        ]);
+        // Migrated off the raw wp_remote_get()/GET /auth/verify path onto
+        // the same ChargeGuard_API_Client::verify_key() every other
+        // consumer of this check already uses (settings_page()'s
+        // plan-gating call). This calls the richer GET /risk/verify-key
+        // endpoint and removes the last hardcoded backend URL/endpoint
+        // pair in this file — consistency with every other migrated
+        // ajax_* handler, not just this one.
+        $result = (new ChargeGuard_API_Client())->verify_key();
 
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
 
-        $code = wp_remote_retrieve_response_code($response);
+        wp_send_json_success(['message' => '✓ API key is valid.']);
+    }
 
-        if ($code === 200) {
-            wp_send_json_success(['message' => '✓ API key is valid.']);
-        } else {
-            wp_send_json_error(['message' => 'Invalid API key. Please reconnect your store.']);
+    public function ajax_check_for_updates() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
+        if (!class_exists('ChargeGuard_Plugin_Updater')) {
+            wp_send_json_error(['message' => 'Updater not available.']);
+        }
+        ChargeGuard_Plugin_Updater::force_check();
+        wp_send_json_success(['message' => 'Checked for updates.']);
+    }
+
+    /**
+     * Show a persistent admin notice if the post-connect signing self-test
+     * failed, so the merchant isn't relying solely on the one-time message
+     * shown at the moment they clicked Connect.
+     */
+    public function maybe_show_signing_self_test_notice() {
+        if (!is_admin() || !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        if (!chargeguard_get_secret_option('chargeguard_api_key')) {
+            return; // Not connected — nothing to warn about.
+        }
+        $status = get_option('chargeguard_signing_self_test', []);
+        if (empty($status) || ($status['status'] ?? '') !== 'failed') {
+            return;
+        }
+        ?>
+        <div class="notice notice-error">
+            <p>
+                <strong>ChargeGuard:</strong>
+                <?php esc_html_e('Your store is connected, but ChargeGuard could not verify that request signing is working correctly. Fraud evaluations may be silently rejected by the server. Please disconnect and reconnect your store; if the problem persists, contact ChargeGuard support.', 'chargeguard-woocommerce'); ?>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Show a persistent admin notice if any Stripe/PayPal secret failed
+     * to decrypt on last read (see chargeguard_get_secret_option()).
+     * Mirrors maybe_show_signing_self_test_notice(): a single option
+     * (chargeguard_secret_decrypt_failures) is the source of truth, so
+     * the notice disappears automatically the moment the merchant
+     * re-enters a working credential — no separate "resolved" action
+     * needed.
+     */
+    public function maybe_show_secret_decrypt_notice() {
+        if (!is_admin() || !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        $failures = get_option('chargeguard_secret_decrypt_failures', []);
+        if (empty($failures) || !is_array($failures)) {
+            return;
+        }
+
+        $labels = [
+            'chargeguard_stripe_secret_key'      => __('Stripe secret key', 'chargeguard-woocommerce'),
+            'chargeguard_stripe_webhook_secret'  => __('Stripe webhook signing secret', 'chargeguard-woocommerce'),
+            'chargeguard_paypal_client_secret'   => __('PayPal client secret', 'chargeguard-woocommerce'),
+            'chargeguard_api_key'                => __('ChargeGuard API key', 'chargeguard-woocommerce'),
+            'chargeguard_webhook_secret'         => __('ChargeGuard webhook secret', 'chargeguard-woocommerce'),
+            'chargeguard_api_signing_secret'     => __('ChargeGuard signing secret', 'chargeguard-woocommerce'),
+        ];
+
+        $broken = [];
+        foreach (array_keys($failures) as $option_name) {
+            $broken[] = $labels[$option_name] ?? $option_name;
+        }
+        $broken_list = implode(', ', $broken);
+        ?>
+        <div class="notice notice-error is-dismissible">
+            <p>
+                <strong>ChargeGuard:</strong>
+                <?php
+                printf(
+                    esc_html__('Your ChargeGuard %s could not be decrypted — this can happen after a site migration or host change that regenerates your WordPress secret keys. Payment protection for the affected gateway is currently disabled. Please re-enter your credentials in the ChargeGuard settings under Stripe/PayPal Integration to restore protection.', 'chargeguard-woocommerce'),
+                    esc_html($broken_list)
+                );
+                ?>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Warn the merchant when the AES-256-GCM key protecting their
+     * Stripe/PayPal/ChargeGuard secrets is derived from a value
+     * WordPress itself stored in wp_options (wp_salt('auth')'s database
+     * fallback), rather than from wp-config.php constants or a dedicated
+     * CHARGEGUARD_ENCRYPTION_KEY. In that configuration, a
+     * database-only compromise exposes both the ciphertext and the key
+     * material together, defeating the purpose of at-rest encryption.
+     *
+     * Silent whenever either escape hatch is in place.
+     */
+    public function maybe_show_key_derivation_notice() {
+        if (!is_admin() || !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        if (defined('AUTH_KEY') && AUTH_KEY) {
+            return; // Salts are hardcoded in wp-config.php — key material isn't in the DB.
+        }
+        if (defined('CHARGEGUARD_ENCRYPTION_KEY') && CHARGEGUARD_ENCRYPTION_KEY) {
+            return; // Merchant has already opted into a DB-independent key.
+        }
+        ?>
+        <div class="notice notice-warning is-dismissible">
+            <p>
+                <strong>ChargeGuard:</strong>
+                <?php esc_html_e('Your site does not have AUTH_KEY/AUTH_SALT hardcoded in wp-config.php, so WordPress generated and stored them in the database itself. Because ChargeGuard encrypts your Stripe/PayPal/API secrets using a key derived from that same value, a database-only compromise (e.g. a leaked backup) could expose both your encrypted secrets and the key needed to decrypt them, together. To fix this, either add AUTH_KEY and AUTH_SALT to wp-config.php, or define a dedicated CHARGEGUARD_ENCRYPTION_KEY constant (a 64-character random hex string) — ChargeGuard will use it automatically and this notice will disappear.', 'chargeguard-woocommerce'); ?>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
+     * Warn the merchant when the Cloudflare Turnstile site key powering the
+     * Connect flow's bot-verification widget is still Cloudflare's public
+     * "always passes" test key (1x00000000000000000000AA). With this key,
+     * the Turnstile widget renders and looks functional, but every
+     * challenge succeeds unconditionally — the Connect flow's first-line
+     * bot mitigation is silently a no-op. See CHARGEGUARD_TURNSTILE_SITE_KEY
+     * in the main plugin file.
+     *
+     * Silent the moment a real site key is defined.
+     */
+    public function maybe_show_turnstile_notice() {
+        if (!is_admin() || !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        if (!defined('CHARGEGUARD_TURNSTILE_SITE_KEY') || CHARGEGUARD_TURNSTILE_SITE_KEY !== '1x00000000000000000000AA') {
+            return; // A real site key is configured — nothing to warn about.
+        }
+        ?>
+        <div class="notice notice-warning is-dismissible">
+            <p>
+                <strong>ChargeGuard:</strong>
+                <?php esc_html_e('The Connect flow is currently using Cloudflare\'s public Turnstile TEST key, which always passes regardless of whether the visitor is a human or a bot — bot protection on the Connect request is not active. To fix this, add your real Turnstile site key to wp-config.php (above the "That\'s all, stop editing!" comment): define(\'CHARGEGUARD_TURNSTILE_SITE_KEY\', \'your_real_site_key_here\'); This notice will disappear automatically once a real key is set.', 'chargeguard-woocommerce'); ?>
+            </p>
+        </div>
+        <?php
     }
 
     public function ajax_connect() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        // Own nonce action — initiating a connect request emails an
+        // address and starts binding this store to a ChargeGuard
+        // account; a nonce that only authorizes read-only status
+        // checks must not also authorize this.
+        check_ajax_referer('chargeguard_connect_action_nonce', 'nonce');
 
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
@@ -81,6 +729,56 @@ class ChargeGuard_Admin_Settings {
         $email = sanitize_email(wp_unslash($_POST['email'] ?? ''));
         if (!is_email($email)) {
             wp_send_json_error(['message' => 'Please enter a valid email address.']);
+        }
+
+        // L2 fix: lightweight per-user transient throttle, matching the
+        // pattern already used in ajax_check_fingerprint() (1 request per
+        // window via get_transient()/set_transient()). This does not
+        // replace the backend's own 15-minute-attempt rate limit — it
+        // exists purely to stop a single WordPress request cycle (e.g. a
+        // compromised Shop Manager account, or a script replaying a
+        // captured nonce) from firing the confirmation email endpoint in
+        // rapid succession before the backend's own limiter is ever
+        // reached. Keyed on the current user ID rather than IP, since
+        // this action already requires an authenticated manage_woocommerce
+        // session — the user ID is the more precise identity for this
+        // action's own throttle.
+        $connect_rl_key = 'cg_connect_rl_' . get_current_user_id();
+        if (get_transient($connect_rl_key)) {
+            wp_send_json_error(['message' => 'Please wait a moment before trying again.']);
+        }
+        set_transient($connect_rl_key, 1, 30);
+
+        // The backend's /connect requires a Cloudflare Turnstile token
+        // proving this request originated from a real browser. This PHP
+        // handler runs server-to-server and cannot solve that challenge
+        // itself — the token is produced by the Turnstile widget rendered
+        // on this settings page (see settings_page()) and relayed here by
+        // the browser, exactly like the email address is.
+        // SECURITY BOUNDARY NOTE (informational finding, pre-launch audit):
+        // The check below confirms the token is PRESENT, not that it is VALID.
+        // This plugin cannot verify Turnstile tokens itself, and must not try to —
+        // that would require the Turnstile *secret* key, which must never be
+        // configured on, stored in, or exposed to WordPress/PHP. WordPress
+        // (plugins, DB backups, hosting-panel access, etc.) is a wider and less
+        // controlled trust boundary than the ChargeGuard backend, so secret
+        // material that gates a security decision stays server-side only —
+        // the same principle already applied to chargeguard_api_signing_secret
+        // and CHARGEGUARD_ENCRYPTION_KEY elsewhere in this file.
+        //
+        // Real verification is the responsibility of the ChargeGuard backend's
+        // POST /api/auth/connect handler, which MUST, on every request:
+        //   1. Call https://challenges.cloudflare.com/turnstile/v0/siteverify
+        //      with this token and the Turnstile secret key.
+        //   2. Check that the response's `success` field is true (and ideally
+        //      that `hostname`/`action` match expectations).
+        //   3. Reject the connect request (do not issue a connectRequestId) if
+        //      verification fails.
+        // If the backend does not do this, Turnstile here provides no real bot
+        // mitigation — it becomes a cosmetic checkbox with no security value.
+        $turnstile_token = sanitize_text_field(wp_unslash($_POST['turnstileToken'] ?? ''));
+        if (!$turnstile_token) {
+            wp_send_json_error(['message' => 'Security check not completed. Please refresh the page and try again.']);
         }
 
         $site_url = get_site_url();
@@ -92,8 +790,9 @@ class ChargeGuard_Admin_Settings {
                 'x-store-domain' => wp_parse_url( home_url(), PHP_URL_HOST ),
             ],
             'body'    => json_encode([
-                'email'   => $email,
-                'siteUrl' => $site_url,
+                'email'          => $email,
+                'siteUrl'        => $site_url,
+                'turnstileToken' => $turnstile_token,
             ]),
         ]);
 
@@ -104,25 +803,137 @@ class ChargeGuard_Admin_Settings {
         $code = wp_remote_retrieve_response_code($response);
         $body = json_decode(wp_remote_retrieve_body($response), true);
 
-        if ($code !== 200) {
-            $msg = $body['error'] ?? 'Connection failed. Please try again.';
-            wp_send_json_error(['message' => $msg]);
+        if ($code === 429) {
+            wp_send_json_error(['message' => $body['error'] ?? 'Too many attempts. Please wait before trying again.']);
         }
 
-        // حفظ كل حاجة تلقائياً
-        update_option('chargeguard_api_key',        sanitize_text_field($body['apiKey']));
-        update_option('chargeguard_merchant_id',    sanitize_text_field($body['merchantId']));
-        update_option('chargeguard_webhook_secret', sanitize_text_field($body['webhookSecret']));
-        update_option('chargeguard_connected_email', sanitize_email($email));
+        if ($code !== 200 || empty($body['connectRequestId']) || !is_string($body['connectRequestId'])) {
+            error_log('ChargeGuard: /auth/connect returned HTTP ' . $code . ' with an unexpected body. Keys present: ' . (is_array($body) ? implode(', ', array_keys($body)) : 'none (body was not valid JSON)'));
+            wp_send_json_error(['message' => 'Connection failed. Please try again.']);
+        }
 
-        // إضافة الـ WooCommerce webhook تلقائياً
+        // Pending — not yet confirmed. Stored as a transient, not an
+        // option, so it naturally expires and vanishes if the merchant
+        // never clicks the email link, tracking the backend's own
+        // 15-minute connect-token window with a small buffer. This also
+        // lets settings_page() detect and resume an in-flight request
+        // across a browser refresh instead of losing all state.
+        //
+        set_transient('chargeguard_pending_connect', [
+            'request_id' => $body['connectRequestId'],
+            'email'      => $email,
+            'issued_at'  => time(),
+        ], 20 * MINUTE_IN_SECONDS);
+
+        wp_send_json_success([
+            'status'           => 'pending',
+            'connectRequestId' => $body['connectRequestId'],
+            'email'            => $email,
+        ]);
+    }
+
+    /**
+     * Polled by the browser (see settings_page() JS) while waiting for
+     * the merchant to click the confirmation link in their email. Mirrors
+     * OAuth 2.0 Device Authorization Grant (RFC 8628) polling semantics
+     * on the client side, matching /connect/status's design on the
+     * backend.
+     */
+    public function ajax_connect_poll() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+
+        $pending = get_transient('chargeguard_pending_connect');
+        if (!$pending || empty($pending['request_id'])) {
+            wp_send_json_error(['status' => 'expired', 'message' => 'No pending connection request found. Please start again.']);
+        }
+
+        $response = wp_remote_get(
+            'https://chargeguard-api.onrender.com/api/auth/connect/status?requestId=' . urlencode($pending['request_id']),
+            ['timeout' => 10]
+        );
+
+        if (is_wp_error($response)) {
+            // Transient network hiccup — keep polling rather than fail
+            // the merchant's connection attempt on one bad check.
+            wp_send_json_success(['status' => 'pending']);
+        }
+
+        $body   = json_decode(wp_remote_retrieve_body($response), true);
+        $status = $body['status'] ?? 'pending';
+
+        if ($status === 'expired') {
+            delete_transient('chargeguard_pending_connect');
+            wp_send_json_success(['status' => 'expired']);
+        }
+
+        if ($status !== 'active') {
+            wp_send_json_success(['status' => 'pending']);
+        }
+
+        $required_keys = ['apiKey', 'merchantId', 'webhookSecret'];
+        $is_valid_body = is_array($body);
+        if ($is_valid_body) {
+            foreach ($required_keys as $key) {
+                if (empty($body[$key]) || !is_string($body[$key])) {
+                    $is_valid_body = false;
+                    break;
+                }
+            }
+        }
+
+        if (!$is_valid_body) {
+            error_log('ChargeGuard: /auth/connect/status returned status=active with an invalid or incomplete body. Keys present: ' . (is_array($body) ? implode(', ', array_keys($body)) : 'none (body was not valid JSON)'));
+            delete_transient('chargeguard_pending_connect');
+            wp_send_json_error(['status' => 'failed', 'message' => 'An unexpected error occurred while connecting to ChargeGuard. Please try again.']);
+        }
+
+        chargeguard_update_secret_option('chargeguard_api_key', sanitize_text_field($body['apiKey']));
+        update_option('chargeguard_merchant_id',    sanitize_text_field($body['merchantId']));
+        chargeguard_update_secret_option('chargeguard_webhook_secret', sanitize_text_field($body['webhookSecret']));
+        update_option('chargeguard_connected_email', sanitize_email($pending['email']));
+
+        // No separate api_signing_secret — the backend was never built to
+        // accept or confirm one, so signing uses webhookSecret exclusively
+        // (see class-api-client.php generate_hmac()). This delete is
+        // defensive cleanup for any install that still has a leftover
+        // value from before this cleanup.
+        delete_option('chargeguard_api_signing_secret');
+
         $this->register_woocommerce_webhook($body['webhookSecret']);
 
-        wp_send_json_success(['email' => $email]);
+        $self_test_client = new ChargeGuard_API_Client();
+        $self_test_result = $self_test_client->self_test();
+
+        delete_transient('chargeguard_pending_connect');
+
+        if (is_wp_error($self_test_result)) {
+            update_option('chargeguard_signing_self_test', [
+                'status'  => 'failed',
+                'message' => $self_test_result->get_error_message(),
+                'time'    => time(),
+            ]);
+            error_log('ChargeGuard: post-connect signing self-test failed: ' . $self_test_result->get_error_message());
+            wp_send_json_success([
+                'status'        => 'active',
+                'email'         => $pending['email'],
+                'selfTestOk'    => false,
+                'selfTestError' => __('Connected, but ChargeGuard could not verify request signing. Fraud protection may not be active — check the notice at the top of this page.', 'chargeguard-woocommerce'),
+            ]);
+        }
+
+        update_option('chargeguard_signing_self_test', ['status' => 'ok', 'time' => time()]);
+
+        wp_send_json_success(['status' => 'active', 'email' => $pending['email'], 'selfTestOk' => true]);
     }
 
     public function ajax_disconnect() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        // Own nonce action — disconnects the store's fraud protection
+        // entirely; must not be reachable via a leaked read-only nonce.
+        check_ajax_referer('chargeguard_disconnect_nonce', 'nonce');
 
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
@@ -131,7 +942,15 @@ class ChargeGuard_Admin_Settings {
         delete_option('chargeguard_api_key');
         delete_option('chargeguard_merchant_id');
         delete_option('chargeguard_webhook_secret');
+        delete_option('chargeguard_api_signing_secret');
         delete_option('chargeguard_connected_email');
+        delete_option('chargeguard_signing_self_test');
+
+        // Disable Stripe/PayPal enrichment so their webhook handlers stop
+        // processing and forwarding card data even if the merchant left
+        // those webhooks configured directly in the Stripe/PayPal dashboards.
+        update_option('chargeguard_stripe_enabled', '0');
+        update_option('chargeguard_paypal_enabled', '0');
 
         // حذف الـ webhook
         $this->delete_woocommerce_webhook();
@@ -144,34 +963,24 @@ class ChargeGuard_Admin_Settings {
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
-        $response = wp_remote_get(
-            'https://chargeguard-api.onrender.com/api/risk/whitelist?merchantId=' . urlencode($merchant_id),
-            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->whitelist_get();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!empty($body['success'])) {
-            wp_send_json_success(['entries' => $body['entries'] ?? []]);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch whitelist.']);
-        }
+        wp_send_json_success(['entries' => $result['entries'] ?? []]);
     }
 
     public function ajax_whitelist_add() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_whitelist_add_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
         $type   = sanitize_text_field(wp_unslash($_POST['type']   ?? ''));
@@ -180,63 +989,31 @@ class ChargeGuard_Admin_Settings {
         if (!$type || !$value) {
             wp_send_json_error(['message' => 'Type and value are required.']);
         }
-        $response = wp_remote_post(
-            'https://chargeguard-api.onrender.com/api/risk/whitelist',
-            [
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode([
-                    'merchantId' => $merchant_id,
-                    'type'       => $type,
-                    'value'      => $value,
-                    'reason'     => $reason ?: null,
-                    'createdBy'  => get_option('chargeguard_connected_email'),
-                ]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->whitelist_add($type, $value, $reason);
+        if (is_wp_error($result)) {
+            if ($result->get_error_code() === 'api_conflict') {
+                wp_send_json_error(['message' => 'This entry already exists in the safe list.']);
+            }
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if ($code === 200 && !empty($body['success'])) {
-            wp_send_json_success(['entry' => $body['entry'] ?? []]);
-        } elseif ($code === 409) {
-            wp_send_json_error(['message' => 'This entry already exists in the safe list.']);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to add entry.']);
-        }
+        wp_send_json_success(['entry' => $result['entry'] ?? []]);
     }
 
     public function ajax_whitelist_delete() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_whitelist_delete_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        $id          = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
-        if (!$merchant_id || !$api_key || !$id) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        $id      = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$api_key || !$id) {
             wp_send_json_error(['message' => 'Missing required data.']);
         }
-        $response = wp_remote_request(
-            'https://chargeguard-api.onrender.com/api/risk/whitelist/' . rawurlencode($id),
-            [
-                'method'  => 'DELETE',
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode(['merchantId' => $merchant_id]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
-        }
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code === 200) {
-            wp_send_json_success();
-        } else {
+        $result = (new ChargeGuard_API_Client())->whitelist_delete($id);
+        if (is_wp_error($result)) {
             wp_send_json_error(['message' => 'Failed to delete entry.']);
         }
+        wp_send_json_success();
     }
 
     public function ajax_blacklist_get() {
@@ -244,34 +1021,24 @@ class ChargeGuard_Admin_Settings {
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
-        $response = wp_remote_get(
-            'https://chargeguard-api.onrender.com/api/risk/blacklist?merchantId=' . urlencode($merchant_id),
-            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->blacklist_get();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!empty($body['success'])) {
-            wp_send_json_success(['entries' => $body['entries'] ?? []]);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch blacklist.']);
-        }
+        wp_send_json_success(['entries' => $result['entries'] ?? []]);
     }
 
     public function ajax_blacklist_add() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_blacklist_add_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
         $type   = sanitize_text_field(wp_unslash($_POST['type']   ?? ''));
@@ -280,70 +1047,37 @@ class ChargeGuard_Admin_Settings {
         if (!$type || !$value) {
             wp_send_json_error(['message' => 'Type and value are required.']);
         }
-        $response = wp_remote_post(
-            'https://chargeguard-api.onrender.com/api/risk/blacklist',
-            [
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode([
-                    'merchantId' => $merchant_id,
-                    'type'       => $type,
-                    'value'      => $value,
-                    'reason'     => $reason ?: null,
-                    'createdBy'  => get_option('chargeguard_connected_email'),
-                ]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->blacklist_add($type, $value, $reason);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if ($code === 200 && !empty($body['success'])) {
-            wp_send_json_success(['entry' => $body['entry'] ?? []]);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to add entry.']);
-        }
+        wp_send_json_success(['entry' => $result['entry'] ?? []]);
     }
 
     public function ajax_blacklist_delete() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_blacklist_delete_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        $id          = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
-        if (!$merchant_id || !$api_key || !$id) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        $id      = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$api_key || !$id) {
             wp_send_json_error(['message' => 'Missing required data.']);
         }
-        $response = wp_remote_request(
-            'https://chargeguard-api.onrender.com/api/risk/blacklist/' . rawurlencode($id),
-            [
-                'method'  => 'DELETE',
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode(['merchantId' => $merchant_id]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
-        }
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code === 200) {
-            wp_send_json_success();
-        } else {
+        $result = (new ChargeGuard_API_Client())->blacklist_delete($id);
+        if (is_wp_error($result)) {
             wp_send_json_error(['message' => 'Failed to delete entry.']);
         }
+        wp_send_json_success();
     }
 
     public function ajax_webhook_save() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_webhook_save_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
         $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
+        $api_key     = chargeguard_get_secret_option('chargeguard_api_key');
         if (!$merchant_id || !$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
@@ -352,24 +1086,46 @@ class ChargeGuard_Admin_Settings {
         if (!in_array($webhook_type, ['slack', 'discord', 'custom'])) {
             $webhook_type = 'custom';
         }
-        $response = wp_remote_post(
-            'https://chargeguard-api.onrender.com/api/settings/webhook',
-            [
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode(['webhookUrl' => $webhook_url, 'webhookType' => $webhook_type]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+
+        // Server-side URL validation — the client-side JS check is only a
+        // UX convenience and is not trusted here (see M4 hardening).
+        if ($webhook_url === '') {
+            wp_send_json_error(['message' => 'Please enter a webhook URL.']);
         }
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code === 200) {
-            wp_send_json_success();
-        } else {
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to save webhook settings.']);
+
+        $webhook_url = esc_url_raw($webhook_url);
+        $parts       = wp_parse_url($webhook_url);
+
+        if (empty($webhook_url) || empty($parts) || empty($parts['host'])) {
+            wp_send_json_error(['message' => 'That does not look like a valid URL.']);
         }
+
+        if (($parts['scheme'] ?? '') !== 'https') {
+            wp_send_json_error(['message' => 'Only HTTPS webhook URLs are allowed.']);
+        }
+
+        // $resolved_ip is captured here, at the exact moment of
+        // validation, rather than re-resolved afterward — see the
+        // chargeguard_host_is_private_or_reserved() docblock. This is
+        // the IP that was actually checked against the private/reserved
+        // range below; forwarding it to the backend lets it either pin
+        // delivery to this address or re-resolve at send time and
+        // reject if the hostname has since been repointed (DNS
+        // rebinding). This does not itself close the TOCTOU gap — the
+        // backend, which makes the real outbound request, must be the
+        // one to act on this value — but it gives the backend the
+        // information it needs to do so, which the plugin previously
+        // discarded entirely after this check.
+        $resolved_ip = '';
+        if (chargeguard_host_is_private_or_reserved($parts['host'], $resolved_ip)) {
+            wp_send_json_error(['message' => 'This webhook URL points to an internal or reserved address and cannot be used.']);
+        }
+
+        $result = (new ChargeGuard_API_Client())->webhook_save($webhook_url, $webhook_type, $resolved_ip);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success();
     }
 
     public function ajax_webhook_test() {
@@ -377,29 +1133,15 @@ class ChargeGuard_Admin_Settings {
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
-        $response = wp_remote_post(
-            'https://chargeguard-api.onrender.com/api/settings/webhook/test',
-            [
-                'timeout' => 15,
-                'headers' => ['Content-Type' => 'application/json', 'x-api-key' => $api_key, 'x-merchant-id' => $merchant_id],
-                'body'    => json_encode([]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->webhook_test();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $code = wp_remote_retrieve_response_code($response);
-        if ($code === 200) {
-            wp_send_json_success();
-        } else {
-            $body = json_decode(wp_remote_retrieve_body($response), true);
-            wp_send_json_error(['message' => $body['error'] ?? 'Test failed. Check your webhook URL.']);
-        }
+        wp_send_json_success();
     }
 
     public function ajax_webhook_status() {
@@ -407,24 +1149,21 @@ class ChargeGuard_Admin_Settings {
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $merchant_id = get_option('chargeguard_merchant_id');
-        $api_key     = get_option('chargeguard_api_key');
-        if (!$merchant_id || !$api_key) {
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
-        $response = wp_remote_get(
-            'https://chargeguard-api.onrender.com/api/settings/webhook',
-            ['timeout' => 15, 'headers' => ['x-api-key' => $api_key, 'x-merchant-id' => $merchant_id]]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->webhook_status();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!empty($body['success'])) {
-            wp_send_json_success(['webhookUrl' => $body['webhookUrl'] ?? '', 'webhookType' => $body['webhookType'] ?? '', 'webhookLastStatus' => $body['webhookLastStatus'] ?? '', 'webhookLastSentAt' => $body['webhookLastSentAt'] ?? '', 'webhookFailureCount' => $body['webhookFailureCount'] ?? 0]);
-        } else {
-            wp_send_json_error(['message' => 'Failed to fetch webhook status.']);
-        }
+        wp_send_json_success([
+            'webhookUrl'          => $result['webhookUrl']          ?? '',
+            'webhookType'         => $result['webhookType']         ?? '',
+            'webhookLastStatus'   => $result['webhookLastStatus']   ?? '',
+            'webhookLastSentAt'   => $result['webhookLastSentAt']   ?? '',
+            'webhookFailureCount' => $result['webhookFailureCount'] ?? 0,
+        ]);
     }
 
     private function register_woocommerce_webhook($secret) {
@@ -437,6 +1176,15 @@ class ChargeGuard_Admin_Settings {
         $webhook->set_name('ChargeGuard Order Monitor');
         $webhook->set_topic('order.created');
         $webhook->set_delivery_url($webhook_url);
+        // STORAGE NOTE (informational, F10): this secret is persisted by
+        // WooCommerce core's own WC_Webhook storage (typically wp_postmeta),
+        // not by this plugin's ChargeGuard_Secret_Crypto encryption layer —
+        // WooCommerce core has historically stored webhook secrets in
+        // plaintext. This is upstream behavior outside this plugin's
+        // control; ChargeGuard does not intercept, wrap, or re-encrypt data
+        // WooCommerce core itself owns the persistence of. Documented here
+        // for transparency: a DB-level compromise exposes this value
+        // regardless of how well chargeguard_* options are encrypted.
         $webhook->set_secret($secret);
         $webhook->set_status('active');
         $webhook->save();
@@ -458,38 +1206,27 @@ class ChargeGuard_Admin_Settings {
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $api_key = get_option('chargeguard_api_key');
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
         if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
-        $response = wp_remote_get(
-            'https://chargeguard-api.onrender.com/api/settings/country-overrides',
-            [
-                'timeout' => 10,
-                'headers' => ['x-api-key' => $api_key],
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->geo_overrides_get();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!empty($body['success'])) {
-            wp_send_json_success([
-                'countryOverrides'   => $body['countryOverrides']   ?? [],
-                'availableCountries' => $body['availableCountries'] ?? [],
-                'summary'            => $body['summary']            ?? [],
-            ]);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to fetch geo settings.']);
-        }
+        wp_send_json_success([
+            'countryOverrides'   => $result['countryOverrides']   ?? [],
+            'availableCountries' => $result['availableCountries'] ?? [],
+            'summary'            => $result['summary']            ?? [],
+        ]);
     }
 
     public function ajax_geo_override_save() {
-        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        check_ajax_referer('chargeguard_geo_override_save_nonce', 'nonce');
         if (!current_user_can('manage_woocommerce')) {
             wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
-        $api_key = get_option('chargeguard_api_key');
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
         if (!$api_key) {
             wp_send_json_error(['message' => 'Store not connected.']);
         }
@@ -502,59 +1239,179 @@ class ChargeGuard_Admin_Settings {
         if (!in_array($override, $allowed_overrides, true)) {
             wp_send_json_error(['message' => 'Invalid override value.']);
         }
-        $response = wp_remote_post(
-            'https://chargeguard-api.onrender.com/api/settings/country-overrides',
-            [
-                'method'  => 'PUT',
-                'timeout' => 10,
-                'headers' => [
-                    'Content-Type' => 'application/json',
-                    'x-api-key'    => $api_key,
-                ],
-                'body' => json_encode([
-                    'updates' => [
-                        [
-                            'countryCode' => strtoupper($country_code),
-                            'override'    => $override,
-                        ],
-                    ],
-                ]),
-            ]
-        );
-        if (is_wp_error($response)) {
-            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        $result = (new ChargeGuard_API_Client())->geo_override_save($country_code, $override);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
         }
-        $code = wp_remote_retrieve_response_code($response);
-        $body = json_decode(wp_remote_retrieve_body($response), true);
-        if ($code === 200 && !empty($body['success'])) {
-            wp_send_json_success([
-                'countryOverrides' => $body['countryOverrides'] ?? [],
-                'warnings'         => $body['warnings']         ?? [],
-            ]);
-        } else {
-            wp_send_json_error(['message' => $body['error'] ?? 'Failed to save override.']);
+        wp_send_json_success([
+            'countryOverrides' => $result['countryOverrides'] ?? [],
+            'warnings'         => $result['warnings']         ?? [],
+        ]);
+    }
+
+    public function ajax_stores_get() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
         }
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $result = (new ChargeGuard_API_Client())->stores_get();
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success(['stores' => $result['stores'] ?? []]);
+    }
+
+    public function ajax_store_add() {
+        check_ajax_referer('chargeguard_store_add_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $store_url = sanitize_text_field(wp_unslash($_POST['store_url'] ?? ''));
+        $label     = sanitize_text_field(wp_unslash($_POST['label']     ?? ''));
+        if (!$store_url) {
+            wp_send_json_error(['message' => 'A store URL or domain is required.']);
+        }
+        $result = (new ChargeGuard_API_Client())->store_add($store_url, $label);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success(['store' => $result['store'] ?? [], 'reactivated' => $result['reactivated'] ?? false]);
+    }
+
+    public function ajax_store_rename() {
+        check_ajax_referer('chargeguard_store_rename_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $id    = sanitize_text_field(wp_unslash($_POST['id']    ?? ''));
+        $label = sanitize_text_field(wp_unslash($_POST['label'] ?? ''));
+        if (!$id || $label === '') {
+            wp_send_json_error(['message' => 'id and label are required.']);
+        }
+        $result = (new ChargeGuard_API_Client())->store_update($id, ['label' => $label]);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success(['store' => $result['store'] ?? []]);
+    }
+
+    public function ajax_store_deactivate() {
+        check_ajax_referer('chargeguard_store_deactivate_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $id = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$id) {
+            wp_send_json_error(['message' => 'id is required.']);
+        }
+        $result = (new ChargeGuard_API_Client())->store_deactivate($id);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success();
+    }
+
+    public function ajax_store_reactivate() {
+        check_ajax_referer('chargeguard_store_deactivate_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $id = sanitize_text_field(wp_unslash($_POST['id'] ?? ''));
+        if (!$id) {
+            wp_send_json_error(['message' => 'id is required.']);
+        }
+        $result = (new ChargeGuard_API_Client())->store_update($id, ['isActive' => true]);
+        if (is_wp_error($result)) {
+            wp_send_json_error(['message' => $result->get_error_message()]);
+        }
+        wp_send_json_success(['store' => $result['store'] ?? []]);
+    }
+
+    /**
+     * Resolves whether the connected merchant's plan currently entitles
+     * them to Pro-or-above features, reusing the same 5-minute transient
+     * cache settings_page() populates (chargeguard_merchant_plan_cache) so
+     * the common case — a merchant who just loaded the settings page, then
+     * submitted a form — costs no extra backend round-trip. Falls back to
+     * a fresh verify_key() call, cached the same way, when the transient
+     * is cold (e.g. a direct AJAX call with no recent page load). Fails
+     * closed (treats the merchant as NOT Pro) if verify_key() itself
+     * fails, so a backend outage can never be used to bypass this gate.
+     *
+     * @return bool
+     */
+    private function merchant_is_pro_or_above_cached() {
+        $cached_plan = get_transient( 'chargeguard_merchant_plan_cache' );
+        if ( $cached_plan === false ) {
+            $verify_result = ( new ChargeGuard_API_Client() )->verify_key();
+            if ( ! is_wp_error( $verify_result ) && ! empty( $verify_result['plan'] ) ) {
+                $cached_plan = $verify_result['plan'];
+                set_transient( 'chargeguard_merchant_plan_cache', $cached_plan, self::PLAN_CACHE_TTL );
+            } else {
+                $cached_plan = 'starter'; // fail closed — never silently allow a Pro-gated save
+            }
+        }
+        return in_array( $cached_plan, [ 'pro', 'agency' ], true );
     }
 
     public function ajax_paypal_save() {
-        check_ajax_referer( 'chargeguard_connect_nonce', 'nonce' );
+        check_ajax_referer( 'chargeguard_paypal_save_nonce', 'nonce' );
         if ( ! current_user_can( 'manage_woocommerce' ) ) {
             wp_send_json_error( [ 'message' => 'unauthorized' ], 403 );
         }
 
-        $client_id     = sanitize_text_field( wp_unslash( $_post['client_id']     ?? '' ) );
-        $client_secret = sanitize_text_field( wp_unslash( $_post['client_secret'] ?? '' ) );
-        $webhook_id    = sanitize_text_field( wp_unslash( $_post['webhook_id']    ?? '' ) );
-        $mode          = sanitize_text_field( wp_unslash( $_post['mode']          ?? 'sandbox' ) );
-        $enabled       = sanitize_text_field( wp_unslash( $_post['enabled']       ?? '0' ) );
+        // Plan gate (CWE-862 fix): settings_page() soft-locks the PayPal
+        // Integration card behind $merchant_is_pro_or_above, but that check
+        // only decides what settings_page() renders — it was never enforced
+        // here, where credentials are actually persisted. A Starter tenant
+        // calling this action directly (DevTools, a script, or a replayed
+        // request) could previously save working PayPal credentials even
+        // though real-time PayPal alerts never fire for their plan (the
+        // backend's notifyPaypalAlert() already gates delivery via
+        // isProOrAbove() — this closes the matching gap on the write side,
+        // so a Starter tenant can no longer configure state for a feature
+        // their plan doesn't entitle them to use).
+        if ( ! $this->merchant_is_pro_or_above_cached() ) {
+            wp_send_json_error( [ 'message' => 'PayPal real-time alerts require a Pro plan or above. Please upgrade to configure PayPal integration.' ] );
+        }
+
+        $client_id     = isset( $_POST['client_id'] )     ? sanitize_text_field( wp_unslash( $_POST['client_id'] ) )     : '';
+        $client_secret = isset( $_POST['client_secret'] ) ? sanitize_text_field( wp_unslash( $_POST['client_secret'] ) ) : '';
+        $webhook_id    = isset( $_POST['webhook_id'] )    ? sanitize_text_field( wp_unslash( $_POST['webhook_id'] ) )    : '';
+        $mode          = isset( $_POST['mode'] )          ? sanitize_text_field( wp_unslash( $_POST['mode'] ) )          : 'sandbox';
+        $enabled       = isset( $_POST['enabled'] )       ? sanitize_text_field( wp_unslash( $_POST['enabled'] ) )       : '0';
 
         if ( ! in_array( $mode, [ 'sandbox', 'live' ], true ) ) {
             $mode = 'sandbox';
         }
 
+        // Lightweight sanity check for consistency with ajax_stripe_save()'s
+        // format regex, catching the same class of typo at save time instead
+        // of at first live use (ajax_paypal_test()). Deliberately NOT a
+        // strict prefix/character-class regex like Stripe's: PayPal does not
+        // publish a single fixed client-secret format guaranteed stable
+        // across Sandbox vs Live apps and account/region variations, so a
+        // strict pattern risks rejecting a genuinely valid secret — worse
+        // for the merchant than the current one-extra-click delay to
+        // discover a real typo. Only checks the two properties that hold
+        // for every valid PayPal client secret regardless of format:
+        // reasonable minimum length, and no embedded whitespace (a common
+        // paste mistake — e.g. copying a trailing space or an extra line).
+        if ( ! empty( $client_secret ) && ( strlen( $client_secret ) < 20 || preg_match( '/\s/', $client_secret ) ) ) {
+            wp_send_json_error( [ 'message' => 'That does not look like a valid PayPal client secret — it looks too short or contains spaces. Please copy it again from your PayPal app credentials.' ] );
+        }
+
         update_option( 'chargeguard_paypal_client_id',  $client_id );
         if ( ! empty( $client_secret ) ) {
-            update_option( 'chargeguard_paypal_client_secret', $client_secret );
+            chargeguard_update_secret_option( 'chargeguard_paypal_client_secret', $client_secret );
         }
         update_option( 'chargeguard_paypal_webhook_id', $webhook_id );
         update_option( 'chargeguard_paypal_mode',          $mode );
@@ -573,7 +1430,7 @@ class ChargeGuard_Admin_Settings {
         }
 
         $client_id     = get_option( 'chargeguard_paypal_client_id' );
-        $client_secret = get_option( 'chargeguard_paypal_client_secret' );
+        $client_secret = chargeguard_get_secret_option( 'chargeguard_paypal_client_secret' );
 
         if ( ! $client_id || ! $client_secret ) {
             wp_send_json_error( [ 'message' => 'please save your paypal credentials first.' ] );
@@ -608,165 +1465,129 @@ class ChargeGuard_Admin_Settings {
         }
     }
 
-    public function settings_page() {
-        $is_connected = (bool) get_option('chargeguard_api_key');
-        $connected_email = get_option('chargeguard_connected_email', '');
-        $firewall_enabled = get_option('chargeguard_enable_firewall', 1);
-        $block_duration   = get_option( 'chargeguard_firewall_block_duration', 24 );
-        $badge_enabled    = get_option( 'chargeguard_badge_enabled', '1' );
-        $badge_location   = get_option( 'chargeguard_badge_location', 'footer' );
-        $badge_color      = get_option( 'chargeguard_badge_color', 'light' );
-        $nonce = wp_create_nonce('chargeguard_connect_nonce');
+    public function ajax_stripe_save() {
+        check_ajax_referer( 'chargeguard_stripe_save_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Unauthorized' ], 403 );
+        }
 
-        // IP المسؤول الحالي (مع دعم Proxies)
+        $secret_key     = isset( $_POST['secret_key'] )     ? sanitize_text_field( wp_unslash( $_POST['secret_key'] ) )     : '';
+        $webhook_secret = isset( $_POST['webhook_secret'] ) ? sanitize_text_field( wp_unslash( $_POST['webhook_secret'] ) ) : '';
+        $enabled        = isset( $_POST['enabled'] )        ? sanitize_text_field( wp_unslash( $_POST['enabled'] ) )        : '0';
+
+        // Basic sanity check on key format — real validation happens in ajax_stripe_test().
+        if ( ! empty( $secret_key ) && ! preg_match( '/^(sk|rk)_(test|live)_[A-Za-z0-9]+$/', $secret_key ) ) {
+            wp_send_json_error( [ 'message' => 'That does not look like a valid Stripe secret key. It should start with sk_test_, sk_live_, rk_test_, or rk_live_.' ] );
+        }
+
+        if ( ! empty( $secret_key ) ) {
+            chargeguard_update_secret_option( 'chargeguard_stripe_secret_key', $secret_key );
+        }
+        if ( ! empty( $webhook_secret ) ) {
+            chargeguard_update_secret_option( 'chargeguard_stripe_webhook_secret', $webhook_secret );
+        }
+        update_option( 'chargeguard_stripe_enabled', $enabled === '1' ? '1' : '0' );
+
+        wp_send_json_success( [ 'message' => 'Stripe settings saved.' ] );
+    }
+
+    public function ajax_stripe_test() {
+        check_ajax_referer( 'chargeguard_connect_nonce', 'nonce' );
+        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+            wp_send_json_error( [ 'message' => 'Unauthorized' ], 403 );
+        }
+
+        $secret_key = chargeguard_get_secret_option( 'chargeguard_stripe_secret_key' );
+        if ( ! $secret_key ) {
+            wp_send_json_error( [ 'message' => 'Please save your Stripe secret key first.' ] );
+        }
+
+        $stripe_init = __DIR__ . '/../vendor/stripe-php/init.php';
+        if ( ! file_exists( $stripe_init ) ) {
+            wp_send_json_error( [ 'message' => 'Stripe SDK not installed. Run composer install.' ] );
+        }
+        require_once $stripe_init;
+
+        try {
+            \Stripe\Stripe::setApiKey( $secret_key );
+            \Stripe\Balance::retrieve();
+            wp_send_json_success( [ 'message' => '✓ Stripe credentials are valid.' ] );
+        } catch ( \Exception $e ) {
+            wp_send_json_error( [ 'message' => $e->getMessage() ] );
+        }
+    }
+
+    public function settings_page() {
+        $is_connected = (bool) chargeguard_get_secret_option('chargeguard_api_key');
+        $connected_email = get_option('chargeguard_connected_email', '');
+
+        // Merchant's current plan — fetched from the backend (source of
+        // truth for entitlement) and cached briefly so this page load
+        // doesn't add an extra API round-trip on every admin request.
+        // Used to plan-gate the Notification Channels card below (Gap 2).
+        $merchant_plan = 'starter';
+        if ($is_connected) {
+            $cached_plan = get_transient('chargeguard_merchant_plan_cache');
+            if ($cached_plan !== false) {
+                $merchant_plan = $cached_plan;
+            } else {
+                $verify_result = (new ChargeGuard_API_Client())->verify_key();
+                if (!is_wp_error($verify_result) && !empty($verify_result['plan'])) {
+                    $merchant_plan = $verify_result['plan'];
+                    set_transient('chargeguard_merchant_plan_cache', $merchant_plan, self::PLAN_CACHE_TTL);
+                }
+                // On failure, fall back to 'starter' — fail closed on the
+                // UI gate rather than showing a Starter merchant a form
+                // the backend will reject.
+            }
+        }
+        $merchant_is_pro_or_above = in_array($merchant_plan, ['pro', 'agency'], true);
+        $merchant_is_agency       = ($merchant_plan === 'agency');
+
+        // Cleanup-mode detection: a tenant downgraded from Agency (see
+        // subscriptionScheduler.js processGraceToExpired) may still have
+        // stale Store rows if server-side deactivation failed, hasn't run
+        // yet, or predates that fix. GET /api/stores is intentionally
+        // ungated for exactly this reason (routes/stores.js) — this
+        // reuses the same signed call ajax_stores_get() already makes, so
+        // the Managed Stores card can render a read-only cleanup view
+        // instead of vanishing entirely. Only fires for the narrow case
+        // (connected, non-Agency) — Agency tenants and disconnected
+        // tenants never pay for this extra round trip.
+        $has_stale_stores = false;
+        if ($is_connected && !$merchant_is_agency) {
+            $stores_result = (new ChargeGuard_API_Client())->stores_get();
+            if (!is_wp_error($stores_result) && !empty($stores_result['stores'])) {
+                $has_stale_stores = true;
+            }
+        }
+        $show_managed_stores_card = $is_connected && ($merchant_is_agency || $has_stale_stores);
+
+        $firewall_enabled    = get_option('chargeguard_enable_firewall', 1);
+        $block_duration      = get_option( 'chargeguard_firewall_block_duration', 24 );
+        $trust_proxy_headers = get_option( 'chargeguard_trust_proxy_headers', 0 );
+
+        // A prior POST /connect may still be awaiting email confirmation
+        // (e.g. the merchant refreshed this page while waiting). Detecting
+        // this here lets the UI resume polling immediately instead of
+        // showing the entry form again and losing the merchant's place.
+        $pending_connect = get_transient('chargeguard_pending_connect');
+
+        // All nonces used by this page's JS are localized via
+        // enqueue_admin_assets() -> wp_localize_script('chargeguardAdmin', ...).
+        // This method does not create or output any nonce of its own.
+
+        // IP المسؤول الحالي — يستخدم نفس منطق تحليل IP الموجود في الجدار
+        // الناري (ChargeGuard_Dynamic_Firewall::get_client_ip()) حتى يتطابق
+        // أي IP يضيفه المسؤول هنا تمامًا مع ما يُقارن به وقت تنفيذ الطلب.
         $current_admin_ip = '';
-        if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            $ips = explode(',', sanitize_text_field(wp_unslash($_SERVER['HTTP_X_FORWARDED_FOR'])));
-            $current_admin_ip = trim($ips[0]);
+        if (class_exists('ChargeGuard_Dynamic_Firewall') && method_exists('ChargeGuard_Dynamic_Firewall', 'get_client_ip')) {
+            $current_admin_ip = ChargeGuard_Dynamic_Firewall::get_client_ip();
         } elseif (!empty($_SERVER['REMOTE_ADDR'])) {
             $current_admin_ip = sanitize_text_field(wp_unslash($_SERVER['REMOTE_ADDR']));
         }
         ?>
         <div class="wrap" id="chargeguard-wrap">
-        <style>
-            #chargeguard-wrap { max-width: 680px; }
-            .cg-card {
-                background: #fff;
-                border: 1px solid #e0e0e0;
-                border-radius: 12px;
-                padding: 28px 32px;
-                margin-bottom: 20px;
-                box-shadow: 0 1px 4px rgba(0,0,0,0.06);
-            }
-            .cg-status-badge {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                padding: 6px 14px;
-                border-radius: 100px;
-                font-size: 13px;
-                font-weight: 600;
-                margin-bottom: 20px;
-            }
-            .cg-status-badge.connected {
-                background: #f0fdf4;
-                color: #16a34a;
-                border: 1px solid #bbf7d0;
-            }
-            .cg-status-badge.disconnected {
-                background: #fafafa;
-                color: #666;
-                border: 1px solid #e0e0e0;
-            }
-            .cg-dot {
-                width: 8px; height: 8px;
-                border-radius: 50%;
-            }
-            .cg-dot.green { background: #16a34a; }
-            .cg-dot.gray  { background: #999; }
-            .cg-input {
-                width: 100%;
-                padding: 10px 14px;
-                border: 1px solid #ddd;
-                border-radius: 8px;
-                font-size: 14px;
-                margin-top: 6px;
-                box-sizing: border-box;
-            }
-            .cg-input:focus { border-color: #f97316; outline: none; box-shadow: 0 0 0 3px rgba(249,115,22,0.15); }
-            .cg-btn {
-                display: inline-flex;
-                align-items: center;
-                gap: 8px;
-                padding: 10px 22px;
-                border-radius: 8px;
-                font-size: 14px;
-                font-weight: 600;
-                cursor: pointer;
-                border: none;
-                margin-top: 14px;
-                transition: all 0.2s;
-            }
-            .cg-btn-primary { background: #f97316; color: #fff; }
-            .cg-btn-primary:hover { background: #ea580c; }
-            .cg-btn-danger { background: #fff; color: #dc2626; border: 1px solid #fecaca; }
-            .cg-btn-danger:hover { background: #fef2f2; }
-            .cg-steps {
-                display: flex;
-                gap: 0;
-                margin-bottom: 24px;
-            }
-            .cg-step {
-                flex: 1;
-                text-align: center;
-                padding: 10px 6px;
-                font-size: 12px;
-                color: #999;
-                border-bottom: 2px solid #e0e0e0;
-                position: relative;
-            }
-            .cg-step.active { color: #f97316; border-bottom-color: #f97316; font-weight: 600; }
-            .cg-step.done { color: #16a34a; border-bottom-color: #16a34a; }
-            .cg-message { padding: 12px 16px; border-radius: 8px; font-size: 13px; margin-top: 12px; display: none; }
-            .cg-message.error { background: #fef2f2; border: 1px solid #fecaca; color: #dc2626; display: block; }
-            .cg-message.success { background: #f0fdf4; border: 1px solid #bbf7d0; color: #16a34a; display: block; }
-            .cg-info-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #f0f0f0; font-size: 13px; }
-            .cg-info-row:last-child { border-bottom: none; }
-            .cg-info-label { color: #666; }
-            .cg-info-value { font-weight: 600; color: #111; }
-            .cg-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(255,255,255,0.4); border-top-color: #fff; border-radius: 50%; animation: cg-spin 0.7s linear infinite; }
-           @keyframes cg-spin { to { transform: rotate(360deg); } }
-
-            /* Trust Badge Section */
-            .cg-badge-preview-wrap {
-                background: #f8fafc;
-                border: 1px dashed #cbd5e1;
-                border-radius: 8px;
-                padding: 16px;
-                text-align: center;
-                margin-top: 12px;
-            }
-            .cg-badge-preview-label {
-                font-size: 11px;
-                color: #94a3b8;
-                margin-bottom: 8px;
-                text-transform: uppercase;
-                letter-spacing: 0.5px;
-            }
-            .cg-select {
-                padding: 7px 10px;
-                border: 1px solid #ddd;
-                border-radius: 6px;
-                font-size: 13px;
-                background: #fff;
-            }
-            .cg-toggle-wrap {
-                display: flex;
-                align-items: center;
-                gap: 10px;
-            }
-            .cg-toggle {
-                width: 36px; height: 20px;
-                appearance: none;
-                background: #cbd5e1;
-                border-radius: 10px;
-                cursor: pointer;
-                position: relative;
-                transition: background 0.2s;
-            }
-            .cg-toggle:checked { background: #16a34a; }
-            .cg-toggle::after {
-                content: '';
-                position: absolute;
-                width: 14px; height: 14px;
-                background: #fff;
-                border-radius: 50%;
-                top: 3px; left: 3px;
-                transition: left 0.2s;
-                box-shadow: 0 1px 2px rgba(0,0,0,0.2);
-            }
-            .cg-toggle:checked::after { left: 19px; }
-        </style>
         <h1 style="display:flex;align-items:center;gap:10px;margin-bottom:24px;">
             <span style="font-size:24px;">🛡️</span> ChargeGuard
         </h1>
@@ -782,6 +1603,9 @@ class ChargeGuard_Admin_Settings {
                     </div>
                     <button type="button" id="cg-verify-key-btn" class="button">
                         <?php esc_html_e( 'Verify Key', 'chargeguard-woocommerce' ); ?>
+                    </button>
+                    <button type="button" id="cg-check-updates-btn" class="button" style="margin-left:8px;">
+                        <?php esc_html_e( 'Check for Updates', 'chargeguard-woocommerce' ); ?>
                     </button>
                 </div>
                 <div id="cg-key-status" style="display:none;font-size:12px;padding:6px 10px;border-radius:6px;margin-bottom:10px;"></div>
@@ -809,6 +1633,7 @@ class ChargeGuard_Admin_Settings {
         <?php else: ?>
 
             <!-- 🔌 Connect State -->
+            <script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
             <div class="cg-card">
                 <div class="cg-status-badge disconnected">
                     <div class="cg-dot gray"></div>
@@ -816,29 +1641,45 @@ class ChargeGuard_Admin_Settings {
                 </div>
 
                 <div class="cg-steps">
-                    <div class="cg-step active" id="cg-step-1">① Enter Email</div>
-                    <div class="cg-step" id="cg-step-2">② Connecting</div>
+                    <div class="cg-step <?php echo $pending_connect ? 'done' : 'active'; ?>" id="cg-step-1">① Enter Email</div>
+                    <div class="cg-step <?php echo $pending_connect ? 'active' : ''; ?>" id="cg-step-2">② Confirm Email</div>
                     <div class="cg-step" id="cg-step-3">③ Protected</div>
                 </div>
 
-                <p style="color:#555;font-size:14px;margin-bottom:16px;">
-                    Enter the email you used to register at ChargeGuard. Everything else is configured automatically.
-                </p>
+                <div id="cg-connect-form" <?php echo $pending_connect ? 'style="display:none;"' : ''; ?>>
+                    <p style="color:#555;font-size:14px;margin-bottom:16px;">
+                        Enter the email you used to register at ChargeGuard. We'll send a confirmation link — click it, then this page finishes connecting automatically.
+                    </p>
 
-                <label style="font-size:13px;font-weight:600;color:#333;">
-                    Your ChargeGuard Email
-                </label>
-                <input
-                    type="email"
-                    id="cg-email-input"
-                    class="cg-input"
-                    placeholder="you@yourstore.com"
-                    autocomplete="email"
-                />
+                    <label style="font-size:13px;font-weight:600;color:#333;">
+                        Your ChargeGuard Email
+                    </label>
+                    <input
+                        type="email"
+                        id="cg-email-input"
+                        class="cg-input"
+                        placeholder="you@yourstore.com"
+                        autocomplete="email"
+                        value="<?php echo esc_attr($pending_connect['email'] ?? ''); ?>"
+                    />
 
-                <button class="cg-btn cg-btn-primary" id="cg-connect-btn">
-                    🔌 Connect ChargeGuard
-                </button>
+                    <div class="cf-turnstile" id="cg-turnstile-widget"
+                         data-sitekey="<?php echo esc_attr( defined('CHARGEGUARD_TURNSTILE_SITE_KEY') ? CHARGEGUARD_TURNSTILE_SITE_KEY : '' ); ?>"
+                         data-callback="cgTurnstileCallback"
+                         style="margin-top:14px;"></div>
+
+                    <button class="cg-btn cg-btn-primary" id="cg-connect-btn">
+                        🔌 Connect ChargeGuard
+                    </button>
+                </div>
+
+                <div id="cg-connect-pending" <?php echo $pending_connect ? '' : 'style="display:none;"'; ?> style="text-align:center;padding:12px 0;">
+                    <div class="cg-spinner" style="border-top-color:#f97316;border-color:#fed7aa;width:22px;height:22px;margin:0 auto 14px;"></div>
+                    <p style="color:#555;font-size:14px;margin-bottom:4px;">
+                        Check your inbox<?php echo $pending_connect ? ' (' . esc_html($pending_connect['email']) . ')' : ''; ?> and click the confirmation link.
+                    </p>
+                    <p style="color:#94a3b8;font-size:12px;">This page will finish connecting automatically once you confirm. The link expires in 15 minutes.</p>
+                </div>
 
                 <div class="cg-message" id="cg-message"></div>
             </div>
@@ -850,7 +1691,7 @@ class ChargeGuard_Admin_Settings {
         <div class="cg-card" id="cg-access-control">
             <h3 style="margin:0 0 4px;font-size:15px;">🔐 Access Control</h3>
             <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
-                Trusted visitors always bypass security checks. Blocked visitors are always rejected.
+                <?php esc_html_e( 'Trusted visitors (IP, Email, Card BIN) always bypass security checks, and IP, Email, and Card BIN blocks are enforced on every request. Device ID blocks are a first-line heuristic based on browser fingerprinting, which a determined visitor can alter — the ChargeGuard cloud risk engine is the authoritative check behind every blocked device.', 'chargeguard-woocommerce' ); ?>
             </p>
 
             <!-- Tab Switcher -->
@@ -922,7 +1763,6 @@ class ChargeGuard_Admin_Settings {
                     <select id="cg-bl-type" class="cg-select" style="min-width:130px;">
                         <option value="IP">IP Address</option>
                         <option value="EMAIL">Email</option>
-                        <option value="BIN">Card BIN</option>
                         <option value="DEVICE_FINGERPRINT">Device ID</option>
                     </select>
                     <input type="text" id="cg-bl-value" class="cg-input"
@@ -995,7 +1835,10 @@ class ChargeGuard_Admin_Settings {
 
         <!-- Firewall Settings -->
         <div class="cg-card">
-            <h3 style="margin:0 0 16px;font-size:15px;">⚙️ Firewall Settings</h3>
+            <h3 style="margin:0 0 4px;font-size:15px;">⚙️ Firewall Settings</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'This controls the local, browser-based device check that runs before checkout. It is a fast first-line heuristic, not a hard security boundary — a visitor can clear cookies or alter their browser fingerprint to get a new identity. The ChargeGuard cloud risk API, which combines this signal with many other factors, makes the final block or allow decision on every order.', 'chargeguard-woocommerce' ); ?>
+            </p>
             <form method="post" action="options.php">
                 <?php settings_fields('chargeguard_firewall_settings'); ?>
                 <div class="cg-info-row">
@@ -1006,79 +1849,135 @@ class ChargeGuard_Admin_Settings {
                     <span class="cg-info-label">Block Duration (hours)</span>
                     <input type="number" name="chargeguard_firewall_block_duration" value="<?php echo esc_attr($block_duration); ?>" style="width:70px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;" />
                 </div>
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Site is behind a trusted proxy/CDN (Cloudflare, load balancer, etc.)', 'chargeguard-woocommerce' ); ?></span>
+                    <input type="checkbox" name="chargeguard_trust_proxy_headers" value="1" <?php checked(1, $trust_proxy_headers); ?> />
+                </div>
+                <p style="margin:6px 0 0;font-size:11px;color:#94a3b8;">
+                    <?php esc_html_e( 'Only enable this if the site truly sits behind Cloudflare or a similar reverse proxy/load balancer. Enabling it on a site that is directly reachable lets a visitor spoof their IP address by sending forwarded-for headers themselves.', 'chargeguard-woocommerce' ); ?>
+                </p>
                 <?php submit_button('Save Settings', 'secondary', 'submit', false, ['style' => 'margin-top:14px;']); ?>
             </form>
         </div>
 
-        <!-- Trust Badge Settings -->
+        <!-- Auto-Block Settings -->
+        <?php
+        $auto_block_enabled = get_option( 'chargeguard_auto_block', 'no' );
+        $block_min_amount   = get_option( 'chargeguard_block_min_amount', 0 );
+        ?>
         <div class="cg-card">
-            <h3 style="margin:0 0 4px;font-size:15px;">🛡️ <?php esc_html_e( 'Trust Badge', 'chargeguard-woocommerce' ); ?></h3>
-            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
-                <?php esc_html_e( 'Show your visitors that your store is protected. The badge increases buyer trust and helps spread ChargeGuard — enabled by default.', 'chargeguard-woocommerce' ); ?>
+            <h3 style="margin:0 0 4px;font-size:15px;">🚫 <?php esc_html_e( 'Auto-Block on Fraud Decision', 'chargeguard-woocommerce' ); ?></h3>
+            <p style="margin:0 0 12px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'Automatically fail an order when ChargeGuard returns a "block" decision from a payment webhook.', 'chargeguard-woocommerce' ); ?>
             </p>
-
-            <form method="post" action="options.php">
-                <?php settings_fields( 'chargeguard_badge_settings' ); ?>
-
-                <!-- تفعيل/تعطيل -->
-                <div class="cg-info-row">
-                    <span class="cg-info-label"><?php esc_html_e( 'Show Badge', 'chargeguard-woocommerce' ); ?></span>
-                    <div class="cg-toggle-wrap">
-                        <input
-                            type="checkbox"
-                            class="cg-toggle"
-                            name="chargeguard_badge_enabled"
-                            id="cg-badge-toggle"
-                            value="1"
-                            <?php checked( '1', $badge_enabled ); ?>
-                        />
-                        <label for="cg-badge-toggle" style="font-size:12px;color:#64748b;">
-                            <?php esc_html_e( 'Enabled', 'chargeguard-woocommerce' ); ?>
-                        </label>
-                    </div>
-                </div>
-
-                <!-- الموقع -->
-                <div class="cg-info-row">
-                    <span class="cg-info-label"><?php esc_html_e( 'Badge Location', 'chargeguard-woocommerce' ); ?></span>
-                    <select name="chargeguard_badge_location" class="cg-select">
-                        <option value="footer"   <?php selected( $badge_location, 'footer' ); ?>>
-                            <?php esc_html_e( 'Footer only', 'chargeguard-woocommerce' ); ?>
-                        </option>
-                        <option value="checkout" <?php selected( $badge_location, 'checkout' ); ?>>
-                            <?php esc_html_e( 'Checkout only', 'chargeguard-woocommerce' ); ?>
-                        </option>
-                        <option value="both"     <?php selected( $badge_location, 'both' ); ?>>
-                            <?php esc_html_e( 'Footer & Checkout', 'chargeguard-woocommerce' ); ?>
-                        </option>
-                    </select>
-                </div>
-
-                <!-- نظام الألوان -->
-                <div class="cg-info-row">
-                    <span class="cg-info-label"><?php esc_html_e( 'Color Scheme', 'chargeguard-woocommerce' ); ?></span>
-                    <select name="chargeguard_badge_color" class="cg-select">
-                        <option value="light" <?php selected( $badge_color, 'light' ); ?>>
-                            <?php esc_html_e( 'Light (white background)', 'chargeguard-woocommerce' ); ?>
-                        </option>
-                        <option value="dark"  <?php selected( $badge_color, 'dark' ); ?>>
-                            <?php esc_html_e( 'Dark (for dark themes)', 'chargeguard-woocommerce' ); ?>
-                        </option>
-                    </select>
-                </div>
-
-                <?php submit_button( __( 'Save Badge Settings', 'chargeguard-woocommerce' ), 'secondary', 'submit', false, array( 'style' => 'margin-top:14px;' ) ); ?>
-            </form>
-
-            <!-- معاينة حية -->
-            <div class="cg-badge-preview-wrap" style="margin-top:16px;">
-                <div class="cg-badge-preview-label"><?php esc_html_e( 'Badge Preview', 'chargeguard-woocommerce' ); ?></div>
-                <?php echo chargeguard_get_badge_html(); // phpcs:ignore WordPress.Security.EscapeOutput ?>
+            <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12px;color:#9a3412;line-height:1.5;">
+                ⚠️ <strong><?php esc_html_e( 'Important:', 'chargeguard-woocommerce' ); ?></strong>
+                <?php esc_html_e( 'Stripe and PayPal webhooks fire after the payment has already been captured. Enabling this will mark the order as "Failed" in WooCommerce, but it will NOT automatically refund the customer on Stripe or PayPal. You must issue any refund manually.', 'chargeguard-woocommerce' ); ?>
             </div>
+            <form method="post" action="options.php">
+                <?php settings_fields( 'chargeguard_autoblock_settings' ); ?>
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Enable Auto-Block', 'chargeguard-woocommerce' ); ?></span>
+                    <input type="checkbox" name="chargeguard_auto_block" value="yes" <?php checked( 'yes', $auto_block_enabled ); ?> />
+                </div>
+                <div class="cg-info-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Minimum Order Amount', 'chargeguard-woocommerce' ); ?></span>
+                    <input type="number" step="0.01" min="0" name="chargeguard_block_min_amount" value="<?php echo esc_attr( $block_min_amount ); ?>" style="width:100px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;" />
+                </div>
+                <p style="margin:6px 0 0;font-size:11px;color:#94a3b8;">
+                    <?php esc_html_e( 'Orders below this amount will never be auto-blocked, even on a "block" decision. Set to 0 to apply to all amounts.', 'chargeguard-woocommerce' ); ?>
+                </p>
+                <?php submit_button( __( 'Save Auto-Block Settings', 'chargeguard-woocommerce' ), 'secondary', 'submit', false, [ 'style' => 'margin-top:14px;' ] ); ?>
+            </form>
         </div>
 
-        <!-- PayPal Integration -->
+        
+
+        <!-- Stripe Integration -->
         <?php if ($is_connected): ?>
+        <?php
+        $st_enabled        = get_option('chargeguard_stripe_enabled', '0');
+        $st_secret_key     = get_option('chargeguard_stripe_secret_key', '');
+        $st_webhook_secret = get_option('chargeguard_stripe_webhook_secret', '');
+        $st_webhook_url    = str_replace( 'http://', 'https://', get_rest_url( null, 'chargeguard/v1/stripe-webhook' ) );
+        ?>
+        <div class="cg-card" id="cg-stripe-integration">
+            <h3 style="margin:0 0 4px;font-size:15px;">💳 Stripe Integration</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Extend ChargeGuard protection to payments made via Stripe.
+                Connect your Stripe account to monitor card testing attempts across all payment gateways.
+            </p>
+
+            <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px;">
+                <div class="cg-status-badge <?php echo $st_enabled === '1' ? 'connected' : 'disconnected'; ?>"
+                     style="margin-bottom:0;">
+                    <div class="cg-dot <?php echo $st_enabled === '1' ? 'green' : 'gray'; ?>"></div>
+                    <?php echo $st_enabled === '1' ? 'Stripe Protection Active' : 'Not Configured'; ?>
+                </div>
+            </div>
+
+            <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:14px 16px;margin-bottom:20px;">
+                <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px;text-transform:uppercase;letter-spacing:0.5px;">
+                    Your Webhook URL
+                </div>
+                <div style="display:flex;align-items:center;gap:8px;">
+                    <code style="flex:1;font-size:12px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;color:#1e293b;word-break:break-all;">
+                        <?php echo esc_html($st_webhook_url); ?>
+                    </code>
+                    <button id="cg-st-copy-url" class="button" title="Copy URL" style="flex-shrink:0;">
+                        📋 Copy
+                    </button>
+                </div>
+                <p style="font-size:11px;color:#94a3b8;margin:8px 0 0;">
+                    Paste this URL in your <strong>Stripe Dashboard</strong> → Developers → Webhooks → Add endpoint, and select the
+                    <code style="background:#f1f5f9;padding:1px 5px;border-radius:3px;">payment_intent.succeeded</code> event.
+                </p>
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Secret Key</span>
+                <input type="password" id="cg-st-secret-key" class="cg-input"
+                       value=""
+                       placeholder="<?php echo $st_secret_key ? '••••••••••••••••' : 'sk_live_...'; ?>"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <span style="font-size:11px;color:#94a3b8;width:100%;padding-left:138px;">
+                    <?php echo $st_secret_key ? 'Leave blank to keep your current key' : 'Found in your Stripe Dashboard → Developers → API keys'; ?>
+                </span>
+            </div>
+
+            <div class="cg-info-row" style="flex-wrap:wrap;gap:8px;">
+                <span class="cg-info-label" style="min-width:130px;">Webhook Signing Secret</span>
+                <input type="password" id="cg-st-webhook-secret" class="cg-input"
+                       value=""
+                       placeholder="<?php echo $st_webhook_secret ? '••••••••••••••••' : 'whsec_...'; ?>"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <span style="font-size:11px;color:#94a3b8;width:100%;padding-left:138px;">
+                    <?php echo $st_webhook_secret ? 'Leave blank to keep your current secret' : 'Shown once after creating the endpoint in your Stripe Dashboard'; ?>
+                </span>
+            </div>
+
+            <div class="cg-info-row">
+                <span class="cg-info-label">Enable Protection</span>
+                <div class="cg-toggle-wrap">
+                    <input type="checkbox" class="cg-toggle" id="cg-st-enabled" <?php checked('1', $st_enabled); ?> />
+                    <label for="cg-st-enabled" style="font-size:12px;color:#64748b;">Active</label>
+                </div>
+            </div>
+
+            <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap;">
+                <button id="cg-st-save" class="cg-btn cg-btn-primary" style="margin:0;">
+                    💾 Save Stripe Settings
+                </button>
+                <button id="cg-st-test" class="cg-btn" style="margin:0;background:#fff;color:#f97316;border:1px solid #f97316;">
+                    🔗 Test Connection
+                </button>
+            </div>
+            <div id="cg-st-message" class="cg-message" style="margin-top:10px;"></div>
+        </div>
+        <?php endif; ?>
+
+        <!-- PayPal Integration -->
+        <?php if ($is_connected && $merchant_is_pro_or_above): ?>
         <?php
         $pp_enabled    = get_option('chargeguard_paypal_enabled', '0');
         $pp_client_id  = get_option('chargeguard_paypal_client_id', '');
@@ -1286,10 +2185,59 @@ class ChargeGuard_Admin_Settings {
             </div>
             <div id="cg-pp-message" class="cg-message" style="margin-top:10px;"></div>
         </div>
+        <?php elseif ($is_connected): ?>
+        <div class="cg-card" id="cg-paypal-integration-locked">
+            <h3 style="margin:0 0 4px;font-size:15px;">🅿️ PayPal Integration</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Extend ChargeGuard protection to payments made via PayPal.
+                Connect your PayPal app to monitor card testing attempts across all payment gateways.
+            </p>
+            <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:20px;text-align:center;">
+                <div style="font-size:28px;margin-bottom:8px;">🔒</div>
+                <p style="margin:0 0 14px;font-size:13px;color:#9a3412;">
+                    <?php esc_html_e( 'Real-time PayPal suspicious-transaction alerts are a Pro plan feature. Upgrade to monitor PayPal transactions alongside your card payments.', 'chargeguard-woocommerce' ); ?>
+                </p>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=chargeguard-settings&upgrade=pro' ) ); ?>" class="cg-btn cg-btn-primary" style="display:inline-block;text-decoration:none;">
+                    ⬆️ <?php esc_html_e( 'Upgrade to Pro', 'chargeguard-woocommerce' ); ?>
+                </a>
+            </div>
+        </div>
+        <?php endif; ?>
+
+        <!-- Managed Stores (Agency full CRUD, or read-only cleanup mode for downgraded ex-Agency tenants) -->
+        <?php if ($show_managed_stores_card): ?>
+        <div class="cg-card" id="cg-managed-stores" data-mode="<?php echo $merchant_is_agency ? 'full' : 'cleanup'; ?>">
+            <h3 style="margin:0 0 4px;font-size:15px;">🏬 Managed Stores</h3>
+            <?php if ($merchant_is_agency): ?>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'Add each client store domain you manage under this Agency account. ChargeGuard only accepts API requests from domains registered here.', 'chargeguard-woocommerce' ); ?>
+            </p>
+
+            <div style="display:flex;gap:8px;margin-bottom:16px;flex-wrap:wrap;align-items:flex-start;">
+                <input type="text" id="cg-store-url" class="cg-input"
+                       placeholder="e.g. clienta-store.com"
+                       style="flex:1;min-width:200px;margin:0;" />
+                <input type="text" id="cg-store-label" class="cg-input"
+                       placeholder="Label (optional) — e.g. Client A"
+                       style="flex:1;min-width:160px;margin:0;" />
+                <button id="cg-store-add" class="cg-btn cg-btn-primary" style="margin:0;white-space:nowrap;">
+                    + Add Store
+                </button>
+            </div>
+            <?php else: ?>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'These stores are no longer active because your Agency plan has ended. You can remove any store you no longer need below. Renew your Agency plan to add new stores or reactivate an existing one.', 'chargeguard-woocommerce' ); ?>
+            </p>
+            <?php endif; ?>
+            <div id="cg-store-message" class="cg-message"></div>
+            <div id="cg-store-table-wrap">
+                <p style="color:#999;font-size:13px;">Loading…</p>
+            </div>
+        </div>
         <?php endif; ?>
 
         <!-- Notification Channels -->
-        <?php if ($is_connected): ?>
+        <?php if ($is_connected && $merchant_is_pro_or_above): ?>
         <div class="cg-card" id="cg-notification-channels">
             <h3 style="margin:0 0 4px;font-size:15px;">📢 Notification Channels</h3>
             <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
@@ -1343,699 +2291,26 @@ class ChargeGuard_Admin_Settings {
             </div>
             <div id="cg-webhook-message" class="cg-message" style="margin-top:10px;"></div>
         </div>
+        <?php elseif ($is_connected): ?>
+        <div class="cg-card" id="cg-notification-channels-locked">
+            <h3 style="margin:0 0 4px;font-size:15px;">📢 Notification Channels</h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                Receive attack alerts in Slack or Discord alongside email notifications.
+            </p>
+            <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:20px;text-align:center;">
+                <div style="font-size:28px;margin-bottom:8px;">🔒</div>
+                <p style="margin:0 0 14px;font-size:13px;color:#9a3412;">
+                    <?php esc_html_e( 'Slack/Discord webhook alerts are a Pro plan feature. Upgrade to receive real-time attack notifications in your team channels.', 'chargeguard-woocommerce' ); ?>
+                </p>
+                <a href="<?php echo esc_url( admin_url( 'admin.php?page=chargeguard-settings&upgrade=pro' ) ); ?>" class="cg-btn cg-btn-primary" style="display:inline-block;text-decoration:none;">
+                    ⬆️ <?php esc_html_e( 'Upgrade to Pro', 'chargeguard-woocommerce' ); ?>
+                </a>
+            </div>
+        </div>
         <?php endif; ?>
 
         </div>
 
-        <script>        (function($) {
-            const nonce          = '<?php echo esc_js($nonce); ?>';
-            const cgCurrentIp    = '<?php echo esc_js($current_admin_ip); ?>';
-            const cgMerchantId   = '<?php echo esc_js(get_option("chargeguard_merchant_id")); ?>';
-
-            // ── Helper: HTML Escape ──────────────────────────────────
-            function escHtml(str) {
-                return String(str)
-                    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-                    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
-            }
-
-            // ── Helper: Render Table ─────────────────────────────────
-            function renderTable(entries, wrapId, listType) {
-                const $wrap = $('#' + wrapId);
-                if (!entries || entries.length === 0) {
-                    $wrap.html('<p style="color:#999;font-size:13px;text-align:center;padding:20px 0;">No entries yet.</p>');
-                    return;
-                }
-                let html = '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
-                    '<thead><tr style="border-bottom:2px solid #f0f0f0;">' +
-                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;width:80px;">Type</th>' +
-                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;">Value</th>' +
-                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;">Note</th>' +
-                    '<th style="text-align:left;padding:8px 4px;color:#666;font-weight:600;width:90px;">Added</th>' +
-                    '<th style="width:32px;"></th></tr></thead><tbody>';
-
-                entries.forEach(function(e) {
-                    const isExpired = e.expiresAt && new Date(e.expiresAt) < new Date();
-                    const dateStr   = new Date(e.createdAt).toLocaleDateString('en-GB', { day:'2-digit', month:'short' });
-                    const valStyle  = isExpired ? 'color:#999;text-decoration:line-through;' : 'font-family:monospace;';
-                    html += '<tr style="border-bottom:1px solid #f8f8f8;">' +
-                        '<td style="padding:9px 4px;"><span style="background:#f1f5f9;padding:2px 7px;border-radius:4px;font-size:11px;font-weight:600;color:#475569;">' + escHtml(e.type) + '</span></td>' +
-                        '<td style="padding:9px 4px;' + valStyle + '">' + escHtml(e.value) + (isExpired ? ' <span style="color:#f59e0b;font-size:11px;">(expired)</span>' : '') + '</td>' +
-                        '<td style="padding:9px 4px;color:#94a3b8;">' + (e.reason ? escHtml(e.reason) : '—') + '</td>' +
-                        '<td style="padding:9px 4px;color:#94a3b8;">' + dateStr + '</td>' +
-                        '<td style="padding:9px 4px;text-align:center;"><button class="cg-delete-entry" data-id="' + escHtml(e.id) + '" data-list="' + listType + '" title="Remove" style="background:none;border:none;cursor:pointer;color:#fca5a5;font-size:16px;padding:2px 6px;border-radius:4px;" onmouseover="this.style.background=\'#fef2f2\'" onmouseout="this.style.background=\'none\'">×</button></td>' +
-                        '</tr>';
-                });
-                html += '</tbody></table>';
-                $wrap.html(html);
-            }
-
-            // ── Load Whitelist ───────────────────────────────────────
-            function loadWhitelist() {
-                $('#cg-wl-table-wrap').html('<p style="color:#999;font-size:13px;">Loading…</p>');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_whitelist_get',
-                    nonce:  nonce,
-                    merchantId: cgMerchantId,
-                }, function(res) {
-                    if (res.success) {
-                        renderTable(res.data.entries, 'cg-wl-table-wrap', 'whitelist');
-                        if (res.data.entries && res.data.entries.length > 0) {
-                            $('#cg-whitelist-onboarding').hide();
-                        }
-                    }
-                });
-            }
-
-            // ── Load Blacklist ───────────────────────────────────────
-            function loadBlacklist() {
-                $('#cg-bl-table-wrap').html('<p style="color:#999;font-size:13px;">Loading…</p>');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_blacklist_get',
-                    nonce:  nonce,
-                    merchantId: cgMerchantId,
-                }, function(res) {
-                    if (res.success) {
-                        renderTable(res.data.entries, 'cg-bl-table-wrap', 'blacklist');
-                    }
-                });
-            }
-
-            // ── Tab Switcher ─────────────────────────────────────────
-            $(document).on('click', '.cg-ac-tab', function() {
-                const tab = $(this).data('tab');
-                $('.cg-ac-tab').css({ color:'#999', borderBottomColor:'transparent' });
-                $(this).css({
-                    color: tab === 'whitelist' ? '#16a34a' : '#dc2626',
-                    borderBottomColor: tab === 'whitelist' ? '#16a34a' : '#dc2626'
-                });
-                $('#cg-tab-whitelist, #cg-tab-blacklist').hide();
-                $('#cg-tab-' + tab).show();
-                if (tab === 'whitelist') loadWhitelist();
-                else loadBlacklist();
-            });
-
-            // ── Add My IP ────────────────────────────────────────────
-            $('#cg-add-my-ip').on('click', function() {
-                const $btn = $(this);
-                $btn.prop('disabled', true).text('Adding…');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_whitelist_add',
-                    nonce:  nonce,
-                    type:   'IP',
-                    value:  cgCurrentIp,
-                    reason: 'My admin IP — added automatically',
-                }, function(res) {
-                    if (res.success) {
-                        $('#cg-whitelist-onboarding').slideUp(300);
-                        loadWhitelist();
-                    } else {
-                        $btn.prop('disabled', false).text('+ Add My IP');
-                    }
-                });
-            });
-
-            // ── Dynamic Placeholder ──────────────────────────────────
-            const wlPlaceholders = { IP:'e.g. 197.12.34.56', EMAIL:'e.g. john@mystore.com', BIN:'e.g. 411111 (first 6 digits)' };
-            const blPlaceholders = { IP:'e.g. 45.33.32.156', EMAIL:'e.g. fraud@example.com', BIN:'e.g. 411111 (first 6 digits)', DEVICE_FINGERPRINT:'Device fingerprint ID' };
-            $('#cg-wl-type').on('change', function() { $('#cg-wl-value').attr('placeholder', wlPlaceholders[$(this).val()] || ''); });
-            $('#cg-bl-type').on('change', function() { $('#cg-bl-value').attr('placeholder', blPlaceholders[$(this).val()] || ''); });
-
-            // ── Add to Whitelist ─────────────────────────────────────
-            $('#cg-wl-add').on('click', function() {
-                const type   = $('#cg-wl-type').val();
-                const value  = $('#cg-wl-value').val().trim();
-                const reason = $('#cg-wl-reason').val().trim();
-                const $msg   = $('#cg-wl-message');
-                if (!value) {
-                    $msg.removeClass('success').addClass('error').text('Please enter a value.').show();
-                    return;
-                }
-                $(this).prop('disabled', true).text('Adding…');
-                $msg.hide().removeClass('error success');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_whitelist_add',
-                    nonce, type, value, reason,
-                }, function(res) {
-                    if (res.success) {
-                        $('#cg-wl-value, #cg-wl-reason').val('');
-                        $msg.removeClass('error').addClass('success').text('✓ Added to safe list.').show();
-                        loadWhitelist();
-                        setTimeout(function() { $msg.fadeOut(); }, 3000);
-                    } else {
-                        $msg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to add. Try again.').show();
-                    }
-                    $('#cg-wl-add').prop('disabled', false).text('+ Add to Safe List');
-                });
-            });
-
-            // ── Add to Blacklist ─────────────────────────────────────
-            $('#cg-bl-add').on('click', function() {
-                const type   = $('#cg-bl-type').val();
-                const value  = $('#cg-bl-value').val().trim();
-                const reason = $('#cg-bl-reason').val().trim();
-                const $msg   = $('#cg-bl-message');
-                if (!value) {
-                    $msg.removeClass('success').addClass('error').text('Please enter a value.').show();
-                    return;
-                }
-                if (type === 'IP' && value === cgCurrentIp) {
-                    if (!window.confirm('⚠️ Warning\n\nThis is your current admin IP address.\nBlocking it may disrupt your store\'s connection to ChargeGuard.\n\nAre you absolutely sure?')) return;
-                }
-                $(this).prop('disabled', true).text('Blocking…');
-                $msg.hide().removeClass('error success');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_blacklist_add',
-                    nonce, type, value, reason,
-                }, function(res) {
-                    if (res.success) {
-                        $('#cg-bl-value, #cg-bl-reason').val('');
-                        $msg.removeClass('error').addClass('success').text('✓ Added to blocked list.').show();
-                        loadBlacklist();
-                        setTimeout(function() { $msg.fadeOut(); }, 3000);
-                    } else {
-                        $msg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to add. Try again.').show();
-                    }
-                    $('#cg-bl-add').prop('disabled', false).text('🚫 Block This');
-                });
-            });
-
-            // ── Delete Entry ─────────────────────────────────────────
-            $(document).on('click', '.cg-delete-entry', function() {
-                const id       = $(this).data('id');
-                const listType = $(this).data('list');
-                const action   = listType === 'whitelist' ? 'chargeguard_whitelist_delete' : 'chargeguard_blacklist_delete';
-                const $row     = $(this).closest('tr');
-                $row.fadeOut(200, function() { $(this).remove(); });
-                $.post(ajaxurl, { action, nonce, id }, function(res) {
-                    if (!res.success) {
-                        if (listType === 'whitelist') loadWhitelist();
-                        else loadBlacklist();
-                    }
-                });
-            });
-
-            // ── تحميل تلقائي عند فتح الصفحة ─────────────────────────
-            <?php if ($is_connected): ?>
-            loadWhitelist();
-            <?php endif; ?>
-
-            // ── Connect ──────────────────────────────────────────────
-            $('#cg-connect-btn').on('click', function() {
-                const email = $('#cg-email-input').val().trim();
-                const $btn  = $(this);
-                const $msg  = $('#cg-message');
-
-                if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-                    $msg.removeClass('success').addClass('error').text('Please enter a valid email address.').show();
-                    return;
-                }
-
-                // Step 2
-                $('#cg-step-1').removeClass('active').addClass('done');
-                $('#cg-step-2').addClass('active');
-                $btn.prop('disabled', true).html('<span class="cg-spinner"></span> Connecting…');
-                $msg.hide().removeClass('error success');
-
-                $.post(ajaxurl, {
-                    action: 'chargeguard_connect',
-                    nonce:  nonce,
-                    email:  email,
-                }, function(res) {
-                    if (res.success) {
-                        // Step 3
-                        $('#cg-step-2').removeClass('active').addClass('done');
-                        $('#cg-step-3').addClass('active done');
-                        $msg.removeClass('error').addClass('success')
-                            .text('✅ Connected successfully! Reloading…').show();
-                        setTimeout(() => location.reload(), 1500);
-                    } else {
-                        $('#cg-step-2').removeClass('active');
-                        $('#cg-step-1').removeClass('done').addClass('active');
-                        $msg.removeClass('success').addClass('error').text(res.data.message).show();
-                        $btn.prop('disabled', false).html('🔌 Connect ChargeGuard');
-                    }
-                }).fail(function() {
-                    $msg.removeClass('success').addClass('error')
-                        .text('Connection failed. Please try again.').show();
-                    $btn.prop('disabled', false).html('🔌 Connect ChargeGuard');
-                });
-            });
-
-            // ── Verify Key ───────────────────────────────────────────────
-            $('#cg-verify-key-btn').on('click', function() {
-                const $btn    = $(this);
-                const $status = $('#cg-key-status');
-
-                $btn.prop('disabled', true).text('Verifying…');
-                $status.hide().css({ background: '', border: '', color: '' });
-
-                $.post(ajaxurl, {
-                    action: 'chargeguard_verify_key',
-                    nonce:  nonce,
-                }, function(res) {
-                    if (res.success) {
-                        $status.css({
-                            background: '#f0fdf4',
-                            border:     '1px solid #bbf7d0',
-                            color:      '#16a34a',
-                        }).text('✓ API key is valid and active.').show();
-                    } else {
-                        $status.css({
-                            background: '#fef2f2',
-                            border:     '1px solid #fecaca',
-                            color:      '#dc2626',
-                        }).text('✗ ' + (res.data.message || 'Invalid API key. Please reconnect.')).show();
-                    }
-                }).fail(function() {
-                    $status.css({
-                        background: '#fef2f2',
-                        border:     '1px solid #fecaca',
-                        color:      '#dc2626',
-                    }).text('✗ Could not reach server. Try again.').show();
-                }).always(function() {
-                    $btn.prop('disabled', false).text('Verify Key');
-                });
-            });
-
-            // ── Disconnect ───────────────────────────────────────────────
-            $('#cg-disconnect-btn').on('click', function() {
-                if (!confirm('Are you sure you want to disconnect ChargeGuard?')) return;
-                const $btn = $(this);
-                $btn.prop('disabled', true).text('Disconnecting…');
-
-                $.post(ajaxurl, {
-                    action: 'chargeguard_disconnect',
-                    nonce:  nonce,
-                }, function(res) {
-                    if (res.success) location.reload();
-                });
-            });
-
-            // ── Webhook ────────────────────────────────────────────────
-            const $webhookUrl    = $('#cg-webhook-url');
-            const $webhookMsg    = $('#cg-webhook-message');
-            const $webhookStatus = $('#cg-webhook-status-text');
-            const $webhookDot    = $('#cg-webhook-status-dot');
-            let currentType      = 'slack';
-
-            // Tab switcher
-            $('.cg-webhook-tab').on('click', function() {
-                currentType = $(this).data('type');
-                $('.cg-webhook-tab').css({ background:'#fff', color:'#999' });
-                $(this).css({ background:'#f0fdf4', color:'#16a34a' });
-                // Update guide text
-                const guides = {
-                    slack:  'Create an <strong>Incoming Webhook</strong> in Slack → paste the URL below.',
-                    discord: 'Create an <strong>Incoming Webhook</strong> in Discord → paste the URL below.',
-                    custom: 'Enter any HTTPS URL that accepts JSON POST requests.'
-                };
-                $('#cg-webhook-guide').html(guides[currentType] || guides.custom);
-            });
-
-            // Load saved settings on page load
-            $.post(ajaxurl, { action: 'chargeguard_webhook_status', nonce }, function(res) {
-                if (res.success) {
-                    const d = res.data;
-                    if (d.webhookUrl) {
-                        $webhookUrl.val(d.webhookUrl);
-                        currentType = d.webhookType || 'custom';
-                        $('.cg-webhook-tab').css({ background:'#fff', color:'#999' });
-                        const $tab = $('.cg-webhook-tab[data-type="' + currentType + '"]');
-                        if ($tab.length) $tab.css({ background:'#f0fdf4', color:'#16a34a' });
-                        else { currentType = 'custom'; $('.cg-webhook-tab[data-type="custom"]').css({ background:'#f0fdf4', color:'#16a34a' }); }
-                    }
-                    if (d.webhookLastStatus === 'success') {
-                        $webhookStatus.text('Last test: successful');
-                        $webhookDot.css({ background:'#16a34a' }).show();
-                    } else if (d.webhookLastStatus === 'failed') {
-                        $webhookStatus.text('Last test: failed (' + (d.webhookFailureCount || 0) + ' attempts)');
-                        $webhookDot.css({ background:'#dc2626' }).show();
-                    } else if (d.webhookUrl) {
-                        $webhookStatus.text('Saved — not tested yet');
-                        $webhookDot.css({ background:'#f59e0b' }).show();
-                    }
-                }
-            });
-
-            // Save webhook
-            $('#cg-webhook-save').on('click', function() {
-                const url   = $webhookUrl.val().trim();
-                const $btn  = $(this);
-                if (!url) {
-                    $webhookMsg.removeClass('success').addClass('error').text('Please enter a webhook URL.').show();
-                    return;
-                }
-                if (!url.startsWith('https://')) {
-                    $webhookMsg.removeClass('success').addClass('error').text('Only HTTPS URLs are allowed.').show();
-                    return;
-                }
-                $btn.prop('disabled', true).text('Saving…');
-                $webhookMsg.hide().removeClass('error success');
-                $.post(ajaxurl, {
-                    action:       'chargeguard_webhook_save',
-                    nonce:        nonce,
-                    webhook_url:  url,
-                    webhook_type: currentType,
-                }, function(res) {
-                    if (res.success) {
-                        $webhookMsg.removeClass('error').addClass('success').text('✓ Webhook saved.').show();
-                        $webhookStatus.text('Saved — not tested yet');
-                        $webhookDot.css({ background:'#f59e0b' }).show();
-                        setTimeout(function() { $webhookMsg.fadeOut(); }, 3000);
-                    } else {
-                        $webhookMsg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Failed to save.').show();
-                    }
-                    $btn.prop('disabled', false).text('💾 Save Webhook');
-                });
-            });
-
-            // Test webhook
-            $('#cg-webhook-test').on('click', function() {
-                const $btn = $(this);
-                $btn.prop('disabled', true).text('Testing…');
-                $webhookMsg.hide().removeClass('error success');
-                $.post(ajaxurl, {
-                    action: 'chargeguard_webhook_test',
-                    nonce:  nonce,
-                }, function(res) {
-                    if (res.success) {
-                        $webhookMsg.removeClass('error').addClass('success').text('✓ Test notification sent! Check your channel.').show();
-                        $webhookStatus.text('Last test: successful');
-                        $webhookDot.css({ background:'#16a34a' }).show();
-                    } else {
-                        $webhookMsg.removeClass('success').addClass('error').text((res.data && res.data.message) || 'Test failed. Check your webhook URL.').show();
-                        $webhookStatus.text('Last test: failed');
-                        $webhookDot.css({ background:'#dc2626' }).show();
-                    }
-                    $btn.prop('disabled', false).text('📤 Send Test Notification');
-                });
-            });
-
-        // ── PayPal Integration ────────────────────────────────────────
-            let cgPpMode = $('#cg-pp-mode').val() || 'sandbox';
-
-            // Guide arrow animation
-            $('#cg-pp-guide').on('toggle', function() {
-                $('#cg-pp-guide-arrow').css(
-                    'transform',
-                    this.open ? 'rotate(90deg)' : 'rotate(0deg)'
-                );
-            });
-
-            // Mode toggle
-            $(document).on('click', '.cg-pp-mode-btn', function() {
-                cgPpMode = $(this).data('mode');
-                $('#cg-pp-mode').val(cgPpMode);
-                $('.cg-pp-mode-btn').css({ background: '#fff', color: '#999' });
-                $(this).css({ background: '#f0fdf4', color: '#16a34a' });
-            });
-
-            // Copy Webhook URL
-            $('#cg-pp-copy-url').on('click', function() {
-                const url = $('code', '#cg-paypal-integration').first().text().trim();
-                navigator.clipboard.writeText(url).then(function() {
-                    $('#cg-pp-copy-url').text('✓ Copied!');
-                    setTimeout(function() { $('#cg-pp-copy-url').text('📋 Copy'); }, 2000);
-                });
-            });
-
-            // Save PayPal Settings
-            $('#cg-pp-save').on('click', function() {
-                const $btn    = $(this);
-                const $msg    = $('#cg-pp-message');
-                const secret  = $('#cg-pp-client-secret').val().trim();
-
-                $btn.prop('disabled', true).text('Saving…');
-                $msg.hide().removeClass('error success');
-
-                const postData = {
-                    action:        'chargeguard_paypal_save',
-                    nonce:         nonce,
-                    client_id:     $('#cg-pp-client-id').val().trim(),
-                    webhook_id:    $('#cg-pp-webhook-id').val().trim(),
-                    mode:          cgPpMode,
-                    enabled:       $('#cg-pp-enabled').is(':checked') ? '1' : '0',
-                };
-                if (secret) postData.client_secret = secret;
-
-                $.post(ajaxurl, postData, function(res) {
-                    if (res.success) {
-                        $msg.removeClass('error').addClass('success')
-                            .text('✓ PayPal settings saved.').show();
-                        $('#cg-pp-client-secret').val('').attr('placeholder', '••••••••••••••••');
-                        setTimeout(function() { $msg.fadeOut(); }, 3000);
-                    } else {
-                        $msg.removeClass('success').addClass('error')
-                            .text((res.data && res.data.message) || 'Failed to save.').show();
-                    }
-                    $btn.prop('disabled', false).text('💾 Save PayPal Settings');
-                });
-            });
-
-            // Test PayPal Connection
-            $('#cg-pp-test').on('click', function() {
-                const $btn = $(this);
-                const $msg = $('#cg-pp-message');
-                $btn.prop('disabled', true).text('Testing…');
-                $msg.hide().removeClass('error success');
-
-                $.post(ajaxurl, {
-                    action: 'chargeguard_paypal_test',
-                    nonce:  nonce,
-                }, function(res) {
-                    if (res.success) {
-                        $msg.removeClass('error').addClass('success')
-                            .text((res.data && res.data.message) || '✓ Connected.').show();
-                    } else {
-                        $msg.removeClass('success').addClass('error')
-                            .text((res.data && res.data.message) || 'Connection failed.').show();
-                    }
-                    $btn.prop('disabled', false).text('🔗 Test Connection');
-                });
-            });
-
-            // ── Geo Risk Intelligence ─────────────────────────────────────
-            const TIER_CONFIG = {
-                critical: { emoji: '🛑', label: 'Extreme Risk',   color: '#dc2626', bg: '#fef2f2' },
-                high:     { emoji: '⚠️', label: 'High Risk',      color: '#ea580c', bg: '#fff7ed' },
-                medium:   { emoji: '🟡', label: 'Moderate Risk',  color: '#ca8a04', bg: '#fefce8' },
-                elevated: { emoji: '🔵', label: 'Monitored',      color: '#2563eb', bg: '#eff6ff' },
-            };
-
-            const OVERRIDE_CONFIG = {
-                smart:    { label: '● Smart',    color: '#16a34a', desc: 'Use ChargeGuard default' },
-                allow:    { label: '○ Allow',    color: '#2563eb', desc: 'Remove country penalty'  },
-                escalate: { label: '○ Escalate', color: '#ea580c', desc: 'Double country penalty'  },
-            };
-
-            let cgGeoCountries    = [];
-            let cgPendingChange   = null;
-
-            function cgGetEffectivePenalty(basePenalty, override) {
-                if (override === 'allow')    return 0;
-                if (override === 'escalate') return Math.min(basePenalty * 2, 20);
-                return basePenalty;
-            }
-
-            function cgBuildImpactText(change) {
-                const c        = change.country;
-                const tierConf = TIER_CONFIG[c.tier] || TIER_CONFIG.elevated;
-                const newPenalty = cgGetEffectivePenalty(c.basePenalty, change.newOverride);
-                const oldPenalty = cgGetEffectivePenalty(c.basePenalty, change.currentOverride);
-
-                if (change.newOverride === 'allow') {
-                    return tierConf.emoji + ' Removing the +' + c.basePenalty +
-                        ' pt risk penalty for <strong>' + escHtml(c.name) + '</strong>. ' +
-                        'All other fraud signals still apply.' +
-                        (c.tier === 'critical' ? ' <strong style="color:#dc2626;">⚠️ High-risk region — monitor chargebacks closely.</strong>' : '');
-                }
-                if (change.newOverride === 'escalate') {
-                    return '⬆️ Escalating <strong>' + escHtml(c.name) + '</strong> penalty from ' +
-                        oldPenalty + ' to <strong>' + newPenalty + ' pts</strong>. ' +
-                        'Transactions from this region will be scored more strictly.';
-                }
-                return '↩️ Restoring <strong>' + escHtml(c.name) +
-                    '</strong> to Smart default (' + c.basePenalty + ' pts).';
-            }
-
-            function cgRenderTierGroups(countries) {
-                const byTier = {};
-                countries.forEach(function(c) {
-                    if (!byTier[c.tier]) byTier[c.tier] = [];
-                    byTier[c.tier].push(c);
-                });
-
-                const tierOrder = ['critical', 'high', 'medium', 'elevated'];
-                let html = '';
-
-                tierOrder.forEach(function(tier) {
-                    if (!byTier[tier] || !byTier[tier].length) return;
-                    const tc = TIER_CONFIG[tier];
-                    html += '<div style="margin-bottom:16px;">';
-                    html += '<div style="display:flex;align-items:center;gap:6px;margin-bottom:10px;">';
-                    html += '<span style="font-size:13px;font-weight:700;color:' + tc.color + ';">' +
-                            tc.emoji + ' ' + tc.label + '</span>';
-                    html += '</div>';
-
-                    byTier[tier].forEach(function(c) {
-                        const cur = c.currentOverride || 'smart';
-                        html += '<div style="display:flex;align-items:center;justify-content:space-between;' +
-                                'padding:10px 12px;border-radius:8px;background:' + tc.bg + ';' +
-                                'border:1px solid ' + tc.color + '22;margin-bottom:6px;flex-wrap:wrap;gap:8px;">';
-
-                        // اسم الدولة + penalty
-                        html += '<div style="display:flex;align-items:center;gap:8px;min-width:140px;">';
-                        html += '<span style="font-size:14px;">' + cgGetFlag(c.code) + '</span>';
-                        html += '<span style="font-size:13px;font-weight:600;color:#1e293b;">' +
-                                escHtml(c.name) + '</span>';
-                        html += '<span id="cg-penalty-' + c.code + '" ' +
-                                'style="font-size:11px;color:' + tc.color + ';background:' + tc.color + '15;' +
-                                'padding:2px 6px;border-radius:4px;font-weight:600;">' +
-                                '-' + cgGetEffectivePenalty(c.basePenalty, cur) + ' pts</span>';
-                        html += '</div>';
-
-                        // Radio buttons
-                        html += '<div style="display:flex;gap:6px;">';
-                        ['smart', 'allow', 'escalate'].forEach(function(ov) {
-                            const isActive = cur === ov;
-                            const ovConf   = OVERRIDE_CONFIG[ov];
-                            const btnColor = isActive ? ovConf.color : '#94a3b8';
-                            const btnBg    = isActive ? ovConf.color + '15' : '#fff';
-                            const border   = isActive ? ovConf.color : '#e2e8f0';
-                            html += '<button class="cg-geo-radio" ' +
-                                    'data-code="' + escHtml(c.code) + '" ' +
-                                    'data-override="' + ov + '" ' +
-                                    'title="' + escHtml(ovConf.desc) + '" ' +
-                                    'style="padding:5px 10px;border-radius:6px;font-size:12px;font-weight:600;' +
-                                    'cursor:pointer;border:1px solid ' + border + ';' +
-                                    'background:' + btnBg + ';color:' + btnColor + ';">' +
-                                    (isActive ? '● ' : '○ ') + ov.charAt(0).toUpperCase() + ov.slice(1) +
-                                    '</button>';
-                        });
-                        html += '</div>';
-                        html += '</div>';
-                    });
-
-                    html += '</div>';
-                });
-
-                $('#cg-geo-tiers').html(html);
-            }
-
-            function cgGetFlag(code) {
-                try {
-                    return code.toUpperCase().replace(/./g, function(c) {
-                        return String.fromCodePoint(c.charCodeAt(0) + 127397);
-                    });
-                } catch(e) { return '🌐'; }
-            }
-
-            function cgUpdateSummary(countries) {
-                const modified = countries.filter(function(c) { return c.currentOverride !== 'smart'; }).length;
-                if (modified === 0) {
-                    $('#cg-override-count').text('All regions using Smart defaults');
-                } else {
-                    $('#cg-override-count').text(modified + ' region' + (modified > 1 ? 's' : '') + ' customized');
-                }
-            }
-
-            // تحميل البيانات
-            <?php if ($is_connected): ?>
-            $.post(ajaxurl, {
-                action: 'chargeguard_geo_overrides_get',
-                nonce:  nonce,
-            }, function(res) {
-                if (res.success) {
-                    cgGeoCountries = res.data.availableCountries || [];
-                    cgRenderTierGroups(cgGeoCountries);
-                    cgUpdateSummary(cgGeoCountries);
-                } else {
-                    $('#cg-geo-tiers').html('<p style="color:#dc2626;font-size:13px;">Failed to load geo settings.</p>');
-                }
-            });
-            <?php endif; ?>
-
-            // Radio button click
-            $(document).on('click', '.cg-geo-radio', function() {
-                const code        = $(this).data('code');
-                const newOverride = $(this).data('override');
-                const country     = cgGeoCountries.find(function(c) { return c.code === code; });
-                if (!country) return;
-
-                const currentOverride = country.currentOverride || 'smart';
-                if (currentOverride === newOverride) return;
-
-                cgPendingChange = { code, newOverride, currentOverride, country };
-
-                $('#cg-geo-impact-text').html(cgBuildImpactText(cgPendingChange));
-                $('#cg-geo-impact').show();
-                $('#cg-geo-message').hide().removeClass('error success');
-            });
-
-            // Apply Change
-            $('#cg-geo-confirm').on('click', function() {
-                if (!cgPendingChange) return;
-                const $btn = $(this);
-                $btn.prop('disabled', true).text('Saving…');
-
-                $.post(ajaxurl, {
-                    action:       'chargeguard_geo_override_save',
-                    nonce:        nonce,
-                    country_code: cgPendingChange.code,
-                    override:     cgPendingChange.newOverride,
-                }, function(res) {
-                    if (res.success) {
-                        // تحديث البيانات المحلية
-                        const country = cgGeoCountries.find(function(c) {
-                            return c.code === cgPendingChange.code;
-                        });
-                        if (country) {
-                            country.currentOverride  = cgPendingChange.newOverride;
-                            country.effectivePenalty = cgGetEffectivePenalty(
-                                country.basePenalty,
-                                cgPendingChange.newOverride
-                            );
-                        }
-
-                        // تحديث الـ UI
-                        cgRenderTierGroups(cgGeoCountries);
-                        cgUpdateSummary(cgGeoCountries);
-                        $('#cg-geo-impact').hide();
-                        cgPendingChange = null;
-
-                        // Warning لو وُجد
-                        const warnings = res.data.warnings || [];
-                        if (warnings.length > 0) {
-                            $('#cg-geo-message')
-                                .removeClass('error').addClass('success')
-                                .html('✓ Saved. ⚠️ ' + escHtml(warnings[0].message))
-                                .show();
-                        } else {
-                            $('#cg-geo-message')
-                                .removeClass('error').addClass('success')
-                                .text('✓ Override saved successfully.')
-                                .show();
-                        }
-                        setTimeout(function() { $('#cg-geo-message').fadeOut(); }, 4000);
-                    } else {
-                        $('#cg-geo-message')
-                            .removeClass('success').addClass('error')
-                            .text((res.data && res.data.message) || 'Failed to save. Try again.')
-                            .show();
-                    }
-                    $btn.prop('disabled', false).text('✓ Apply Change');
-                });
-            });
-
-            // Cancel
-            $('#cg-geo-cancel').on('click', function() {
-                cgPendingChange = null;
-                $('#cg-geo-impact').hide();
-            });
-
-        })(jQuery);
-        </script>
         <?php
     }
 }

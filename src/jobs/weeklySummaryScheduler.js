@@ -22,6 +22,7 @@
 
 const db                          = require('../lib/db');
 const { sendWeeklySummaryEmail }   = require('../lib/email');
+const { acquireLock }              = require('../lib/distributedLock');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const SCHEDULER_INTERVAL_MS  = 60 * 60 * 1000;  // check every hour
@@ -69,6 +70,12 @@ async function runWeeklySummaryCheck(prisma) {
     return;
   }
 
+  const lock = await acquireLock('scheduler:weeklySummary', 120_000);
+  if (!lock) {
+    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    return;
+  }
+
   console.log(`${label} 📅 Sunday 09:xx UTC — running weekly summary check`);
 
   // Compute week boundaries (stable for the entire run)
@@ -93,7 +100,8 @@ async function runWeeklySummaryCheck(prisma) {
 
   console.log(`${label} 👥 Processing ${tenants.length} tenant(s)`);
 
-  for (const tenant of tenants) {
+  for (let i = 0; i < tenants.length; i++) {
+    const tenant = tenants[i];
     try {
       await processTenant(prisma, tenant, currentWeekStart, prevWeekStart, label);
     } catch (err) {
@@ -102,7 +110,11 @@ async function runWeeklySummaryCheck(prisma) {
     }
 
     // Courtesy delay to avoid hammering SMTP between tenants
-    if (tenants.indexOf(tenant) < tenants.length - 1) {
+    // Perf fix (O(n²) → O(n)): use the loop index directly instead of
+    // tenants.indexOf(tenant), which re-scanned the array from the start
+    // on every iteration (see monthlyReportScheduler.js for the same
+    // indexed-loop pattern already established elsewhere in this codebase).
+    if (i < tenants.length - 1) {
       await new Promise(res => setTimeout(res, TENANT_DELAY_MS));
     }
   }

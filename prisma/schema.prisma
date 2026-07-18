@@ -35,7 +35,14 @@ storeUrl      String?
   keyRotatedAt                DateTime?
   connectToken                String?   @unique
   connectTokenExpiresAt       DateTime?
+  connectRequestId            String?   @unique
   lastConnectVerifiedAt       DateTime?
+  // H1 fix: staged storeUrl/domain-binding change, applied only after the
+  // merchant proves inbox control by clicking the connect confirmation
+  // link (see /connect and /connect/confirm in routes/auth.js). Never
+  // written to storeUrl/allowedDomains directly from /connect.
+  pendingStoreUrl              String?
+  pendingNormalizedDomain      String?
   previousApiKey               String?   @unique // DEPRECATED (CWE-256) — plaintext, retained only for migration fallback.
   previousApiKeyHash           String?   @unique
   previousApiKeyExpiresAt      DateTime?
@@ -47,6 +54,7 @@ storeUrl      String?
   countryOverridesUpdatedAt   DateTime?
   webhookUrl                  String?
   webhookType                 String?
+  webhookResolvedIp           String?   // DNS-resolved IP of webhookUrl's host at validation time (SSRF/TOCTOU defense — see class-api-client.php webhook_save() and POST /settings/webhook)
   webhookLastStatus           String?
   webhookLastSentAt           DateTime?
   webhookFailureCount         Int       @default(0)
@@ -107,7 +115,7 @@ model SignalStat {
 // ========== Order (جديد) ==========
 model Order {
   id                 String  @id @default(cuid())
-  orderId            String  @unique // معرف الطلب من WooCommerce
+  orderId            String  // معرف الطلب من WooCommerce — NOT globally unique: WooCommerce order IDs are per-store auto-increment integers, so two different merchants can legitimately have the same orderId. Uniqueness is scoped per tenant via the compound @@unique below (C3 fix).
   merchantId         String
   amount             Float
   currency           String  @default("USD")
@@ -126,6 +134,21 @@ model Order {
   // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
   signalsSnapshot String?
 
+  // L3 perf fix: denormalized copy of signalsSnapshot.enrichmentSource,
+  // written once at /enrich time. Lets the weekly PayPal scheduler filter
+  // via an indexed WHERE clause instead of loading every tenant order into
+  // memory and JSON.parse()-ing signalsSnapshot per row. NULL for any order
+  // that hasn't gone through /enrich yet (matches current "no signal, not
+  // PayPal" semantics) — see backfill script for pre-existing rows.
+  enrichmentSource String?
+
+  // C‑IDEMPOTENCY fix: atomic idempotency gate for processFeedbackSimplified().
+  // NULL = feedback not yet processed for this order; non-null = the exact
+  // moment a feedback call first successfully claimed this order. Guarded via
+  // an `updateMany` with `WHERE feedbackProcessedAt IS NULL` in feedbackLoop.js
+  // — a database-atomic conditional update, not a separate check-then-act.
+  feedbackProcessedAt DateTime?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -141,6 +164,22 @@ model Order {
   @@index([merchantId, deviceFingerprint, createdAt])
   @@index([merchantId, ipAddress, createdAt])
   @@index([merchantId, email, createdAt])
+  // Matches the weekly PayPal scheduler's exact predicate shape:
+  // WHERE merchantId = ? AND enrichmentSource = ? AND createdAt >= ?
+  @@index([merchantId, enrichmentSource, createdAt])
+
+  // CRITICAL FIX (C3): orderId alone was globally @unique, meaning two
+  // different merchants could never both have an order with the same
+  // orderId — but WooCommerce order IDs are per-store auto-increment
+  // integers, so collisions across tenants are routine, not exceptional.
+  // Scoping uniqueness to (merchantId, orderId) is the same multi-tenant
+  // isolation pattern already used by BlacklistEntry, WhitelistEntry, and
+  // IdentityNode in this file; Order was the one model that omitted it.
+  // This constraint is what makes the compound-key queries in
+  // routes/risk.js structurally correct — the database itself now
+  // guarantees a findUnique/upsert scoped to (merchantId, orderId) can
+  // only ever touch that tenant's row.
+  @@unique([merchantId, orderId])
 }
 
 // ========== Risk Evaluation (Flight Recorder) ==========
@@ -239,7 +278,7 @@ model IdentityNode {
   id                  String    @id @default(cuid())
   merchantId          String?
   type                String // DEVICE, EMAIL, IP, ADDRESS, FINGERPRINT
-  hashedValue         String
+  hashedValue         String // HMAC-SHA256(`${type}:${normalizedValue}`, IDENTITY_GRAPH_SECRET) — peppered, per OWASP ASVS V6.2.4. Uses a separate secret from BlockedAttempt/CardTestAttempt's SECRET_SALT by design (see identityGraph.js hashValue()) — deliberate isolation between the velocity-tracking and cross-merchant identity-graph subsystems, not an inconsistency to "fix."
   maskedValue         String?
   fingerprintConfig   String?
   fingerprintHardware String?
@@ -330,9 +369,9 @@ model CardTestAttempt {
   id         String   @id @default(cuid())
   merchantId String
   binPrefix  String?
-  ipHash     String?
-  emailHash  String?
-  deviceHash String?
+  ipHash     String? // HMAC-SHA256(ip, SECRET_SALT) — peppered, per OWASP ASVS V6.2.4. Same key as BlockedAttempt.ipHash (see velocityDetector.js), so the two are directly correlatable.
+  emailHash  String? // HMAC-SHA256(email, SECRET_SALT) — peppered, per OWASP ASVS V6.2.4
+  deviceHash String? // HMAC-SHA256(deviceFingerprint, SECRET_SALT) — peppered, per OWASP ASVS V6.2.4
   amount     Float
   wasBlocked Boolean  @default(true)
   createdAt  DateTime @default(now())
@@ -357,7 +396,7 @@ model BlockedAttempt {
   cardBin     String?  // أول 6 أرقام فقط — لا نخزن رقم البطاقة كاملاً
   cardType    String?  // Visa, Mastercard, Amex, Unknown
   reason      String   // card_testing, velocity, blacklist, pattern
-  ipHash      String?  // SHA-256 للـ IP — لا نخزن IP الكامل (GDPR)
+  ipHash      String?  // HMAC-SHA256(ip, SECRET_SALT) — peppered, per OWASP ASVS V6.2.4. لا نخزن IP الكامل (GDPR)
   amountAttempted Float?
   riskScore       Int?
 
@@ -600,4 +639,33 @@ model AlertLog {
   sentAt     DateTime @default(now())
 
   @@index([tenantId, sentAt])
+}
+
+// ========== Plugin Release (Update Distribution) ==========
+model PluginRelease {
+  id              String   @id @default(cuid())
+  version         String
+  channel         String   @default("stable")
+  s3Key           String
+  checksumSha256  String
+  changelog       String?  @db.Text
+  minWpVersion    String?
+  testedWpVersion String?
+  minPhpVersion   String?
+  isActive        Boolean  @default(true)
+  createdAt       DateTime @default(now())
+
+  @@unique([version, channel])
+  @@index([channel, isActive, createdAt])
+}
+
+// ========== Update Download Token (single-use, short-lived) ==========
+model UpdateDownloadToken {
+  jti        String    @id
+  releaseId  String
+  tenantId   String
+  expiresAt  DateTime
+  usedAt     DateTime?
+
+  @@index([expiresAt])
 }

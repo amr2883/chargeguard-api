@@ -15,6 +15,7 @@
 
 const db                      = require('./db');
 const { notifyTenant } = require('./notify');
+const { acquireLock } = require('../lib/distributedLock');
 const { isProOrAbove, PRO_PLUS_PLANS } = require('./planAccess');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
@@ -35,6 +36,12 @@ const { SAVINGS_PER_ATTACK } = require('./constants');
  */
 async function runAttackAlertCheck(prisma) {
   const label = `[AttackAlert ${new Date().toISOString()}]`;
+
+  const lock = await acquireLock('scheduler:attackAlert', 120_000);
+  if (!lock) {
+    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    return;
+  }
 
   let tenants;
   try {

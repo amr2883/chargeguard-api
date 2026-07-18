@@ -5,10 +5,23 @@ const db = require('../lib/db');
 const logger = require('../lib/logger');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
+const verifyHmacSignature = require('../middleware/verifyHmac');
+const { requireAuth } = require('../middleware/authenticate');
+
+const apiKeyAuth = requireAuth({ id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true });
 
 // ── IP Hashing (GDPR-safe) — same construction as routes/risk.js ────────────
+// M3 fix: fail closed, not open. A missing SECRET_SALT previously
+// silently degraded to a hardcoded, publicly-known salt, making hashed
+// IPs trivially reversible via rainbow table. Every other hashIp
+// implementation in this codebase (routes/risk.js, velocityDetector.js)
+// already fails closed on a missing salt — this brings routes/auth.js
+// in line with that pattern instead of being the one silent exception.
 const hashIp = (ip) => {
-  const salt = process.env.SECRET_SALT || 'default_salt_change_me';
+  const salt = process.env.SECRET_SALT;
+  if (!salt) {
+    throw new Error('SECRET_SALT is not configured');
+  }
   return crypto.createHmac('sha256', salt).update(ip).digest('hex');
 };
 
@@ -98,9 +111,19 @@ const connectTurnstile = async (req, res, next) => {
  * الـ backend يرجعله كل حاجة تلقائياً
  */
 router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => {
-  const GENERIC_RESPONSE = {
-    message: 'If this email is registered and verified, a secure connect link has been sent. The link expires in 15 minutes.'
-  };
+  // Generated unconditionally, before any validation branch, so every
+  // response path — unknown email, inactive tenant, unverified tenant,
+  // success, and the catch block — returns the identical shape
+  // { message, connectRequestId }. This is what lets /connect/status
+  // return the same generic 'pending' for a decoy request as for a real,
+  // still-unconfirmed one, without ever needing to tell them apart
+  // (anti-enumeration, OWASP API4:2023 — extends the same principle the
+  // original GENERIC_RESPONSE design already applied to the message text).
+  const connectRequestId = crypto.randomBytes(32).toString('hex');
+  const buildResponse = () => ({
+    message: 'If this email is registered and verified, a secure connect link has been sent. The link expires in 15 minutes.',
+    connectRequestId,
+  });
 
   try {
     const { email, siteUrl } = req.body;
@@ -123,28 +146,28 @@ router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => 
     });
 
     if (!tenant || !tenant.isActive) {
-      return res.status(200).json(GENERIC_RESPONSE);
+      return res.status(200).json(buildResponse());
     }
 
     if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-      return res.status(200).json(GENERIC_RESPONSE);
+      return res.status(200).json(buildResponse());
     }
 
-  if (siteUrl && siteUrl !== tenant.storeUrl) {
+  // SECURITY FIX (H1): storeUrl/allowedDomains are no longer written
+    // here. Previously this ran unconditionally on any /connect POST with
+    // a matching, active, verified email — before any proof the caller
+    // controls that inbox — letting anyone who knew a merchant's email
+    // silently rebind their domain to an attacker-controlled origin. The
+    // proposed value is staged now and applied only in /connect/confirm,
+    // after the merchant has clicked the emailed link and proven inbox
+    // ownership — the same trust boundary that already gates issuing a
+    // new API key.
+    let pendingStoreUrl = null;
+    let pendingNormalizedDomain = null;
+    if (siteUrl && siteUrl !== tenant.storeUrl) {
       const { normalizeDomain } = require('../lib/domainAuth');
-      const normalizedSiteDomain = normalizeDomain(siteUrl);
-
-      await db.tenant.update({
-        where: { email: normalizedEmail },
-        data: {
-          storeUrl: siteUrl,
-          // Re-bind the domain allowlist whenever the merchant changes their
-          // store URL through /connect — otherwise a stale allowedDomains
-          // entry would block legitimate traffic from the new domain while
-          // the old (possibly compromised or sold) domain stayed authorized.
-          ...(normalizedSiteDomain ? { allowedDomains: [normalizedSiteDomain] } : {}),
-        }
-      });
+      pendingStoreUrl = siteUrl;
+      pendingNormalizedDomain = normalizeDomain(siteUrl) || null;
     }
 
     const connectToken = crypto.randomBytes(32).toString('hex');
@@ -152,7 +175,13 @@ router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => 
 
     await db.tenant.update({
       where: { id: tenant.id },
-      data: { connectToken, connectTokenExpiresAt }
+      data: {
+        connectToken,
+        connectTokenExpiresAt,
+        connectRequestId,
+        pendingStoreUrl,
+        pendingNormalizedDomain,
+      }
     });
 
     const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
@@ -165,19 +194,40 @@ router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => 
 
     logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token issued');
 
-    return res.status(200).json(GENERIC_RESPONSE);
+    return res.status(200).json(buildResponse());
 
   } catch (err) {
     logger.error('Auth connect error:', err);
-    return res.status(200).json(GENERIC_RESPONSE);
+    return res.status(200).json(buildResponse());
   }
 });
 
 router.get('/connect/confirm', async (req, res) => {
   const { token } = req.query;
 
+  const renderResultPage = (title, headline, body) => `
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+      <meta charset="UTF-8"/>
+      <meta name="viewport" content="width=device-width,initial-scale=1"/>
+      <title>${title} — ChargeGuard</title>
+      <style>
+        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b1121;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;margin:0}
+        .card{background:#fff;border-radius:16px;max-width:440px;width:100%;padding:36px 32px;text-align:center;box-shadow:0 25px 50px rgba(0,0,0,0.4)}
+        h1{font-size:20px;color:#0f172a;margin:0 0 12px}
+        p{font-size:14px;color:#475569;line-height:1.6;margin:0}
+      </style>
+    </head>
+    <body><div class="card"><h1>${headline}</h1><p>${body}</p></div></body>
+    </html>
+  `;
+
   if (!token || typeof token !== 'string') {
-    return res.status(400).json({ error: 'Missing or invalid token' });
+    return res.status(400).send(renderResultPage(
+      'Invalid Link', 'Invalid confirmation link',
+      'This link is missing a verification token. Please return to your WordPress admin and try connecting again.'
+    ));
   }
 
   try {
@@ -193,12 +243,37 @@ router.get('/connect/confirm', async (req, res) => {
     });
 
     if (!tenant || !tenant.isActive) {
-      return res.status(401).json({ error: 'Invalid or expired connect link. Please request a new one.' });
+      return res.status(401).send(renderResultPage(
+        'Invalid Link', 'Invalid or expired connect link',
+        'Please return to your WordPress admin and request a new connect link.'
+      ));
     }
 
     if (!tenant.connectTokenExpiresAt || new Date() > new Date(tenant.connectTokenExpiresAt)) {
-      return res.status(410).json({ error: 'This connect link has expired. Please request a new one.' });
+      return res.status(410).send(renderResultPage(
+        'Link Expired', 'This connect link has expired',
+        'Please return to your WordPress admin and request a new one.'
+      ));
     }
+
+    // SECURITY FIX (H1): re-fetch the pending domain-binding fields staged
+    // by /connect. These are applied here — and only here — because
+    // reaching this point already required presenting the exact token
+    // emailed to this tenant's registered address, proving inbox control.
+    // Applying storeUrl/allowedDomains earlier (previously done directly
+    // in /connect, with no such proof) was the vulnerability this closes.
+    const pendingFields = await db.tenant.findUnique({
+      where: { id: tenant.id },
+      select: { pendingStoreUrl: true, pendingNormalizedDomain: true },
+    });
+    const storeUrlUpdate = pendingFields?.pendingStoreUrl
+      ? {
+          storeUrl: pendingFields.pendingStoreUrl,
+          ...(pendingFields.pendingNormalizedDomain
+            ? { allowedDomains: [pendingFields.pendingNormalizedDomain] }
+            : {}),
+        }
+      : {};
 
       let webhookSecret = tenant.webhookSecret;
     if (!webhookSecret) {
@@ -239,25 +314,167 @@ router.get('/connect/confirm', async (req, res) => {
         lastConnectVerifiedAt: new Date(),
         webhookSecret,
         apiKeyHash: newApiKeyHash,
-        apiKey: null,
+        // Applying the staged domain-binding change (if any) and clearing
+        // the staging fields in the same write as credential issuance —
+        // see the pendingFields lookup above.
+        ...storeUrlUpdate,
+        pendingStoreUrl: null,
+        pendingNormalizedDomain: null,
+        // Transiently stored plaintext — NOT the permanent record (only
+        // apiKeyHash is that). It exists only until the WooCommerce plugin
+        // retrieves it via GET /auth/connect/status (polled from
+        // wp-admin), which delivers it once and immediately nulls this
+        // field in the same call. Mirrors the identical
+        // transient-then-purged pattern /tenants/register already uses
+        // for its welcome-email apiKey delivery.
+        apiKey: newApiKey,
         keyRotatedAt: new Date(),
       }
     });
 
-    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token verified — new API key issued');
+    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token verified — new API key issued, awaiting plugin pickup');
 
-    return res.status(200).json({
-      merchantId:    tenant.id,
-      apiKey:        newApiKey,
-      webhookSecret: webhookSecret,
-      email:         tenant.email,
-      message:       'A new API key has been issued for security reasons. Update your WooCommerce plugin settings with this key.',
-    });
+    // Credentials are deliberately absent from this browser-facing
+    // response — see rationale above renderResultPage. The plugin
+    // retrieves them server-to-server via /connect/status instead.
+    return res.status(200).send(renderResultPage(
+      'Email Verified', 'Store connected!',
+      'Return to your WordPress admin — ChargeGuard will finish connecting automatically within a few seconds. You can close this tab.'
+    ));
 
   } catch (err) {
     logger.error('Connect confirm error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    return res.status(500).send(renderResultPage(
+      'Server Error', 'Something went wrong',
+      'Please return to your WordPress admin and try connecting again. If the problem persists, contact support.'
+    ));
   }
+});
+
+// Lightweight in-memory rate limiter — requestId is a 256-bit random
+// token, so brute-force enumeration isn't practical; this only bounds a
+// misbehaving/abusive polling loop, matching the in-memory pattern
+// already used for /risk/blocked-attempt.
+//
+// M2 fix: a requestId polled exactly once was previously never removed
+// — pruning only happened on a re-poll of the SAME key after its window
+// expired. Many distinct requestId values (real or guessed) could grow
+// this map without bound. Two independent bounds close that: (1) a
+// periodic sweep that drops any expired entry regardless of whether
+// it's ever polled again, and (2) a hard cap on total map size with
+// oldest-first eviction as a last-resort backstop within one window.
+const CONNECT_STATUS_RATE = new Map();
+const CS_MAX_REQ = 60;
+const CS_WINDOW_MS = 60 * 1000;
+const CS_MAX_ENTRIES = 5000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of CONNECT_STATUS_RATE.entries()) {
+    if (now - rec.firstAt > CS_WINDOW_MS) {
+      CONNECT_STATUS_RATE.delete(key);
+    }
+  }
+}, CS_WINDOW_MS).unref();
+
+const connectStatusRateLimit = (req, res, next) => {
+  const key = String(req.query.requestId || 'unknown');
+  const now = Date.now();
+  const rec = CONNECT_STATUS_RATE.get(key);
+  if (rec) {
+    if (now - rec.firstAt > CS_WINDOW_MS) {
+      CONNECT_STATUS_RATE.delete(key);
+    } else if (rec.count >= CS_MAX_REQ) {
+      return res.status(429).json({ status: 'pending' }); // generic even under rate limit
+    } else {
+      rec.count++;
+    }
+  } else {
+    if (CONNECT_STATUS_RATE.size >= CS_MAX_ENTRIES) {
+      const oldestKey = CONNECT_STATUS_RATE.keys().next().value;
+      CONNECT_STATUS_RATE.delete(oldestKey);
+    }
+    CONNECT_STATUS_RATE.set(key, { count: 1, firstAt: now });
+  }
+  next();
+};
+
+/**
+ * GET /api/auth/connect/status?requestId=xxx
+ *
+ * Polled by the WooCommerce plugin after POST /connect, while the
+ * merchant confirms via the emailed link (possibly on a different
+ * device/browser). Mirrors OAuth 2.0 Device Authorization Grant
+ * (RFC 8628) polling semantics. Always returns one of a small fixed set
+ * of generic shapes — including for an unknown/decoy requestId — so this
+ * cannot be used to enumerate registered emails.
+ */
+router.get('/connect/status', connectStatusRateLimit, async (req, res) => {
+  const { requestId } = req.query;
+
+  if (!requestId || typeof requestId !== 'string') {
+    return res.status(400).json({ status: 'invalid', error: 'requestId is required' });
+  }
+
+  try {
+    const tenant = await db.tenant.findUnique({
+      where: { connectRequestId: requestId },
+      select: {
+        id: true,
+        email: true,
+        apiKey: true,
+        webhookSecret: true,
+        connectTokenExpiresAt: true,
+      }
+    });
+
+    if (!tenant) {
+      return res.status(200).json({ status: 'pending' });
+    }
+
+    if (tenant.apiKey) {
+      const apiKeyToDeliver = tenant.apiKey;
+      await db.tenant.update({
+        where: { id: tenant.id },
+        data: { apiKey: null, connectRequestId: null },
+      });
+
+      logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect credentials delivered to plugin via status poll');
+
+      return res.status(200).json({
+        status:        'active',
+        merchantId:    tenant.id,
+        apiKey:        apiKeyToDeliver,
+        webhookSecret: tenant.webhookSecret,
+        email:         tenant.email,
+      });
+    }
+
+    if (tenant.connectTokenExpiresAt && new Date() > new Date(tenant.connectTokenExpiresAt)) {
+      return res.status(200).json({ status: 'expired' });
+    }
+
+    return res.status(200).json({ status: 'pending' });
+
+  } catch (err) {
+    logger.error({ module: 'auth', error: err.message }, 'Connect status poll error');
+    return res.status(200).json({ status: 'pending' });
+  }
+});
+
+/**
+ * POST /api/auth/self-test
+ *
+ * Called once by the plugin immediately after connect (self_test() in
+ * class-api-client.php) to confirm the signing secret it just saved
+ * actually matches what the backend has on file for this tenant. The
+ * handler does no work itself — apiKeyAuth + verifyHmacSignature are
+ * the exact same chain used by /risk/evaluate, so reaching this
+ * handler at all is the proof the plugin needs. A signature mismatch
+ * never reaches this code — verifyHmacSignature responds 401 first.
+ */
+router.post('/self-test', apiKeyAuth, verifyHmacSignature, async (req, res) => {
+  return res.status(200).json({ success: true, message: 'Signing verified' });
 });
 
 /**
@@ -322,8 +539,6 @@ router.get('/verify', async (req, res) => {
         code: 'EMAIL_NOT_VERIFIED'
       });
     }
-
-    return res.status(200).json({ valid: true });
 
     return res.status(200).json({ valid: true });
 

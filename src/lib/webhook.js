@@ -12,35 +12,158 @@
  */
 
 const logger = require('./logger');
+const dns    = require('dns').promises;
+const net    = require('net');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const RETRIES          = 3;
 const RETRY_DELAY_MS   = 2000;  // 2s initial, doubles each retry
 const RETRYABLE_CODES  = new Set([429, 500, 502, 503, 504]);
 const FETCH_TIMEOUT_MS = 5000;  // 5s max for webhooks
+const DNS_TIMEOUT_MS   = 2000;  // fail closed if resolution is slow/hanging
 
-// ── SSRF Blocklist ─────────────────────────────────────────────────────────
-const SSRF_BLOCKLIST = [
-  /^localhost$/i,
-  /^127\.\d+\.\d+\.\d+$/,
-  /^0\.0\.0\.0$/,
-  /^10\.\d+\.\d+\.\d+$/,
-  /^172\.(1[6-9]|2\d|3[01])\.\d+\.\d+$/,
-  /^192\.168\.\d+\.\d+$/,
-  /^169\.254\.\d+\.\d+$/,
-  /^::1$/,
-  /^fc00:/i,
-  /^fd00:/i,
+// ── SSRF Protection (C2 fix) ────────────────────────────────────────────────
+// Mirrors the WordPress plugin's chargeguard_host_is_private_or_reserved()
+// (includes/class-admin-settings.php): literal-IP fast path, A+AAAA
+// resolution for hostnames, every resolved address checked against
+// private/reserved ranges, IPv4-mapped IPv6 unwrapping, fail-closed on any
+// resolution error or timeout. This mirroring is necessary, not redundant
+// with the plugin's own check — the backend is the actual network egress
+// point for the outbound webhook request, and is reachable directly via API
+// key (bypassing the WordPress plugin's UI and its validation entirely), so
+// it must enforce this independently rather than trust the caller.
+
+const IPV4_PRIVATE_RESERVED_CIDRS = [
+  '0.0.0.0/8',       // "this" network
+  '10.0.0.0/8',       // RFC1918
+  '100.64.0.0/10',    // CGNAT (RFC6598)
+  '127.0.0.0/8',       // loopback
+  '169.254.0.0/16',    // link-local (includes cloud metadata: 169.254.169.254)
+  '172.16.0.0/12',     // RFC1918
+  '192.0.0.0/24',      // IETF protocol assignments
+  '192.168.0.0/16',    // RFC1918
+  '198.18.0.0/15',     // benchmarking (RFC2544)
+  '224.0.0.0/4',       // multicast
+  '240.0.0.0/4',       // reserved
 ];
+
+function ipv4ToLong(ip) {
+  const parts = ip.split('.').map(Number);
+  if (parts.length !== 4 || parts.some((p) => Number.isNaN(p) || p < 0 || p > 255)) {
+    return null;
+  }
+  return ((parts[0] << 24) | (parts[1] << 16) | (parts[2] << 8) | parts[3]) >>> 0;
+}
+
+function ipv4InCidr(ip, cidr) {
+  const [range, bitsStr] = cidr.split('/');
+  const bits = parseInt(bitsStr, 10);
+  const ipLong    = ipv4ToLong(ip);
+  const rangeLong = ipv4ToLong(range);
+  if (ipLong === null || rangeLong === null) return false;
+  const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+  return (ipLong & mask) === (rangeLong & mask);
+}
+
+function isPrivateOrReservedIPv4(ip) {
+  return IPV4_PRIVATE_RESERVED_CIDRS.some((cidr) => ipv4InCidr(ip, cidr));
+}
+
+// Unwraps ::ffff:a.b.c.d (RFC4291 §2.5.5.2) to its embedded IPv4 form so it
+// is checked against the same ranges as a literal IPv4 address — an
+// IPv4-mapped IPv6 address IS the same network address as its IPv4 form,
+// and this mapping has historically been a real SSRF/allowlist-bypass
+// vector when left unhandled.
+function unwrapIpv4MappedIpv6(ip) {
+  const match = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
+  return match ? match[1] : null;
+}
+
+function isPrivateOrReservedIPv6(ip) {
+  const lower = ip.toLowerCase();
+  if (lower === '::1' || lower === '::') return true; // loopback / unspecified
+  const mapped = unwrapIpv4MappedIpv6(lower);
+  if (mapped) return isPrivateOrReservedIPv4(mapped);   // ::ffff:0:0/96
+  if (/^f[cd][0-9a-f]{2}:/i.test(lower)) return true;    // fc00::/7 (unique local)
+  if (/^fe[89ab][0-9a-f]:/i.test(lower)) return true;    // fe80::/10 (link-local)
+  return false;
+}
+
+function isPrivateOrReservedIP(ip) {
+  const version = net.isIP(ip);
+  if (version === 4) return isPrivateOrReservedIPv4(ip);
+  if (version === 6) return isPrivateOrReservedIPv6(ip);
+  return true; // not a recognizable IP literal — fail closed
+}
+
+function withTimeout(promise, ms) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('DNS_TIMEOUT')), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Resolves every A and AAAA record for hostname and checks each resolved
+ * address against private/reserved ranges. Fails closed (treats as
+ * private/blocked) on any DNS error or timeout — an unresolvable or
+ * slow-resolving hostname is never treated as safe. Checking both record
+ * types matters: a hostname could have a public A record (which alone
+ * would pass) alongside a private/link-local AAAA record, and if delivery
+ * later prefers or falls back to IPv6, that unchecked address is reachable.
+ *
+ * @param {string} hostname
+ * @returns {Promise<{ blocked: boolean, reason?: string }>}
+ */
+async function resolveAndCheckHostname(hostname) {
+  let aRecords = [];
+  let aaaaRecords = [];
+  let aError = null;
+  let aaaaError = null;
+
+  try {
+    aRecords = await withTimeout(dns.resolve4(hostname), DNS_TIMEOUT_MS);
+  } catch (err) {
+    aError = err;
+  }
+  try {
+    aaaaRecords = await withTimeout(dns.resolve6(hostname), DNS_TIMEOUT_MS);
+  } catch (err) {
+    aaaaError = err;
+  }
+
+  // Both lookups failed (or timed out) — cannot confirm safety, fail closed.
+  if (aError && aaaaError) {
+    return { blocked: true, reason: 'DNS resolution failed or timed out' };
+  }
+
+  const allAddresses = [...aRecords, ...aaaaRecords];
+  if (allAddresses.length === 0) {
+    return { blocked: true, reason: 'Hostname did not resolve to any address' };
+  }
+
+  for (const ip of allAddresses) {
+    if (isPrivateOrReservedIP(ip)) {
+      return { blocked: true, reason: 'Hostname resolves to an internal or reserved address' };
+    }
+  }
+
+  return { blocked: false };
+}
 
 // ── URL Validation ─────────────────────────────────────────────────────────
 
 /**
- * Validates a webhook URL for safety and format.
+ * Validates a webhook URL for safety and format, including DNS resolution
+ * of hostnames against private/reserved IP ranges (C2 fix). Async because
+ * DNS resolution is inherently async — callers must `await` this; it is no
+ * longer a synchronous check.
+ *
  * @param {string} url
- * @returns {{ valid: boolean, error?: string }}
+ * @returns {Promise<{ valid: boolean, error?: string }>}
  */
-function validateWebhookUrl(url) {
+async function validateWebhookUrl(url) {
   if (!url || typeof url !== 'string') {
     return { valid: false, error: 'URL is required' };
   }
@@ -56,11 +179,26 @@ function validateWebhookUrl(url) {
     return { valid: false, error: 'Only HTTPS URLs are allowed' };
   }
 
-  const hostname = parsed.hostname.toLowerCase();
-  for (const pattern of SSRF_BLOCKLIST) {
-    if (pattern.test(hostname)) {
+  let hostname = parsed.hostname.toLowerCase();
+  if (hostname === 'localhost') {
+    return { valid: false, error: 'Internal or private IPs are not allowed' };
+  }
+
+  // Strip IPv6 literal brackets ([::1] -> ::1) before checking.
+  hostname = hostname.replace(/^\[|\]$/g, '');
+
+  const ipVersion = net.isIP(hostname);
+  if (ipVersion !== 0) {
+    // Hostname is itself a literal IP — check directly, no DNS involved.
+    if (isPrivateOrReservedIP(hostname)) {
       return { valid: false, error: 'Internal or private IPs are not allowed' };
     }
+    return { valid: true };
+  }
+
+  const result = await resolveAndCheckHostname(hostname);
+  if (result.blocked) {
+    return { valid: false, error: 'Internal or private IPs are not allowed' };
   }
 
   return { valid: true };
@@ -298,6 +436,22 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
   const url  = tenant.webhookUrl;
   const type = tenant.webhookType || 'custom';
 
+  // C2 fix: re-validate at delivery time, not just at save time. A webhook
+  // URL saved once may be delivered to repeatedly over the tenant's entire
+  // lifetime — the gap between save-time validation and any given delivery
+  // can be days, which is more than enough time for DNS to be repointed at
+  // a private/internal address (DNS rebinding). This re-check closes that
+  // window at the point that actually matters: immediately before the
+  // outbound request is made.
+  const revalidation = await validateWebhookUrl(url);
+  if (!revalidation.valid) {
+    logger.warn(
+      { tenantId: tenant.id, reason: revalidation.error },
+      'WEBHOOK_URL_FAILED_DELIVERY_TIME_REVALIDATION'
+    );
+    return;
+  }
+
   const isPaypal = extraContext !== null
                 && typeof extraContext === 'object'
                 && extraContext.alertType === 'paypal_suspicious';
@@ -336,13 +490,25 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       const timeoutId  = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
       const response = await fetch(url, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify(payload),
-        signal:  controller.signal,
+        method:   'POST',
+        headers:  { 'Content-Type': 'application/json' },
+        body:     JSON.stringify(payload),
+        signal:   controller.signal,
+        redirect: 'manual', // C2 fix: never follow redirects — see justification
       });
 
       clearTimeout(timeoutId);
+
+      // fetch() with redirect: 'manual' does not throw on a 3xx; it returns
+      // an opaqueredirect-style response instead. Treat any redirect as a
+      // hard failure rather than resolving/following it ourselves — a
+      // publicly-reachable URL that 302s to an internal address is a
+      // classic SSRF vector that a literal or DNS check alone cannot catch,
+      // since the redirect target is only known at request time.
+      if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
+        console.error(`${label} ❌ Refused to follow redirect response — not retrying`);
+        throw new Error('Webhook URL returned a redirect; redirects are not followed for security reasons.');
+      }
 
       if (response.ok) {
         console.log(`${label} ✅ Sent successfully — ${response.status}`);
@@ -364,9 +530,22 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
     } catch (err) {
       lastError = err;
 
+      // M1 fix: native fetch() never attaches err.response — that's an
+      // Axios convention this code incorrectly assumed. Any thrown
+      // exception here is a real network-level failure (DNS, connection
+      // reset, TLS) or a deliberate throw from the response-handling
+      // branch above (redirect refusal, non-retryable HTTP status,
+      // exhausted retryable-status attempts) — all of those are already
+      // correctly gated before reaching this catch, so anything landing
+      // here that isn't an AbortError should be retried like any other
+      // transient failure, up to the attempt cap.
       if (err.name === 'AbortError') {
         console.error(`${label} ❌ Attempt ${attempt} timed out after ${FETCH_TIMEOUT_MS}ms`);
-      } else if (!RETRYABLE_CODES.has(err.response?.status) || attempt === RETRIES) {
+      } else {
+        console.warn(`${label} ⚠️ Attempt ${attempt} failed: ${err.message}`);
+      }
+
+      if (attempt === RETRIES) {
         break;
       }
     }

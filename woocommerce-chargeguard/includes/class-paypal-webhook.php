@@ -9,6 +9,8 @@
 
 class ChargeGuard_PayPal_Webhook {
 
+    use ChargeGuard_Auto_Block_Trait;
+
     private $api_client;
 
     public function __construct() {
@@ -71,23 +73,59 @@ class ChargeGuard_PayPal_Webhook {
             return new WP_REST_Response( [ 'status' => 'ignored', 'event' => $payload['event_type'] ], 200 );
         }
 
+        // ── 4b. Per-IP rate limit — placed after the cheap idempotency/
+        // event-type checks above but before verify_webhook_signature(),
+        // which makes a real outbound network call to PayPal (OAuth token
+        // fetch + verify-webhook-signature). This is the same
+        // transient-based pattern already used in
+        // ChargeGuard_Dynamic_Firewall::ajax_check_fingerprint(), applied
+        // here because this REST route is public/unauthenticated
+        // (permission_callback => __return_true) and the event_type
+        // allow-list alone is not a meaningful barrier — the values in it
+        // are public PayPal documentation, not a secret. Without this,
+        // an attacker can drive unlimited outbound requests from this
+        // server to PayPal's API using nothing but a guessed event_type
+        // string, at cost to this store's bandwidth/connection pool and
+        // at risk of exhausting PayPal's own rate limit for this
+        // merchant's real webhook deliveries.
+        $rl_ip  = class_exists( 'ChargeGuard_Dynamic_Firewall' ) ? ChargeGuard_Dynamic_Firewall::get_client_ip() : '';
+        $rl_ip  = $rl_ip !== '' ? $rl_ip : 'unknown';
+        $rl_key = 'chargeguard_pp_rate_' . md5( $rl_ip );
+        $rl_count = get_transient( $rl_key );
+        if ( $rl_count === false ) {
+            set_transient( $rl_key, 1, 60 );
+        } elseif ( $rl_count >= 10 ) {
+            // Generic 200 with no error detail: avoids leaking anything
+            // an attacker could use to distinguish "rate limited" from
+            // "processed", and — critically for a webhook endpoint —
+            // avoids returning a 4xx/5xx that would make PayPal treat
+            // this as a failed delivery and schedule retries, which
+            // would only add more requests during an already-abusive
+            // window. See class docblock / justification for full
+            // reasoning.
+            return new WP_REST_Response( [ 'status' => 'rate_limited' ], 200 );
+        } else {
+            set_transient( $rl_key, $rl_count + 1, 60 );
+        }
+
         // ── 5. التحقق من توقيع PayPal (Remote Verification) ─────────
         $verified = $this->verify_webhook_signature( $request, $payload_raw );
         if ( ! $verified ) {
             return new WP_REST_Response( [ 'error' => 'Invalid signature' ], 403 );
         }
 
-        // ── 6. تسجيل Idempotency بعد التحقق ─────────────────────────
-        if ( $cache_key ) {
-            set_transient( $cache_key, 1, 48 * HOUR_IN_SECONDS );
-        }
-
-        // ── 7. استخراج البيانات من الـ payload ──────────────────────
+        // ── 6. استخراج البيانات من الـ payload ──────────────────────
         $extracted = $this->extract_payment_data( $payload );
 
         if ( ! $extracted ) {
             // حدث لا يحتوي على بيانات دفع قابلة للمعالجة (مثل RISK.DISPUTE.CREATED)
+            // No send_enrich() call happens on this path, so there is no
+            // transient-failure risk — safe to mark this delivery
+            // processed immediately.
             $this->handle_dispute_event( $payload );
+            if ( $cache_key ) {
+                set_transient( $cache_key, 1, 48 * HOUR_IN_SECONDS );
+            }
             return new WP_REST_Response( [ 'status' => 'handled', 'event' => $payload['event_type'] ], 200 );
         }
 
@@ -119,20 +157,56 @@ class ChargeGuard_PayPal_Webhook {
         // نرسل فقط إذا كان هناك BIN أو last4 (بيانات بطاقة حقيقية)
         $has_card_data = ! empty( $enrich_data['bin'] ) || ! empty( $enrich_data['last4'] );
 
+        // Tracks whether this delivery reached a definitive outcome.
+        // Stays true for the "nothing to send" fallthrough (no card data,
+        // no payer email, or no resolved order) since there's no external
+        // call whose failure we'd need to retry. Flipped to false only
+        // when send_enrich() itself returns a WP_Error.
+        $mark_processed = true;
+
         if ( $has_card_data ) {
             $result = $this->api_client->send_enrich( $enrich_data );
 
-            // إذا كان القرار block وكانت الـ auto-block مفعلة وعندنا order_id
-            if ( $order_id && ! is_wp_error( $result ) ) {
-                $this->maybe_block_order( $result, $order_id );
+            if ( is_wp_error( $result ) ) {
+                // Transient failure (network blip, backend 5xx, timeout).
+                // Do NOT mark this transmission processed — leaving the
+                // transient unset lets PayPal's own redelivery retry
+                // enrichment instead of the order silently and
+                // permanently losing its fraud data.
+                $mark_processed = false;
+            } elseif ( $order_id ) {
+                // إذا كان القرار block وكانت الـ auto-block مفعلة وعندنا order_id
+                $this->chargeguard_maybe_block_order(
+                    $result,
+                    $order_id,
+                    __( 'Blocked by ChargeGuard: Suspicious PayPal payment detected.', 'chargeguard-woocommerce' )
+                );
             }
         } elseif ( ! empty( $extracted['payer_email'] ) ) {
             // PayPal Balance payment — لا بطاقة، لكن نُسجّل الحدث للـ velocity tracking
             // نرسل للـ enrich بدون bin — سيُخزَّن كـ pendingEnrichment إذا لم يُوجد الطلب
             if ( $order_id ) {
                 $enrich_data['orderId'] = (string) $order_id;
-                $this->api_client->send_enrich( $enrich_data );
+                $result = $this->api_client->send_enrich( $enrich_data );
+
+                if ( is_wp_error( $result ) ) {
+                    $mark_processed = false;
+                }
             }
+        }
+
+        // ── Idempotency — mark processed only after a definitive outcome ──
+        // Moved here from the old step 6 (right after signature
+        // verification). Setting it that early meant a transient
+        // send_enrich() failure still got marked "processed," so PayPal's
+        // legitimate redelivery of that same transmission_id would be
+        // swallowed by the already_processed check earlier in this
+        // method — permanently dropping enrichment and any auto-block
+        // decision for that order. This mirrors the Stripe handler's
+        // placement: the transient is only written once we know there's
+        // nothing left that a retry could usefully redo.
+        if ( $cache_key && $mark_processed ) {
+            set_transient( $cache_key, 1, 48 * HOUR_IN_SECONDS );
         }
 
         return $response;
@@ -147,14 +221,15 @@ class ChargeGuard_PayPal_Webhook {
      */
     private function verify_webhook_signature( $request, $payload_raw ) {
         $client_id     = get_option( 'chargeguard_paypal_client_id' );
-        $client_secret = get_option( 'chargeguard_paypal_client_secret' );
+        $client_secret = chargeguard_get_secret_option( 'chargeguard_paypal_client_secret' );
         $webhook_id    = get_option( 'chargeguard_paypal_webhook_id' );
 
-        // إذا لم تكن الإعدادات مكتملة، نتجاوز التحقق في البيئة التطويرية فقط
+        // Fail closed: incomplete PayPal credentials mean we cannot verify
+        // this webhook's authenticity, so it must always be rejected.
+        // There is no environment-based bypass — WP_DEBUG is a diagnostics
+        // flag, not a trusted signal that this request originated from a
+        // safe, non-public environment, and this endpoint is public.
         if ( ! $client_id || ! $client_secret || ! $webhook_id ) {
-            if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                return true; // تطوير فقط
-            }
             return false;
         }
 
@@ -397,39 +472,4 @@ class ChargeGuard_PayPal_Webhook {
         $this->api_client->send_feedback( $order_id, true );
     }
 
-    /**
-     * إلغاء الطلب تلقائياً إذا كان القرار block وكانت الميزة مفعلة.
-     *
-     * @param array $result  نتيجة enrich من ChargeGuard.
-     * @param int   $order_id معرف الطلب في WooCommerce.
-     */
-    private function maybe_block_order( $result, $order_id ) {
-        $auto_block = get_option( 'chargeguard_auto_block', 'no' );
-        if ( $auto_block !== 'yes' ) {
-            return;
-        }
-
-        $decision = $result['newDecision'] ?? $result['decision'] ?? '';
-        if ( strtolower( $decision ) !== 'block' ) {
-            return;
-        }
-
-        $order = wc_get_order( $order_id );
-        if ( ! $order ) {
-            return;
-        }
-
-        $min_amount = (float) get_option( 'chargeguard_block_min_amount', 0 );
-        if ( $min_amount > 0 && $order->get_total() < $min_amount ) {
-            return;
-        }
-
-        $order->update_status(
-            'failed',
-            __( 'Blocked by ChargeGuard: Suspicious PayPal payment detected.', 'chargeguard-woocommerce' )
-        );
-        $order->add_order_note(
-            'ChargeGuard PayPal decision: block. Flags: ' . json_encode( $result['flags'] ?? [] )
-        );
     }
-}

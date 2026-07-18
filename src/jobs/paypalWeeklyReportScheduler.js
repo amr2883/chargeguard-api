@@ -21,8 +21,8 @@
  * Follows exact same patterns as weeklySummaryScheduler.js.
  */
 
-const db                              = require('../lib/db');
 const { sendPaypalWeeklyReportEmail } = require('../lib/email');
+const { acquireLock }                 = require('../lib/distributedLock');
 const { SAVINGS_PER_ATTACK }          = require('../lib/constants');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
@@ -59,6 +59,12 @@ async function runPaypalWeeklyReportCheck(prisma) {
     now.getUTCHours()   !== SEND_HOUR_UTC ||
     now.getUTCMinutes() <  SEND_MINUTE_MIN
   ) {
+    return;
+  }
+
+  const lock = await acquireLock('scheduler:paypalWeekly', 120_000);
+  if (!lock) {
+    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
     return;
   }
 
@@ -119,29 +125,23 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
     return;
   }
 
-  // ── Step 2: Fetch this week's orders — filter PayPal by signalsSnapshot ──
-  // We look at orders where signalsSnapshot contains enrichmentSource = 'paypal'
-  // We fetch all orders for the tenant's merchantId this week, then filter in JS
-  // (Prisma doesn't support JSON field filtering portably across DBs)
-  const thisWeekOrders = await prisma.order.findMany({
+  // ── Step 2: Fetch this week's PayPal orders — filtered in the DB ──────────
+  // L3 perf fix: enrichmentSource is now an indexed column (see schema.prisma
+  // + routes/risk.js /enrich), so Postgres does the PayPal filtering via the
+  // @@index([merchantId, enrichmentSource, createdAt]) index instead of this
+  // job loading every order for the tenant and JSON.parse()-ing signalsSnapshot
+  // per row. signalsSnapshot is still selected because Step 5 below still
+  // needs to read country data out of it — only the *filtering* moved to SQL.
+  const paypalOrders = await prisma.order.findMany({
     where: {
-      merchantId: tenant.id,         // tenant.id === merchantId in this schema
-      createdAt:  { gte: currentWeekStart },
+      merchantId:       tenant.id,   // tenant.id === merchantId in this schema
+      createdAt:        { gte: currentWeekStart },
+      enrichmentSource: 'paypal',
     },
     select: {
       decision:        true,
       signalsSnapshot: true,
     },
-  });
-
-  // Filter to PayPal orders only (enrichmentSource === 'paypal' in snapshot)
-  const paypalOrders = thisWeekOrders.filter(o => {
-    try {
-      const snap = JSON.parse(o.signalsSnapshot || '{}');
-      return snap.enrichmentSource === 'paypal';
-    } catch {
-      return false;
-    }
   });
 
   const paypalTxnCount     = paypalOrders.length;
@@ -156,23 +156,16 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   }
 
   // ── Step 4: Last week's suspicious count (week-over-week) ─────────────────
-  const prevWeekOrders = await prisma.order.findMany({
+  // L3 perf fix: was findMany + JS filter + .length; now a single indexed
+  // COUNT query — no rows materialized in Node memory at all for this step.
+  const prevPaypalSuspicious = await prisma.order.count({
     where: {
-      merchantId: tenant.id,
-      createdAt:  { gte: prevWeekStart, lt: currentWeekStart },
+      merchantId:       tenant.id,
+      createdAt:        { gte: prevWeekStart, lt: currentWeekStart },
+      enrichmentSource: 'paypal',
+      decision:         { in: ['block', 'review'] },
     },
-    select: { decision: true, signalsSnapshot: true },
   });
-
-  const prevPaypalSuspicious = prevWeekOrders.filter(o => {
-    try {
-      const snap = JSON.parse(o.signalsSnapshot || '{}');
-      return snap.enrichmentSource === 'paypal' &&
-             (o.decision === 'block' || o.decision === 'review');
-    } catch {
-      return false;
-    }
-  }).length;
 
   const thisWeekSuspicious = paypalBlockedCount + paypalFlaggedCount;
 
