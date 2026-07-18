@@ -252,6 +252,37 @@ async function registerPatternMerchant(patternHash, merchantId) {
   }
 }
 
+// M6 fix: per-tenant cap on legit-record contribution to a shared
+// pattern's denominator. MAX_LEGIT_INFLUENCE alone only bounds the
+// GLOBAL legitCount — it does nothing to stop one merchantId from
+// single-handedly supplying all of it via synthetic orders that combine
+// fraud-indicative signals while ensuring no later fraud report. This
+// tracks contributions per (patternHash, merchantId) in PatternMerchant
+// and refuses further legit increments from a merchant once it hits its
+// own per-tenant ceiling — independent of, and tighter than, the global cap.
+const MAX_LEGIT_INFLUENCE_PER_MERCHANT = 5;
+
+async function canContributeLegit(patternHash, merchantId) {
+  if (!merchantId) return true; // no merchant to attribute to — can't rate-limit by tenant
+  const row = await db.patternMerchant.findUnique({
+    where: { patternHash_merchantId: { patternHash, merchantId } },
+    select: { legitCount: true },
+  });
+  return !row || row.legitCount < MAX_LEGIT_INFLUENCE_PER_MERCHANT;
+}
+
+async function incrementMerchantLegitCount(patternHash, merchantId) {
+  if (!merchantId) return;
+  try {
+    await db.patternMerchant.update({
+      where: { patternHash_merchantId: { patternHash, merchantId } },
+      data: { legitCount: { increment: 1 } },
+    });
+  } catch (err) {
+    logger.error({ module: 'patternSharing', err: err.message }, 'legitCount increment failed');
+  }
+}
+
 async function updatePatternWithRetry(patternHash, isFraud, trustedWeightedScore, isNewMerchant, maxRetries = 3) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     // Exponential backoff مع jitter — يمنع thundering herd في high contention
@@ -329,22 +360,29 @@ async function recordPattern(order, emailIntel, ipIntel, isFraud = false, mercha
     // ─── Merchant Trust (Confidence-adjusted) ────────────────────────
     // تاجر جديد → تأثير محدود على الـ network
     // تاجر أثبت نفسه → وزن أعلى
-     // TODO: استخدام MerchantProfile بدلاً من Merchant
-  let merchantTrust = 0.3; // default
-  /*
-  if (merchantId) {
-    try {
-      const merchant = await db.merchantProfile.findUnique({
-        where: { merchantId },
-        select: { trustScore: true, reportCount: true },
-      });
-      if (merchant) {
-        const confidence = 1 - Math.exp(-(merchant.reportCount || 0) / 10);
-        merchantTrust = merchant.trustScore * confidence;
+     // ─── Merchant Trust Lookup ────────────────────────────────────────
+    // Wired to MerchantProfile.trustScore (kept current by feedbackLoop.js
+    // on every dispute outcome) rather than a flat default — same
+    // fetch-and-compute formula as computeMerchantTrust() in
+    // identityGraph.js. Falls back to 0.3 (new/unknown merchant, or a DB
+    // failure during lookup) so a lookup error can never abort
+    // recordPattern() — it only ever degrades to the previous flat
+    // behavior for this one call.
+    let merchantTrust = 0.3; // default
+    if (merchantId) {
+      try {
+        const merchantProfile = await db.merchantProfile.findUnique({
+          where: { merchantId },
+          select: { trustScore: true, reportCount: true },
+        });
+        if (merchantProfile) {
+          const confidence = 1 - Math.exp(-(merchantProfile.reportCount || 0) / 10);
+          merchantTrust = merchantProfile.trustScore * confidence;
+        }
+      } catch (trustErr) {
+        logger.error({ module: 'patternSharing', err: trustErr.message }, 'MerchantProfile trust lookup failed — falling back to default trust');
       }
-    } catch { }
-  }
-  */
+    }
 
     if (!isFraud && merchantTrust < 0.2) return null;
 
@@ -356,10 +394,17 @@ async function recordPattern(order, emailIntel, ipIntel, isFraud = false, mercha
     });
 
     if (existing) {
-      // Anti-replay: وقف الـ legit recording لو وصل للـ cap
-      if (!isFraud && Number(existing.legitCount ?? 0) >= MAX_LEGIT_INFLUENCE) return null;
+      // Anti-replay: global cap (unchanged) plus per-tenant cap (M6 fix)
+      // — either one alone is insufficient; the global cap doesn't stop
+      // one merchant from being the sole contributor, and a per-tenant
+      // cap alone doesn't bound total network noise.
+      if (!isFraud) {
+        if (Number(existing.legitCount ?? 0) >= MAX_LEGIT_INFLUENCE) return null;
+        if (!(await canContributeLegit(patternHash, merchantId))) return null;
+      }
 
       const isNewPatternMerchant = await registerPatternMerchant(patternHash, merchantId);
+      if (!isFraud) await incrementMerchantLegitCount(patternHash, merchantId);
       indexPattern(patternHash, activeSignals);
       const updated = await updatePatternWithRetry(patternHash, isFraud, trustedWeightedScore, isNewPatternMerchant);
       if (!updated) return null;
@@ -637,8 +682,8 @@ async function checkPatternRisk(order, emailIntel, ipIntel, patternContext = {})
 
 // patternContext — computed signals (isHighVelocity, ...) من الـ caller
 // default = {} للـ backward compatibility مع الـ callers القديمة
-async function markPatternAsFraud(order, emailIntel, ipIntel, patternContext = {}) {
-  return recordPattern(order, emailIntel, ipIntel, true, null, patternContext);
+async function markPatternAsFraud(order, emailIntel, ipIntel, merchantId, patternContext = {}) {
+  return recordPattern(order, emailIntel, ipIntel, true, merchantId, patternContext);
 }
 module.exports = {
   buildPattern,

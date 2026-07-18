@@ -12,9 +12,9 @@ const prisma = new PrismaClient();
 
 // ── Constants ─────────────────────────────────────────────────
 const { SAVINGS_PER_ATTACK: FEES_PER_ATTEMPT } = require('../lib/constants');
-const DASHBOARD_RATE   = new Map();
-const MAX_REQ          = 30;
-const WINDOW_MS        = 60 * 1000;
+const WINDOW_MS      = 60 * 1000;
+const IP_MAX_REQ      = 300; // coarse anti-abuse ceiling, pre-auth
+const TENANT_MAX_REQ  = 30;  // actual per-tenant product limit, post-auth
 
 // ── US English formatters ─────────────────────────────────────
 const fmtDate = new Intl.DateTimeFormat('en-US', {
@@ -29,24 +29,76 @@ const fmtCurrency = new Intl.NumberFormat('en-US', {
   style: 'currency', currency: 'USD',
 });
 
-// ── Rate Limiter ──────────────────────────────────────────────
-const rateLimit = (req, res, next) => {
-  const ip  = req.ip || 'unknown';
-  const now = Date.now();
-  const rec = DASHBOARD_RATE.get(ip);
-  if (rec) {
-    if (now - rec.firstAt > WINDOW_MS) {
-      DASHBOARD_RATE.delete(ip);
-    } else if (rec.count >= MAX_REQ) {
-      return res.status(429).json({ error: 'Too Many Requests' });
+// ── Rate Limiter Factory ──────────────────────────────────────
+// Single implementation shared by the pre-auth IP limiter and the
+// post-auth tenant limiter, keyed differently, so fixing/tuning the
+// windowing logic only needs to happen in one place.
+//
+// Memory leak fix: store.delete() previously only ran when the SAME key
+// made a second request after its window expired — a key that appears
+// once (a one-off bot/crawler IP, a tenant that only ever calls once)
+// was never removed, so the Map grew without bound over the process
+// lifetime. Every store created here is registered in
+// RATE_LIMITER_STORES and swept by a single periodic interval below, so
+// expiry no longer depends on the key ever coming back.
+const RATE_LIMITER_STORES  = [];
+const CLEANUP_INTERVAL_MS  = WINDOW_MS; // sweep once per window (60s)
+
+const makeRateLimiter = (keyFn, max) => {
+  const store = new Map();
+  RATE_LIMITER_STORES.push(store);
+  return (req, res, next) => {
+    const key = keyFn(req);
+    if (key === null) return next(); // no key available yet (e.g. no tenant) — skip this layer
+    const now = Date.now();
+    const rec = store.get(key);
+    if (rec) {
+      if (now - rec.firstAt > WINDOW_MS) {
+        store.set(key, { count: 1, firstAt: now });
+      } else if (rec.count >= max) {
+        return res.status(429).json({ error: 'Too Many Requests' });
+      } else {
+        rec.count++;
+      }
     } else {
-      rec.count++;
+      store.set(key, { count: 1, firstAt: now });
     }
-  } else {
-    DASHBOARD_RATE.set(ip, { count: 1, firstAt: now });
-  }
-  next();
+    next();
+  };
 };
+
+// Periodic sweep — removes any entry whose window has expired, regardless
+// of whether that key ever makes another request. Runs once per window
+// (60s) rather than on the request path, so cleanup cost is fully
+// decoupled from request latency: O(n) per sweep, where n is bounded by
+// the number of distinct keys seen in the last window+sweep period, and
+// the work happens off the hot path entirely. .unref() so this timer
+// never keeps the Node process alive on its own (matters for graceful
+// shutdown, and for test runners like Jest that flag open handles).
+const cleanupInterval = setInterval(() => {
+  const now = Date.now();
+  for (const store of RATE_LIMITER_STORES) {
+    for (const [key, rec] of store) {
+      if (now - rec.firstAt > WINDOW_MS) {
+        store.delete(key);
+      }
+    }
+  }
+}, CLEANUP_INTERVAL_MS);
+cleanupInterval.unref();
+
+// Layer 1 — pre-auth, IP-keyed. High ceiling: this exists to protect
+// requireAuth()'s DB lookup from brute-force/credential-stuffing and
+// basic flood, not to enforce product-level fairness.
+const rateLimit = makeRateLimiter((req) => req.ip || 'unknown', IP_MAX_REQ);
+
+// Layer 2 — post-auth, tenant-keyed. This is the real per-tenant limit;
+// it only runs after authByApiKey has populated req.tenant, so tenants
+// behind a shared IP each get their own independent bucket.
+const tenantRateLimit = makeRateLimiter(
+  (req) => req.tenant?.id ?? null,
+  TENANT_MAX_REQ
+);
 
 // ── API Key Auth ──────────────────────────────────────────────
 const { requireAuth } = require('../middleware/authenticate');
@@ -307,6 +359,31 @@ router.get('/', rateLimit, authByApiKey, async (req, res) => {
 router.get('/page', rateLimit, authByApiKey, async (req, res) => {
   try {
     const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+
+    // Consistency fix: GET /api/dashboard (JSON) already replaces
+    // binActivity/binSequenceStats/threatOrigins with a locked stub for
+    // non-Pro tenants (BOLA fix above). This HTML sibling endpoint must
+    // apply the identical stub to the SAME `data` object before handing
+    // it to buildDashboardHtml() — otherwise buildDashboardHtml()'s
+    // per-panel isProOrAbove() checks only decide what to RENDER, while
+    // the real Pro-gated numbers (e.g. binActivity.totalBinPatterns) and
+    // real Pro-gated booleans (binSequenceStats.activePrefixes /
+    // blockedPrefixes, used to decide whether a teaser even appears)
+    // are still present in the `data` object those checks read from. A
+    // Starter tenant viewing page source, or any client ignoring the CSS
+    // blur, could recover both — data the JSON API already denies them.
+    const tenantIsPro = isProOrAbove(req.tenant.plan);
+    if (!tenantIsPro) {
+      const proLocked = {
+        locked:          true,
+        upgradeRequired: true,
+        message:         'Upgrade to Pro to unlock this feature.',
+      };
+      data.binActivity      = proLocked;
+      data.binSequenceStats = proLocked;
+      data.threatOrigins    = proLocked;
+    }
+
     res.setHeader('Content-Type',  'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag',  'noindex');
@@ -1853,8 +1930,7 @@ const buildDashboardHtml = async (tenant, data) => {
       const isPro = isProOrAbove(tenant.plan);
 
       if (!isPro) {
-        const stats = data.binSequenceStats || { activePrefixes: 0, blockedPrefixes: 0, totalActiveBINs: 0 };
-        const hasActivity = stats.blockedPrefixes > 0 || stats.activePrefixes > 0;
+        const hasActivity = data.totalBlocked > 0;
         if (!hasActivity) return '';
         return `<div class="bin-panel pro-lock">
           <div class="tbl-header">
@@ -2436,7 +2512,17 @@ async function buildReportsArchiveSection(tenantId, plan) {
   const fmtUsd = (n) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD', minimumFractionDigits: 0 });
 
   const rows = reports.map((r, i) => {
-    const isLocked   = !isPro && i > 0;
+    // Matches GET /monthly-report-preview exactly: that endpoint returns
+    // { locked: true } for every non-Pro tenant regardless of which
+    // report is requested, so the UI must not offer an unlocked link for
+    // ANY row — including the latest (i === 0) — when the tenant isn't
+    // Pro/Agency. A prior version of this condition (`!isPro && i > 0`)
+    // rendered a working-looking "View Report" link for the latest
+    // report that the backend unconditionally rejected. If a "first
+    // report free" funnel is ever wanted, it must be added to both this
+    // condition and the /monthly-report-preview handler together, as a
+    // deliberate product decision — not left as an accidental gap here.
+    const isLocked   = !isPro;
     const monthLabel = `${monthNames[r.reportMonth]} ${r.reportYear}`;
     const isLatest   = i === 0;
 
@@ -2453,18 +2539,19 @@ async function buildReportsArchiveSection(tenantId, plan) {
           ${isLatest ? '<div style="font-size:.62rem;color:#60a5fa;font-weight:600;margin-top:.1rem;">latest</div>' : ''}
         </div>
 
+        // NEW
         <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;">
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Attacks</div>
-            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'DM Mono',monospace;">${r.totalAttacks.toLocaleString('en-US')}</div>
+            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'DM Mono',monospace;">${isLocked ? '•••' : r.totalAttacks.toLocaleString('en-US')}</div>
           </div>
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Protected</div>
-            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'DM Mono',monospace;">${fmtUsd(r.totalProtected)}</div>
+            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'DM Mono',monospace;">${isLocked ? '•••' : fmtUsd(r.totalProtected)}</div>
           </div>
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Fees Saved</div>
-            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'DM Mono',monospace;">${fmtUsd(r.totalFeesSaved)}</div>
+            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'DM Mono',monospace;">${isLocked ? '•••' : fmtUsd(r.totalFeesSaved)}</div>
           </div>
         </div>
 
@@ -2497,8 +2584,14 @@ async function buildReportsArchiveSection(tenantId, plan) {
       </a>
     </div>` : '';
 
-  const totalHistoricalProtected = reports.reduce((s, r) => s + r.totalProtected, 0);
-  const summaryBadge = totalHistoricalProtected > 0 ? `
+// NEW
+  // isPro gate mirrors the per-row `isLocked` check above — for a non-Pro
+  // tenant every report in `reports` is locked, so this summary badge must
+  // not sum real totalProtected values across them either (same leak class,
+  // aggregate form instead of per-row).
+  const totalHistoricalProtected = isPro
+    ? reports.reduce((s, r) => s + r.totalProtected, 0)
+    : 0;  const summaryBadge = totalHistoricalProtected > 0 ? `
     <div style="font-size:.72rem;color:#4ade80;font-weight:600;
                 background:rgba(74,222,128,.08);border:1px solid rgba(74,222,128,.2);
                 border-radius:20px;padding:.2rem .7rem;">

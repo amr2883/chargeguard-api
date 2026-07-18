@@ -21,6 +21,26 @@ const BIN_INTEL_ENABLED = process.env.ENABLE_BIN_INTEL !== "false";
 const NEUTRINO_API_KEY = process.env.NEUTRINO_API_KEY;
 const USE_FREE_API = process.env.BIN_FALLBACK_API !== "neutrino"; // default free
 
+// ─── M8 Production Safety Guard ─────────────────────────────────────────
+// MOCK_BIN_INTEL silently replaces every real BIN lookup with hardcoded
+// clean-card data — prepaid flags, issuer-country mismatch, and country-risk
+// penalty all go dark with no error, no crash, and only a console.log to
+// notice by. If this is ever accidentally set in a production environment
+// config, fraud detection degrades silently and could stay that way for
+// days before anyone catches it from loss numbers rather than logs.
+//
+// This assertion runs once at module load (require-time), before the app
+// can bind a port or accept traffic — a misconfigured production process
+// fails to boot at all rather than silently serving mock BIN data.
+if (process.env.MOCK_BIN_INTEL === 'true' && process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'FATAL: MOCK_BIN_INTEL=true is set with NODE_ENV=production. ' +
+    'This would silently disable real BIN fraud-detection signals for every ' +
+    'transaction. Refusing to start. Remove MOCK_BIN_INTEL from the production ' +
+    'environment config to proceed.'
+  );
+}
+
 const MAX_BIN_CACHE = 5000;
 const BIN_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
@@ -260,12 +280,12 @@ async function persistBinData(cacheKey, data) {
 
 // ─── Main entry point ───────────────────────────────────────────────────
 async function getBINIntelligence(binRaw, merchantId = null) {
-  console.log(`[BIN] getBINIntelligence called with binRaw = ${binRaw}`);
+  logger.debug({ module: 'binIntel', binRaw }, 'getBINIntelligence called');
   const start = Date.now();
   
   // وضع البيانات الوهمية للتطوير (مثل IP Intelligence)
   if (process.env.MOCK_BIN_INTEL === 'true') {
-    console.log(`[BIN] MOCK_BIN_INTEL enabled — using mock data for ${binRaw}`);
+    logger.debug({ module: 'binIntel', binRaw }, 'MOCK_BIN_INTEL enabled — using mock data');
     // بيانات وهمية لـ BIN نيجيري (506146)
     if (binRaw === '506146') {
       return {
@@ -379,7 +399,7 @@ async function getBINIntelligence(binRaw, merchantId = null) {
     return result;
   }
 
-  console.log(`[BIN] getBINIntelligence returning _skipped()`);
+  logger.debug({ module: 'binIntel', binRaw }, 'getBINIntelligence returning _skipped()');
   prometheus.recordBINIntel('all_failed', 'failure');
   return _skipped();
 }
@@ -451,7 +471,7 @@ function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, mer
     }
   }
 
-  console.log(`[BIN] issuerCountry = ${binIntel.issuerCountry}`);
+  logger.debug({ module: 'binIntel', issuerCountry: binIntel.issuerCountry }, 'Evaluating country risk signal');
   // Signal 4: Country risk
   if (amount > 50 && binIntel.issuerCountry) {
     try {

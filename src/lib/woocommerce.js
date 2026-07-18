@@ -32,11 +32,24 @@ function extractOrderData(payload) {
 function verifyWebhookSignature(rawBody, signatureHeader, secret) {
   if (!rawBody || !signatureHeader || !secret) return false;
   const expected = crypto.createHmac('sha256', secret).update(rawBody).digest('base64');
-  console.log("Expected signature:", expected);
-  console.log("Received signature:", signatureHeader);
-  // Constant-time comparison only if lengths match
-  if (expected.length !== signatureHeader.length) return false;
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  // I11 fix: previously logged the full computed and received HMAC
+  // signature values unconditionally, on every webhook call. Neither
+  // value needs to be persisted to logs — a successful verification
+  // needs no record of the signature itself, and a failed one only
+  // needs enough to diagnose a misconfiguration (e.g. a stale secret
+  // producing a mismatched length), not the actual signature bytes.
+  // Logging only on mismatch, and only lengths, keeps this useful for
+  // debugging without writing sensitive HMAC output to logs that may
+  // have broader retention/access than the application itself.
+  if (expected.length !== signatureHeader.length) {
+    console.log(`Webhook signature length mismatch — expected ${expected.length} chars, received ${signatureHeader.length} chars`);
+    return false;
+  }
+  const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signatureHeader));
+  if (!isValid) {
+    console.log('Webhook signature mismatch — computed signature does not match received signature');
+  }
+  return isValid;
 }
 
 /**

@@ -13,6 +13,7 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 const { sendRenewalReminderEmail, sendGracePeriodEmail } = require('../lib/email');
+const { acquireLock } = require('../lib/distributedLock');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -40,6 +41,19 @@ const canSendEmail = (lastSentAt) => {
   const hoursSince = (Date.now() - new Date(lastSentAt).getTime()) / (1000 * 60 * 60);
   return hoursSince >= REMINDER_COOLDOWN_HOURS;
 };
+
+// ── Helper: تطبيع قيم billingCycle الداخلية/الترويجية ──────────────────────
+// billingCycle قد يحمل قيماً ليست دورات فوترة حقيقية — 'early_access_promo'
+// مثال على ذلك: هي مصدر المنحة (3 أشهر Pro مجانية عند التسجيل، انظر
+// earlyAccessGrant في routes/risk.js)، وليست SKU مستقلة. PLAN_CONFIG في
+// routes/payments.js لا يعرف سوى 'monthly' و'annual'. عند التجديد، المسار
+// الطبيعي الوحيد لتاجر Early Access هو Pro الشهري العادي.
+const BILLING_CYCLE_ALIASES = {
+  early_access_promo: 'monthly',
+};
+
+const normalizeBillingCycle = (billingCycle) =>
+  BILLING_CYCLE_ALIASES[billingCycle] || billingCycle || 'monthly';
 
 // ── Helper: بناء رابط التجديد ────────────────────────────────────────────────
 const buildRenewUrl = (planId) => {
@@ -91,8 +105,8 @@ const processRenewalReminders = async (db) => {
       // إذا كان 2.8 يوم → floor = 2، نتحقق هل 3 في النطاق (2.8 > 2.5 → نعم)
       const hoursLeft   = (endDate - now) / (1000 * 60 * 60);
       const daysLeft    = Math.ceil(hoursLeft / 24); // للعرض في الإيميل فقط
-      const shouldRemind = REMINDER_DAYS.some(d => hoursLeft <= d * 24 && hoursLeft > (d * 24) - 25);
-      // window = 25 ساعة لكل نقطة (أكبر من interval الساعة بهامش أمان)
+      const shouldRemind = REMINDER_DAYS.some(d => hoursLeft <= d * 24 && hoursLeft > (d * 24) - 20);
+      // window = 20 ساعة لكل نقطة (تساوي REMINDER_COOLDOWN_HOURS بالضبط — يمنع التداخل بين النافذة والـ cooldown)
 
       if (!shouldRemind) continue;
 
@@ -102,7 +116,7 @@ const processRenewalReminders = async (db) => {
       }
 
       const planLabel = PLAN_LABELS[tenant.plan] || tenant.plan;
-      const planId    = `${tenant.plan}_${tenant.billingCycle || 'monthly'}`;
+      const planId    = `${tenant.plan}_${normalizeBillingCycle(tenant.billingCycle)}`;
 
       await sendRenewalReminderEmail(
         { email: tenant.email, storeUrl: tenant.storeUrl },
@@ -178,7 +192,7 @@ const processExpiredToGrace = async (db) => {
       // إرسال إيميل Grace Period (مع cooldown)
       if (canSendEmail(tenant.lastGracePeriodNoticeSentAt)) {
         const planLabel = PLAN_LABELS[tenant.plan] || tenant.plan;
-        const planId    = `${tenant.plan}_${tenant.billingCycle || 'monthly'}`;
+        const planId    = `${tenant.plan}_${normalizeBillingCycle(tenant.billingCycle)}`;
 
         await sendGracePeriodEmail(
           { email: tenant.email, storeUrl: tenant.storeUrl },
@@ -229,18 +243,29 @@ const processGraceToExpired = async (db) => {
 
   for (const tenant of graceExpiredTenants) {
     try {
-      await db.tenant.update({
-        where: { id: tenant.id },
-        data: {
-          plan:               'starter',
-          subscriptionStatus: 'expired',
-          subscriptionEndDate: null,
-          billingCycle:        null,
-          // نحتفظ بـ lastPaymentDate و lastPaymentAmount للمراجعة
-        },
-      });
+      // Atomic downgrade: the plan change and the Store-table cleanup must
+      // commit together. A downgraded plan with Store rows still active is
+      // exactly the stuck state this fix exists to prevent — see
+      // domainAuthMiddleware, which gates on "has active Store rows", not
+      // on tenant.plan.
+      const [, deactivatedStores] = await db.$transaction([
+        db.tenant.update({
+          where: { id: tenant.id },
+          data: {
+            plan:               'starter',
+            subscriptionStatus: 'expired',
+            subscriptionEndDate: null,
+            billingCycle:        null,
+            // نحتفظ بـ lastPaymentDate و lastPaymentAmount للمراجعة
+          },
+        }),
+        db.store.updateMany({
+          where: { tenantId: tenant.id, isActive: true },
+          data:  { isActive: false, deactivatedAt: now },
+        }),
+      ]);
 
-      console.log(`[SubscriptionScheduler] ⬇️  ${tenant.email} downgraded: ${tenant.plan} → starter (grace ended)`);
+      console.log(`[SubscriptionScheduler] ⬇️  ${tenant.email} downgraded: ${tenant.plan} → starter (grace ended), ${deactivatedStores.count} store(s) deactivated`);
 
       // TODO: يمكن إضافة إيميل "Your protection has ended — renew to restore" هنا
       // لكن لا نريد تضخيم الـ scope الآن
@@ -293,6 +318,13 @@ const cleanupExpiredSessions = async (db) => {
 // ══════════════════════════════════════════════════════════════════════════════
 const runSubscriptionCycle = async (db) => {
   const startTime = Date.now();
+
+  const lock = await acquireLock('scheduler:subscription', 120_000);
+  if (!lock) {
+    console.log('[SubscriptionScheduler] 🔒 lock not acquired, skipping this tick');
+    return;
+  }
+
   console.log(`[SubscriptionScheduler] 🔄 Starting subscription cycle — ${new Date().toISOString()}`);
 
   try {

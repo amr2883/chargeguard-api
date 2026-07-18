@@ -11,9 +11,9 @@ const { getEmailIntelligence, calculateEmailPenalty, invalidateEmailCache } = re
 const { findSimilarDisputes } = require('./similarity');
 const { checkPatternRisk, recordPattern } = require('./patternSharing');
 const logger = require('../lib/logger');
-const { maskEmail, maskIp, maskDeviceId } = require('../lib/utils');
+
 const { getBINIntelligence, calculateBINPenalty } = require('./binIntelligence');
-const { getPostPurchaseEvents } = require('./postPurchaseIntelligence');
+
 const SCORING_VERSION = "v1.0-logodds-confidence";
 
 // ─── Shared Threshold Calculator ─────────────────────────────────────────
@@ -173,7 +173,6 @@ async function calculateRiskScore(
     let score = 100;
   let sameIPOrders = [];
   let sameEmailOrders = [];
-  let sameDeviceRecentOrders = [];
   const flags = [];
   const positives = [];
   const topSignals = []; // top contributing signals for flight recorder
@@ -328,18 +327,13 @@ async function calculateRiskScore(
   }
 
 
-  sameIPOrders = allOrders.filter(o =>
-    o.ipAddress === ip && ip && new Date(o.createdAt) > last24h && o.id !== order.id
-  );
-  if (sameIPOrders.length >= 2) {
-    const ipVelocityCount = sameIPOrders.length;
-    const ipVelocityPenalty = Math.min(Math.round(15 * Math.log2(ipVelocityCount + 1)), 35);
-    score -= ipVelocityPenalty;
-    flags.push({ severity: "high", text: `${ipVelocityCount + 1} orders from same IP in last 24 hours` });
-    topSignals.push({ type: "IP_VELOCITY", value: ipVelocityCount, contribution: -ipVelocityPenalty });
-  }
-
- 
+  // H2 fix: the early inline IP-velocity block (computed from the limited,
+  // recency-capped `allOrders` sample) was removed from here. It duplicated
+  // the externalVelocity-driven IP-velocity block further below — same
+  // threshold, formula, cap, and flag text — causing every real evaluation
+  // to apply this penalty twice (max -70 instead of the intended -35).
+  // The externalVelocity-driven block, which uses an accurate DB-backed
+  // count rather than this capped sample, is the one that remains.
 
   const otherOrders = allOrders.filter(o => o.id !== order.id);
   const avgOrderValue = otherOrders.length > 0
@@ -524,18 +518,14 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     logger.error({ module: 'riskScoring', err: emailIntelSettled.reason }, 'Email intelligence error');
   }
 
-  // ─── Email Velocity (لسه شغال — Email Intelligence مش بيغطيه) ──────────
-
- sameEmailOrders = allOrders.filter(o =>
-    normalizeEmail(o.email) === email && email && new Date(o.createdAt) > last6h && o.id !== order.id
-  );
-  if (sameEmailOrders.length >= 3) {
-    const emailVelocityCount = sameEmailOrders.length;
-    const emailVelocityPenalty = Math.min(Math.round(12 * Math.log2(emailVelocityCount + 1)), 30);
-    score -= emailVelocityPenalty;
-    flags.push({ severity: "high", text: `${emailVelocityCount + 1} orders from same email in last 6 hours — velocity attack pattern` });
-    topSignals.push({ type: "EMAIL_VELOCITY", value: emailVelocityCount, contribution: -emailVelocityPenalty });
-  }
+  // H2 fix: the early inline email-velocity block (computed from the
+  // limited, recency-capped `allOrders` sample) was removed from here. It
+  // duplicated the externalVelocity-driven email-velocity block further
+  // below — same threshold, formula, cap, and flag text — causing every
+  // real evaluation to apply this penalty twice (max -60 instead of the
+  // intended -30). The externalVelocity-driven block, which uses an
+  // accurate DB-backed count rather than this capped sample, is the one
+  // that remains.
 
   // استخدام قيم السرعة من externalVelocity إذا وُجدت (أكثر دقة وأداء)
   let deviceVelocityCount = 0;

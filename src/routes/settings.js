@@ -8,6 +8,7 @@ const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { getAvailableCountries, calculateCountryRiskPenalty } = require('../lib/countryRisk');
 const { domainAuthMiddleware } = require('../lib/domainAuth');
 const verifyHmacSignature = require('../middleware/verifyHmac');
+const { isProOrAbove } = require('../lib/planAccess');
 // ── Constants ─────────────────────────────────────────────────────────────
 const SETTINGS_RATE  = new Map();
 const MAX_REQ        = 20;
@@ -179,6 +180,10 @@ router.put('/country-overrides', rateLimit, apiKeyAuth, verifyHmacSignature, val
 
 router.get('/webhook', rateLimit, apiKeyAuth, async (req, res) => {
   try {
+    if (!isProOrAbove(req.tenant.plan)) {
+      return res.status(403).json({ error: 'Slack/Discord webhook alerts require a Pro plan or above. Upgrade to enable this feature.' });
+    }
+
     res.json({
       success: true,
       webhookUrl: req.tenant.webhookUrl || '',
@@ -195,7 +200,11 @@ router.get('/webhook', rateLimit, apiKeyAuth, async (req, res) => {
 
 router.post('/webhook', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
-    const { webhookUrl, webhookType } = req.body;
+    if (!isProOrAbove(req.tenant.plan)) {
+      return res.status(403).json({ error: 'Slack/Discord webhook alerts require a Pro plan or above. Upgrade to enable this feature.' });
+    }
+
+    const { webhookUrl, webhookType, resolvedIp } = req.body;
 
     if (!webhookUrl || typeof webhookUrl !== 'string') {
       return res.status(400).json({ error: 'webhookUrl is required.' });
@@ -205,7 +214,7 @@ router.post('/webhook', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, 
       return res.status(400).json({ error: 'webhookType must be slack, discord, or custom.' });
     }
 
-    const { valid, error } = require('../lib/webhook').validateWebhookUrl(webhookUrl);
+    const { valid, error } = await require('../lib/webhook').validateWebhookUrl(webhookUrl);
     if (!valid) {
       return res.status(400).json({ error: error || 'Invalid webhook URL.' });
     }
@@ -215,6 +224,7 @@ router.post('/webhook', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, 
       data: {
         webhookUrl,
         webhookType,
+        webhookResolvedIp: typeof resolvedIp === 'string' && resolvedIp ? resolvedIp : null,
         webhookLastStatus: null,
         webhookLastSentAt: null,
         webhookFailureCount: 0,
@@ -232,6 +242,10 @@ router.post('/webhook', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, 
 
 router.post('/webhook/test', rateLimit, apiKeyAuth, verifyHmacSignature, async (req, res) => {
   try {
+    if (!isProOrAbove(req.tenant.plan)) {
+      return res.status(403).json({ error: 'Slack/Discord webhook alerts require a Pro plan or above. Upgrade to enable this feature.' });
+    }
+
     if (!req.tenant.webhookUrl) {
       return res.status(400).json({ error: 'No webhook URL configured. Save one first.' });
     }

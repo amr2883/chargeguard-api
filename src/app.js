@@ -40,6 +40,10 @@ app.use('/api/risk/enrich', express.raw({ type: 'application/json' }));
 app.use('/api/risk/cleanup-blocked', express.raw({ type: 'application/json' }));
 app.use('/api/settings/webhook', express.raw({ type: 'application/json' }));
 app.use('/api/settings/webhook/test', express.raw({ type: 'application/json' }));
+app.use('/api/risk/reconcile', express.raw({ type: 'application/json' }));
+app.use('/api/settings/country-overrides', express.raw({ type: 'application/json' }));
+app.use('/api/stores', express.raw({ type: 'application/json' }));
+app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
@@ -54,12 +58,14 @@ const adminRoutes     = require('./routes/admin');
 const dashboardRoutes = require('./routes/dashboard');
 const settingsRoutes  = require('./routes/settings');
 const paymentsRoutes  = require('./routes/payments');
+const updatesRoutes   = require('./routes/updates');
 app.use('/api/risk',      riskRoutes);
 app.use('/api/auth',      authRoutes);
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/settings',  settingsRoutes);
 app.use('/api/payments',  paymentsRoutes);
 app.use('/api/stores',    require('./routes/stores'));
+app.use('/api/updates',   updatesRoutes);
 // Morgan ����� �� /admin ���� ����� ��� secret �� �����
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
