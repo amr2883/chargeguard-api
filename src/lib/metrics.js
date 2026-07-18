@@ -80,6 +80,42 @@ function recordBIN(source, latencyMs) {
 // Currently the calling code (ipIntelligence.js, etc.) only calls recordIP on success.
 // To add failure tracking, modify those files accordingly. This is out of scope for now.
 
+// ========== Global Circuit Breaker Factory (fixed-window) ==========
+// Used by ipIntelligence.js and emailIntelligence.js to cap AGGREGATE
+// outbound calls across ALL merchants combined — a coarse, second line
+// of defense sitting above the per-merchant checkLimit() above.
+//
+// Mirrors binlistGlobalBucket's mechanism (counter + reset timestamp,
+// fixed 1-minute window reusing WINDOW_MS) rather than a true sliding
+// log, for consistency with the already-proven BIN limiter and because
+// boundary precision doesn't materially change the cost-protection
+// outcome at this aggregate-cap layer. Unlike binlistGlobalBucket (a
+// singleton — there's only one binlist.net dependency to protect),
+// this is a FACTORY: each call returns an independent closure with its
+// own count/resetTime, so ipRateLimiter and emailRateLimiter never
+// share state and can't false-trip on each other's traffic.
+//
+// @param {number} maxRequests  Max allowed calls per 1-minute window.
+// @returns {{ isAllowed: () => boolean, count: () => number }}
+function createSlidingWindow(maxRequests) {
+  let windowCount = 0;
+  let resetTime = Date.now() + WINDOW_MS;
+
+  return {
+    isAllowed: () => {
+      const now = Date.now();
+      if (now >= resetTime) {
+        windowCount = 0;
+        resetTime = now + WINDOW_MS;
+      }
+      if (windowCount >= maxRequests) return false;
+      windowCount++;
+      return true;
+    },
+    count: () => windowCount,
+  };
+}
+
 module.exports = {
   recordIP,
   checkIPLimit,
@@ -88,5 +124,5 @@ module.exports = {
   recordBIN,
   checkBINLimit,
   binlistGlobalBucket,
-  createSlidingWindow: () => ({ isAllowed: () => true, count: () => 0 }), // legacy stub
+  createSlidingWindow,
 };

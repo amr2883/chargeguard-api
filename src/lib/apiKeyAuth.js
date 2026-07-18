@@ -29,7 +29,11 @@ async function resolveTenantByApiKey(apiKey, select) {
     const plain = await db.tenant.findUnique({ where: { apiKey }, select });
     if (plain) {
       tenant = plain;
-      db.tenant.update({ where: { id: plain.id }, data: { apiKeyHash } })
+      // M4 fix: null the plaintext column in the same write as the hash
+      // backfill. Leaving apiKey populated after a successful hash
+      // migration means a DB-only compromise can still recover a valid
+      // lookup credential directly, defeating the point of hashing it.
+      db.tenant.update({ where: { id: plain.id }, data: { apiKeyHash, apiKey: null } })
         .catch(err => logger.error({ module: 'apiKeyAuth', err: err.message }, 'apiKeyHash backfill failed'));
     }
   }
@@ -42,9 +46,24 @@ async function resolveTenantByApiKey(apiKey, select) {
     if (!prevTenant) {
       const prevPlain = await db.tenant.findUnique({ where: { previousApiKey: apiKey }, select: selectPrev });
       if (prevPlain) {
+        // L1 fix: check expiry BEFORE firing the backfill write. An
+        // already-expired previous key will never be allowed to
+        // authenticate (see the expiry-gated assignment below), so
+        // backfilling its hash and nulling its plaintext is a wasted
+        // write with no benefit — and it destroys the plaintext value
+        // for a key that was never actually used, for no reason.
+        const isExpired = prevPlain.previousApiKeyExpiresAt
+          && new Date() >= new Date(prevPlain.previousApiKeyExpiresAt);
+
         prevTenant = prevPlain;
-        db.tenant.update({ where: { id: prevPlain.id }, data: { previousApiKeyHash: apiKeyHash } })
-          .catch(err => logger.error({ module: 'apiKeyAuth', err: err.message }, 'previousApiKeyHash backfill failed'));
+
+        if (!isExpired) {
+          // M4 fix: same rationale as the primary apiKey backfill above —
+          // null previousApiKey once previousApiKeyHash is confirmed to
+          // resolve the same tenant.
+          db.tenant.update({ where: { id: prevPlain.id }, data: { previousApiKeyHash: apiKeyHash, previousApiKey: null } })
+            .catch(err => logger.error({ module: 'apiKeyAuth', err: err.message }, 'previousApiKeyHash backfill failed'));
+        }
       }
     }
 

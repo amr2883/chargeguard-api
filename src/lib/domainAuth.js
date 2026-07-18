@@ -207,9 +207,32 @@ const domainAuthMiddleware = async (req, res, next) => {
     }) > 0;
 
     if (tenantHasStores) {
-      // Store-managed tenant, but this domain isn't one of their registered
-      // stores. Do NOT fall back to allowedDomains here — that would let a
-      // stale single-store entry bypass the per-store allowlist entirely.
+      // Store-managed tenant: primary path is the Store table. But the
+      // tenant's own site (registered via /connect before they ever added
+      // a client Store) lives in legacy allowedDomains, not the Store
+      // table — so we consult it as a fallback for exactly this one case,
+      // rather than treating "has Store rows" as "must be a Store row."
+      const tenantRecordForFallback = await db.tenant.findUnique({
+        where:  { id: req.tenant.id },
+        select: { allowedDomains: true },
+      });
+
+      const legacyAllowedDomains = tenantRecordForFallback?.allowedDomains ?? [];
+
+      if (legacyAllowedDomains.includes(normalizedDomain)) {
+        // Agency's own site, authenticated via its original /connect
+        // allowedDomains entry — not a specific managed Store, so
+        // req.storeId stays undefined.
+        req.storeDomain = normalizedDomain;
+        logger.debug(
+          { module: 'domainAuth', domain: normalizedDomain, tenantId: req.tenant.id },
+          'Domain verified against legacy allowedDomains (agency own-site fallback)'
+        );
+        return next();
+      }
+
+      // Store-managed tenant, and this domain isn't a registered Store NOR
+      // the tenant's own legacy allowedDomains entry — reject.
       logger.warn(
         { module: 'domainAuth', tenantId: req.tenant.id, requestDomain: normalizedDomain },
         'Domain mismatch — request rejected (store-managed tenant)'

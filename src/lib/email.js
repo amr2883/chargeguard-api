@@ -12,6 +12,23 @@ oauth2Client.setCredentials({
 });
 const gmailClient = google.gmail({ version: 'v1', auth: oauth2Client });
 
+// L5 fix: escapes HTML metacharacters in tenant-supplied values (primarily
+// tenant.storeUrl / storeDisplay) before they're interpolated into HTML
+// email bodies. Applied at the point of interpolation, not globally — the
+// raw value stays available for non-HTML uses (e.g. email subject lines,
+// which must NOT be HTML-escaped since they're plain text headers, not
+// HTML). Standard OWASP output-encoding: encode for the context you're
+// writing into, at the point you write into it.
+function escapeHtml(str) {
+  if (str === null || str === undefined) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 async function sendViaGmail({ from, to, subject, html }) {
   const mail = new MailComposer({ from, to, subject, html, encoding: 'UTF-8' });
   const rawBuffer = await new Promise((resolve, reject) => {
@@ -33,6 +50,8 @@ async function sendViaGmail({ from, to, subject, html }) {
 
 async function sendApiKeyEmail(email, apiKey) {
   console.log('[Email] Attempting to send API key email to:', email);
+  // L5 fix: escaped sibling of apiKey — same pattern as storeDisplaySafe.
+  const apiKeySafe = escapeHtml(apiKey);
 
   await sendViaGmail({
     from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
@@ -76,7 +95,7 @@ async function sendApiKeyEmail(email, apiKey) {
           <!-- API Key Box -->
           <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
             <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your API Key</p>
-            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${apiKey}</p>
+            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${apiKeySafe}</p>
           </div>
 
           <!-- Warning -->
@@ -128,6 +147,8 @@ async function sendApiKeyEmail(email, apiKey) {
 
 async function sendRotatedKeyEmail(email, newApiKey) {
   console.log('[Email] Sending rotated API key to:', email);
+  // L5 fix: escaped sibling of newApiKey.
+  const newApiKeySafe = escapeHtml(newApiKey);
   await sendViaGmail({
     from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
     to: email,
@@ -142,7 +163,7 @@ async function sendRotatedKeyEmail(email, newApiKey) {
           <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your API key has been successfully rotated. Your old key is now invalid.</p>
           <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
             <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your New API Key</p>
-            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${newApiKey}</p>
+            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${newApiKeySafe}</p>
           </div>
           <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
             <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Action required:</strong> Update your plugin settings immediately with this new key to maintain protection.</p>
@@ -162,6 +183,11 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling of storeDisplay — used only where
+  // storeDisplay is interpolated into the HTML body below. The subject
+  // line further down keeps using the raw storeDisplay, since subjects
+  // are plain text, not HTML.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const savedFormatted = savedAmount.toLocaleString('en-US', {
     style: 'currency',
@@ -220,7 +246,7 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
           <h1 style="font-size:32px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">
             ${attackCount} attacks blocked
           </h1>
-          <p style="font-size:15px;color:#86efac;margin:0;">on <strong>${storeDisplay}</strong> in the last ${windowMinutes} minutes</p>
+          <p style="font-size:15px;color:#86efac;margin:0;">on <strong>${storeDisplaySafe}</strong> in the last ${windowMinutes} minutes</p>
         </div>
 
         <!-- Stats Row -->
@@ -304,6 +330,8 @@ async function sendWeeklySummaryEmail({
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling — see escapeHtml() definition above.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const savedFormatted = savedAmount.toLocaleString('en-US', {
     style: 'currency', currency: 'USD', minimumFractionDigits: 2,
@@ -351,7 +379,7 @@ async function sendWeeklySummaryEmail({
             <table cellpadding="0" cellspacing="0" style="width:100%;">
               <tr>
                 <td style="width:130px;font-size:13px;color:#334155;padding-right:10px;white-space:nowrap;">
-                  ${reasonLabels[reason] || reason}
+                  ${escapeHtml(reasonLabels[reason] || reason)}
                 </td>
                 <td style="padding-right:10px;">
                   <div style="background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden;">
@@ -411,7 +439,7 @@ async function sendWeeklySummaryEmail({
       <div style="background:linear-gradient(135deg,#052e16,#14532d);padding:28px 32px;border-left:1px solid #166534;border-right:1px solid #166534;">
         <p style="font-size:13px;letter-spacing:0.1em;text-transform:uppercase;color:#4ade80;margin:0 0 6px;font-weight:600;">🛡️ Weekly Protection Report</p>
         <h1 style="font-size:36px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">${thisWeekCount}</h1>
-        <p style="font-size:16px;color:#86efac;margin:0 0 12px;">attacks blocked on <strong>${storeDisplay}</strong> this week</p>
+        <p style="font-size:16px;color:#86efac;margin:0 0 12px;">attacks blocked on <strong>${storeDisplaySafe}</strong> this week</p>
         ${wowBadge}
       </div>
 
@@ -469,7 +497,7 @@ async function sendWeeklySummaryEmail({
       <!-- Quiet banner -->
       <div style="background:#f0fdf4;padding:28px 32px;border-left:1px solid #bbf7d0;border-right:1px solid #bbf7d0;border-top:none;text-align:center;">
         <p style="font-size:32px;margin:0 0 8px;">✅</p>
-        <h1 style="font-size:22px;font-weight:700;color:#14532d;margin:0 0 8px;">Quiet week on ${storeDisplay}</h1>
+        <h1 style="font-size:22px;font-weight:700;color:#14532d;margin:0 0 8px;">Quiet week on ${storeDisplaySafe}</h1>
         <p style="font-size:15px;color:#166534;margin:0;">No attacks detected — ChargeGuard is monitoring 24/7</p>
       </div>
 
@@ -546,6 +574,8 @@ async function sendWeeklySummaryEmail({
 
 async function sendConfirmationEmail(email, confirmUrl) {
   console.log('[Email] Sending confirmation email to:', email);
+  // L5 fix: escaped sibling of confirmUrl, used in both href and text below.
+  const confirmUrlSafe = escapeHtml(confirmUrl);
 
   const RETRIES = 3;
   const RETRY_DELAY_MS = 5000;
@@ -600,7 +630,7 @@ async function sendConfirmationEmail(email, confirmUrl) {
 
               <!-- CTA Button -->
               <div style="text-align:center;margin-bottom:28px;">
-                <a href="${confirmUrl}"
+                <a href="${confirmUrlSafe}"
                    style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
                   Verify Email Address →
                 </a>
@@ -614,7 +644,7 @@ async function sendConfirmationEmail(email, confirmUrl) {
               <!-- Fallback link -->
               <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
                 If the button doesn't work, copy and paste this link into your browser:<br/>
-                <span style="color:#6366f1;word-break:break-all;">${confirmUrl}</span>
+                <span style="color:#6366f1;word-break:break-all;">${confirmUrlSafe}</span>
               </p>
             </div>
 
@@ -653,6 +683,8 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling — see escapeHtml() definition above.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const fmtUSD = (n) => n.toLocaleString('en-US', {
     style: 'currency', currency: 'USD', minimumFractionDigits: 0,
@@ -685,7 +717,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
     <tr><td style="padding-bottom:10px;">
       <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
         <td style="width:130px;font-size:13px;color:#334155;padding-right:10px;white-space:nowrap;">
-          ${reasonLabels[reason] || reason}
+          ${escapeHtml(reasonLabels[reason] || reason)}
         </td>
         <td style="padding-right:10px;">
           <div style="background:#e2e8f0;border-radius:4px;height:8px;overflow:hidden;">
@@ -705,7 +737,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
       c => String.fromCodePoint(c.charCodeAt(0) + 127397));
   };
   const countriesHtml = threatOrigins.slice(0, 3).map(o =>
-    `<span style="margin-right:8px;">${flagEmoji(o.country)} ${o.country} (${o.count})</span>`
+    `<span style="margin-right:8px;">${flagEmoji(o.country)} ${escapeHtml(o.country)} (${o.count})</span>`
   ).join('');
 
   // ── BIN Attack Highlight ──────────────────────────────────────────────
@@ -716,7 +748,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
       </p>
       <p style="font-size:14px;color:#7c2d12;margin:0;line-height:1.6;">
         A coordinated BIN sequence attack on prefix
-        <strong>${biggestBINAttack.binPrefix}xx</strong> involved
+        <strong>${escapeHtml(biggestBINAttack.binPrefix)}xx</strong> involved
         <strong>${biggestBINAttack.cardsCount} cards</strong> and was fully contained.
         Your customers noticed nothing.
       </p>
@@ -733,7 +765,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
   // ── CTA section ───────────────────────────────────────────────────────
   const ctaSection = `
     <div style="text-align:center;margin-bottom:24px;">
-      <a href="${downloadUrl}"
+      <a href="${escapeHtml(downloadUrl)}"
          style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);
                 color:#fff;font-size:14px;font-weight:700;padding:13px 32px;
                 border-radius:8px;text-decoration:none;letter-spacing:.01em;
@@ -784,7 +816,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
           ${fmtUSD(totalProtected)}
         </h1>
         <p style="font-size:15px;color:#86efac;margin:0 0 10px;">
-          in fraud value blocked from <strong>${storeDisplay}</strong> this month
+          in fraud value blocked from <strong>${storeDisplaySafe}</strong> this month
         </p>
         ${momBadge}
       </div>
@@ -849,7 +881,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
         <!-- End Rule — الجملة الأخيرة تبقى في الذاكرة -->
         <div style="text-align:center;padding:16px 0 4px;">
           <p style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 4px;">
-            ${storeDisplay} was safe every day in ${monthName}. ✓
+            ${storeDisplaySafe} was safe every day in ${monthName}. ✓
           </p>
           <p style="font-size:13px;color:#64748b;margin:0;">
             We'll be here in ${new Intl.DateTimeFormat('en-US',{month:'long'}).format(new Date(reportData.year, reportData.month, 1))} too.
@@ -905,6 +937,8 @@ async function sendPaypalWeeklyReportEmail({
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling — see escapeHtml() definition above.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const savedFormatted = savedAmount.toLocaleString('en-US', {
     style: 'currency', currency: 'USD', minimumFractionDigits: 2,
@@ -947,7 +981,7 @@ async function sendPaypalWeeklyReportEmail({
       <div style="background:linear-gradient(135deg,#0c1a3a,#1e3a5f);padding:28px 32px;border-left:1px solid #1d4ed8;border-right:1px solid #1d4ed8;">
         <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin:0 0 8px;font-weight:600;">🛡️ PayPal Shield — Weekly Report</p>
         <h1 style="font-size:36px;font-weight:800;color:#ffffff;margin:0 0 4px;line-height:1.1;">${totalIntercepted}</h1>
-        <p style="font-size:15px;color:#bfdbfe;margin:0 0 10px;">suspicious PayPal transactions intercepted on <strong>${storeDisplay}</strong></p>
+        <p style="font-size:15px;color:#bfdbfe;margin:0 0 10px;">suspicious PayPal transactions intercepted on <strong>${storeDisplaySafe}</strong></p>
         ${wowBadge}
       </div>
 
@@ -984,7 +1018,7 @@ async function sendPaypalWeeklyReportEmail({
       ${topCardCountry ? `
       <div style="padding:20px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
         <p style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 8px;">Top Card Origin This Week</p>
-        <p style="font-size:14px;color:#475569;margin:0;">Most suspicious PayPal cards this week originated from <strong style="color:#0f172a;">${topCardCountry}</strong>. ChargeGuard flagged them before any transaction was processed.</p>
+        <p style="font-size:14px;color:#475569;margin:0;">Most suspicious PayPal cards this week originated from <strong style="color:#0f172a;">${escapeHtml(topCardCountry)}</strong>. ChargeGuard flagged them before any transaction was processed.</p>
       </div>` : ''}
 
       <!-- Historical -->
@@ -1099,6 +1133,8 @@ async function sendRenewalReminderEmail(tenant, { daysRemaining, planLabel, rene
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling — see escapeHtml() definition above.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const urgency = daysRemaining <= 1
     ? { color: '#dc2626', bg: '#fef2f2', border: '#fecaca', badge: '🚨 Last chance', tone: 'Your protection expires tomorrow.' }
@@ -1138,7 +1174,7 @@ async function sendRenewalReminderEmail(tenant, { daysRemaining, planLabel, rene
           ${urgency.tone}
         </h1>
         <p style="font-size:15px;color:#475569;margin:0;">
-          Renew your <strong>${planLabel}</strong> plan to keep <strong>${storeDisplay}</strong> protected without interruption.
+          Renew your <strong>${planLabel}</strong> plan to keep <strong>${storeDisplaySafe}</strong> protected without interruption.
         </p>
       </div>
 
@@ -1374,6 +1410,8 @@ async function sendPaypalAlertEmail(tenant, alertData) {
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
+  // L5 fix: HTML-escaped sibling — see escapeHtml() definition above.
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
   const now = new Date();
   const timeStr = now.toLocaleString('en-US', {
@@ -1382,10 +1420,10 @@ async function sendPaypalAlertEmail(tenant, alertData) {
     timeZone: 'UTC', timeZoneName: 'short',
   });
 
-  const txnDisplay    = paypalTxnId ? paypalTxnId.slice(-8).toUpperCase() : '—';
+  const txnDisplay    = escapeHtml(paypalTxnId ? paypalTxnId.slice(-8).toUpperCase() : '—');
   const brandClean    = brand ? brand.charAt(0).toUpperCase() + brand.slice(1) : 'Card';
-  const cardDisplay   = last4 ? `${brandClean} ••••${last4}` : brandClean;
-  const countryDisplay = cardCountry || 'Unknown';
+  const cardDisplay   = escapeHtml(last4 ? `${brandClean} ••••${last4}` : brandClean);
+  const countryDisplay = escapeHtml(cardCountry || 'Unknown');
   const amountDisplay  = amount
     ? Number(amount).toLocaleString('en-US', { style: 'currency', currency, minimumFractionDigits: 2 })
     : '—';
@@ -1399,8 +1437,13 @@ async function sendPaypalAlertEmail(tenant, alertData) {
   const decisionBorder = decision === 'block' ? '#fecaca' : '#fde68a';
 
   const topFlag    = flags[0]?.text || null;
-  const flagsHtml  = topFlag
-    ? `<p style="font-size:13px;color:#475569;margin:0 0 4px;line-height:1.6;"><strong style="color:#0f172a;">Primary reason:</strong> ${topFlag}</p>`
+  // L5 fix: flag.text originates from intelligence modules (ipIntelligence.js,
+  // emailIntelligence.js, binIntelligence.js, countryRisk.js), some of which
+  // build their text directly from customer-supplied checkout input. Escape
+  // at the point of interpolation.
+  const topFlagSafe = topFlag ? escapeHtml(topFlag) : null;
+  const flagsHtml  = topFlagSafe
+    ? `<p style="font-size:13px;color:#475569;margin:0 0 4px;line-height:1.6;"><strong style="color:#0f172a;">Primary reason:</strong> ${topFlagSafe}</p>`
     : '';
 
   const savingsHtml = savingsDisplay
@@ -1451,7 +1494,7 @@ async function sendPaypalAlertEmail(tenant, alertData) {
   <div style="background:linear-gradient(135deg,#0c1a3a,#1e3a5f);padding:28px 32px;border-left:1px solid #1d4ed8;border-right:1px solid #1d4ed8;">
     <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#93c5fd;margin:0 0 8px;font-weight:600;">🛡️ PayPal Shield — Transaction Intercepted</p>
     <h1 style="font-size:26px;font-weight:800;color:#ffffff;margin:0 0 6px;line-height:1.2;">Suspicious PayPal transaction stopped</h1>
-    <p style="font-size:14px;color:#bfdbfe;margin:0;">on <strong>${storeDisplay}</strong> — before it reached processing</p>
+    <p style="font-size:14px;color:#bfdbfe;margin:0;">on <strong>${storeDisplaySafe}</strong> — before it reached processing</p>
   </div>
 
   <!-- Transaction Card -->

@@ -132,7 +132,7 @@ const VALID_SIGNAL_VALUES = {
   BIN_ISSUER_MISMATCH: ["true"],
   AMOUNT_ANOMALY:    ["true"],};
 
-async function updateSignalStat(merchantId, signalType, signalValue, isWin) {
+async function updateSignalStat(merchantId, signalType, signalValue, isWin, dbClient = db) {
   const normalizedValue = String(signalValue).trim().toUpperCase();
 
   // Signal whitelisting — يمنع injection signals غلط في DB
@@ -146,7 +146,10 @@ async function updateSignalStat(merchantId, signalType, signalValue, isWin) {
 
   // استخدام upsert مع increment على rawWins و rawLosses
   // يضمن atomicity كاملة بدون الحاجة لقراءة القيمة الحالية
-  await db.signalStat.upsert({
+  // dbClient defaults to the module-level `db`, but callers inside the
+  // M7 transaction boundary (processFeedbackSimplified) pass `tx` so
+  // these writes participate in the surrounding transaction.
+  await dbClient.signalStat.upsert({
     where: { merchantId_signalType_signalValue: key },
     create: {
       ...key,
@@ -242,15 +245,24 @@ function calculateContributions(signals, dispute, order, weightsMap = null) {
 // Called from webhooks.disputes.jsx when dispute is resolved
 // ─── Main Feedback Loop ────────────────────────────────────────────────────
 // Called from webhooks.disputes.jsx when dispute is resolved
-async function processFeedback(disputeId, result) {
+async function processFeedback(disputeId, result, callerMerchantId) {
+  // CRITICAL FIX (C4): callerMerchantId is now a required parameter,
+  // threaded straight through to processFeedbackSimplified(), which uses
+  // it to scope the order lookup to the calling tenant. Deliberately made
+  // required (not optional with a silent default) — a default that meant
+  // "skip the ownership check" would recreate exactly the vulnerability
+  // this fix closes the moment any future caller forgot to pass it.
+  if (!callerMerchantId) {
+    throw new Error('processFeedback: callerMerchantId is required');
+  }
   // ===== مسار مبسط لبيئة WooCommerce (الجداول غير موجودة بعد) =====
   logger.warn({ module: 'feedbackLoop' }, 'Dispute tables not yet available — using simplified path');
-  return processFeedbackSimplified(disputeId, result);
+  return processFeedbackSimplified(disputeId, result, callerMerchantId);
 }
 
 // ─── مسار مبسط للتعلم من نتائج الحظر (بدون جداول dispute) ─────────────
 // ─── مسار مبسط للتعلم من نتائج الحظر (يستخدم بيانات Order الحقيقية) ─────────────
-async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud) {
+async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, callerMerchantId) {
   const isFraud = typeof resultOrIsFraud === 'boolean' 
     ? resultOrIsFraud 
     : (resultOrIsFraud === 'lost');
@@ -258,46 +270,78 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud) {
 
   const isWin = !isFraud;
 
+  // CRITICAL FIX (C4): required, not optional — see processFeedback() above.
+  if (!callerMerchantId) {
+    throw new Error('processFeedbackSimplified: callerMerchantId is required');
+  }
+
   try {
     // 1. قراءة الطلب من قاعدة البيانات
+    // Scoped to (callerMerchantId, orderId) via the C3 compound unique key
+    // — this query can structurally only ever return a row belonging to
+    // the calling tenant, or no row at all. It can never return another
+    // tenant's order under a matching orderId.
+    // PREREQUISITE: this assumes the C3 schema migration
+    // (@@unique([merchantId, orderId]) on Order) has already been applied
+    // and the Prisma client regenerated. If that migration has not yet
+    // been run, this compound-key lookup will fail at runtime — do not
+    // deploy this change ahead of the C3 migration.
     const order = await db.order.findUnique({
-      where: { orderId }
+      where: { merchantId_orderId: { merchantId: callerMerchantId, orderId } }
     });
 
     if (!order) {
-      logger.warn({ module: 'feedbackLoop', orderId }, 'Order not found, cannot process feedback');
+      // Deliberately generic: this branch is reached both when the order
+      // truly doesn't exist AND when it belongs to a different tenant — the
+      // caller-facing behavior must not distinguish these two cases, or an
+      // attacker could use response differences to enumerate which order
+      // IDs exist for other merchants (an information-disclosure oracle).
+      logger.warn({ module: 'feedbackLoop', orderId, callerMerchantId }, 'Order not found for this merchant, cannot process feedback');
       return;
     }
+
+    // Defense-in-depth (C4): should be unreachable given the compound key
+    // above, but asserted explicitly so a future regression (e.g. someone
+    // "simplifying" the query back to a bare orderId lookup) fails loudly
+    // in logs rather than silently reopening this vulnerability.
+    if (order.merchantId !== callerMerchantId) {
+      logger.error(
+        { module: 'feedbackLoop', orderId, callerMerchantId, actualMerchantId: order.merchantId },
+        'C4 guard tripped — compound key returned a different merchant\'s row; should be unreachable'
+      );
+      return;
+    }
+
     const merchantId = order.merchantId;
 
-    // 2. تحديث MerchantProfile
-    await db.merchantProfile.upsert({
-      where: { merchantId },
-      create: {
-        merchantId,
-        wonDisputes: isWin ? 1 : 0,
-        lostDisputes: isWin ? 0 : 1,
-        totalDisputes: 1,
-        trustScore: 0.3,
-        reportCount: 1,
-      },
-      update: {
-        wonDisputes: isWin ? { increment: 1 } : undefined,
-        lostDisputes: isWin ? undefined : { increment: 1 },
-        totalDisputes: { increment: 1 },
-        reportCount: { increment: 1 },
-      },
+    // ── Idempotency Gate (atomic) ───────────────────────────────────────────
+    // Guards against duplicate processing when this function is invoked twice
+    // for the same order — a realistic scenario given at-least-once webhook
+    // delivery from both Stripe and PayPal, or a retried/duplicated call to
+    // POST /risk/feedback. This is a single atomic UPDATE ... WHERE
+    // feedbackProcessedAt IS NULL — not a separate findFirst-then-write —
+    // so it is race-safe even if two calls for the same order arrive
+    // concurrently: the database itself resolves which call "wins" via row
+    // locking, and the loser observes count === 0 and returns without
+    // touching any counter below.
+    const idempotencyClaim = await db.order.updateMany({
+      where: { merchantId, orderId, feedbackProcessedAt: null },
+      data:  { feedbackProcessedAt: new Date() },
     });
 
-    // 2.5 تحديث CardHash.blockCount إذا كان الاحتيال مؤكداً
-    if (isFraud && order.cardHash) {
-      await db.cardHash.update({
-        where: { cardHash: order.cardHash },
-        data: { blockCount: { increment: 1 } },
-      }).catch(e => logger.error({ module: 'feedbackLoop', err: e }, 'Failed to update CardHash blockCount'));
+    if (idempotencyClaim.count === 0) {
+      logger.info(
+        { module: 'feedbackLoop', orderId, merchantId },
+        'Duplicate feedback call detected — already processed, skipping all counter updates'
+      );
+      return;
     }
 
     // 3. استخراج الإشارات من signalsSnapshot
+    // Moved ahead of the transaction: this is pure in-memory parsing of
+    // data already fetched (order.signalsSnapshot), not a DB write, so it
+    // does not need to run inside the transaction and doing so would only
+    // extend the time the DB connection/lock is held.
     let signals = [];
     if (order.signalsSnapshot) {
       try {
@@ -308,18 +352,109 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud) {
       }
     }
 
-    // 4. تحديث SignalStat (للتاجر وللعام)
-    if (signals.length > 0) {
-      const uniqueSignals = [...new Map(signals.map(s => [`${s.type}:${s.value}`, s])).values()];
-      
-      for (const signal of uniqueSignals) {
-        // تحديث الإحصائية العامة (merchantId = null)
-        await updateSignalStat(null, signal.type, signal.value, isWin).catch(e =>
-          logger.error({ module: 'feedbackLoop', err: e }, 'Failed to update global SignalStat')
+    // ── M7 TRANSACTION BOUNDARY ─────────────────────────────────────────
+    // merchantProfile, cardHash, and signalStat must be atomic with each
+    // other: if any write in this block fails, all of them roll back,
+    // so we never end up with (e.g.) reportCount incremented but the
+    // signal-level training data for that report missing.
+    //
+    // markOrderAsFraud() and markPatternAsFraud() deliberately stay OUTSIDE
+    // this block, below, and run only after it commits. They use separate
+    // Prisma client instances (identityGraph.js, patternSharing.js) that
+    // cannot participate in this transaction, and they are best-effort:
+    // if they fail, the core accounting above is already committed and
+    // consistent, and the failure is logged for retry rather than rolling
+    // back correct data.
+    //
+    // Note: the cardHash update and signalStat upserts below no longer
+    // swallow their own errors with .catch() — inside a transaction, an
+    // unhandled rejection is exactly what triggers the rollback we want.
+    // The outer try/catch in this function still logs the overall failure.
+    await db.$transaction(async (tx) => {
+      // 2. تحديث MerchantProfile
+      await tx.merchantProfile.upsert({
+        where: { merchantId },
+        create: {
+          merchantId,
+          wonDisputes: isWin ? 1 : 0,
+          lostDisputes: isWin ? 0 : 1,
+          totalDisputes: 1,
+          trustScore: 0.3,
+          reportCount: 1,
+        },
+        update: {
+          wonDisputes: isWin ? { increment: 1 } : undefined,
+          lostDisputes: isWin ? undefined : { increment: 1 },
+          totalDisputes: { increment: 1 },
+          reportCount: { increment: 1 },
+        },
+      });
+
+      // 2.5 تحديث CardHash.blockCount إذا كان الاحتيال مؤكداً
+      if (isFraud && order.cardHash) {
+        await tx.cardHash.update({
+          where: { cardHash: order.cardHash },
+          data: { blockCount: { increment: 1 } },
+        });
+      }
+
+      // 4. تحديث SignalStat (للتاجر وللعام)
+      if (signals.length > 0) {
+        const uniqueSignals = [...new Map(signals.map(s => [`${s.type}:${s.value}`, s])).values()];
+
+        for (const signal of uniqueSignals) {
+          // تحديث الإحصائية العامة (merchantId = null)
+          await updateSignalStat(null, signal.type, signal.value, isWin, tx);
+          // تحديث إحصائية التاجر
+          await updateSignalStat(merchantId, signal.type, signal.value, isWin, tx);
+        }
+      }
+    });
+
+    // ── DisputeOutcome persistence (H1 fix) ─────────────────────────────
+    // Writes the row that Tier-1 dispute-driven scoring signals
+    // (deviceDisputes, ipDisputes, emailDisputes, findSimilarDisputes in
+    // riskScoring.js) depend on, via `disputes = await db.disputeOutcome
+    // .findMany(...)` in routes/risk.js. Without this write, those four
+    // signals were permanently inert — disputes was always [].
+    //
+    // disputeId: the simplified path has no separate Dispute entity, so we
+    // reuse the merchant-facing orderId as the dispute identifier — this
+    // matches how POST /risk/feedback already passes orderId as disputeId
+    // into processFeedback().
+    //
+    // orderId (FK): DisputeOutcome.orderId relates to Order.id (the
+    // internal cuid), NOT Order.orderId (the WooCommerce-facing id) — uses
+    // order.id here, not the orderId variable, on purpose.
+    //
+    // Runs outside the M7 transaction above (that boundary is intentionally
+    // scoped to merchantProfile/cardHash/signalStat only), but still before
+    // the best-effort markOrderAsFraud/markPatternAsFraud calls below. A
+    // P2002 here means a duplicate disputeId — this order's outcome was
+    // already recorded by an earlier call — which the feedbackProcessedAt
+    // gate above should already prevent in the normal case; this catch is
+    // defense-in-depth for that constraint, treated as a second idempotency
+    // guard: log informationally and continue, never throw.
+    try {
+      await db.disputeOutcome.create({
+        data: {
+          disputeId: orderId,
+          merchantId,
+          orderId: order.id,
+          result: isWin ? 'won' : 'lost',
+          signalsPresent: JSON.stringify(signals),
+        },
+      });
+    } catch (disputeOutcomeErr) {
+      if (disputeOutcomeErr.code === 'P2002') {
+        logger.info(
+          { module: 'feedbackLoop', orderId, merchantId },
+          'DisputeOutcome already exists for this disputeId — skipping (idempotent)'
         );
-        // تحديث إحصائية التاجر
-        await updateSignalStat(merchantId, signal.type, signal.value, isWin).catch(e =>
-          logger.error({ module: 'feedbackLoop', err: e }, 'Failed to update merchant SignalStat')
+      } else {
+        logger.error(
+          { module: 'feedbackLoop', orderId, merchantId, err: disputeOutcomeErr },
+          'Failed to create DisputeOutcome'
         );
       }
     }
@@ -361,7 +496,7 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud) {
         createdAt: order.createdAt
       };
 
-      await markPatternAsFraud(patternOrder, emailIntel, ipIntel, patternContext)
+      await markPatternAsFraud(patternOrder, emailIntel, ipIntel, merchantId, patternContext)
         .catch(e => logger.error({ module: 'feedbackLoop', err: e }, 'markPatternAsFraud error'));
     }
 
