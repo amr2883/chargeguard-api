@@ -1,5 +1,6 @@
 require('dotenv').config();
 const { runFastCleanup } = require('./lib/retention');
+const db = require('./lib/db');
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -31,7 +32,6 @@ app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
 app.use('/api/payments/paypal-webhook', express.raw({ type: 'application/json' }));
 app.use('/api/risk/evaluate', express.raw({ type: 'application/json' }));
-app.use('/api/risk/mark-fraud', express.raw({ type: 'application/json' }));
 app.use('/api/risk/feedback', express.raw({ type: 'application/json' }));
 app.use('/api/risk/blacklist', express.raw({ type: 'application/json' }));
 app.use('/api/risk/blacklist/:id', express.raw({ type: 'application/json' }));
@@ -39,13 +39,15 @@ app.use('/api/risk/whitelist', express.raw({ type: 'application/json' }));
 app.use('/api/risk/whitelist/:id', express.raw({ type: 'application/json' }));
 app.use('/api/risk/check-device', express.raw({ type: 'application/json' }));
 app.use('/api/risk/enrich', express.raw({ type: 'application/json' }));
-app.use('/api/risk/cleanup-blocked', express.raw({ type: 'application/json' }));
+app.use('/api/risk/device-token', express.raw({ type: 'application/json' }));
+app.use('/api/risk/cloudflare-ranges', express.raw({ type: 'application/json' }));
 app.use('/api/settings/webhook', express.raw({ type: 'application/json' }));
 app.use('/api/settings/webhook/test', express.raw({ type: 'application/json' }));
 app.use('/api/risk/reconcile', express.raw({ type: 'application/json' }));
 app.use('/api/settings/country-overrides', express.raw({ type: 'application/json' }));
 app.use('/api/stores', express.raw({ type: 'application/json' }));
 app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
+app.use('/api/auth/self-test', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
@@ -116,7 +118,7 @@ app.get('/api/retention-config', (req, res) => {
 app.get('/api/cleanup-now', async (req, res) => {
   console.log(`[${new Date().toISOString()}] ? External ping ? running fast cleanup...`);
   try {
-    await runFastCleanup(prismaForCleanup);
+    await runFastCleanup(db);
     res.json({ success: true });
   } catch (err) {
     console.error(`[${new Date().toISOString()}] ? Cleanup failed:`, err.message);
