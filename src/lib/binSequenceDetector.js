@@ -12,6 +12,8 @@
 
 'use strict';
 
+const logger = require('./logger');
+
 // --- Constants ---
 const WINDOW_MS         = 10 * 60 * 1000;  // نافذة 10 دقائق
 const BLOCK_DURATION_MS = 60 * 60 * 1000;  // حظر ساعة
