@@ -50,6 +50,7 @@ const STARTUP_DELAY_MS       = 60 * 60 * 1000;  // first run: 1 hour after boot
 const SEND_DAY_OF_MONTH      = 1;               // 1st of every month
 const SEND_HOUR_UTC          = 10;              // 10:00–10:59 UTC
 const TENANT_DELAY_MS        = 5_000;           // 5s between tenants
+const STORE_DELAY_MS         = 1_000;           // 1s between per-store report generations within one tenant
 
 // ─── Time Helpers ────────────────────────────────────────────────────────────
 
@@ -174,6 +175,68 @@ async function runMonthlyReportCheck(prisma) {
 }
 
 /**
+ * Generates (or skips/fails) a single MonthlyReport row — either the
+ * tenant-wide aggregate (storeId: null) or one store's breakdown.
+ */
+async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportYear, label, logCtx) {
+  const existingReady = await prisma.monthlyReport.findFirst({
+    where: { tenantId, storeId, reportMonth, reportYear, status: 'ready' },
+    select: { id: true },
+  });
+  if (existingReady) {
+    console.log(`${label} ⏭️  ${logCtx} — already ready for ${reportMonth}/${reportYear}, skipping`);
+    return null;
+  }
+
+  let reportRecord;
+  try {
+    reportRecord = await prisma.monthlyReport.upsert({
+      where: {
+        tenantId_storeId_reportMonth_reportYear: { tenantId, storeId, reportMonth, reportYear },
+      },
+      create: { tenantId, storeId, reportMonth, reportYear, status: 'generating' },
+      update: { status: 'generating' },
+      select: { id: true },
+    });
+  } catch (err) {
+    console.error(`${label} ❌ ${logCtx} — failed to create generating record:`, err.message);
+    return null;
+  }
+
+  try {
+    const reportData = await buildMonthlyReportData(prisma, tenantId, reportMonth, reportYear, storeId);
+
+    await prisma.monthlyReport.update({
+      where: { id: reportRecord.id },
+      data: {
+        status:           'ready',
+        totalAttacks:     reportData.totalAttacks,
+        totalProtected:   reportData.totalProtected,
+        totalFeesSaved:   reportData.totalFeesSaved,
+        securityScore:    reportData.securityScore,
+        topCountry:       reportData.topCountry      ?? null,
+        topReason:        reportData.topReason       ?? null,
+        prevMonthAttacks: reportData.prevMonthAttacks ?? null,
+      },
+    });
+
+    console.log(
+      `${label} ✅ ${logCtx} — record ready ` +
+      `(${reportData.totalAttacks} attacks, $${reportData.totalProtected.toFixed(2)} protected)`
+    );
+    return reportData;
+  } catch (err) {
+    console.error(`${label} ❌ ${logCtx} — report generation failed:`, err.message);
+    try {
+      await prisma.monthlyReport.update({ where: { id: reportRecord.id }, data: { status: 'failed' } });
+    } catch (updateErr) {
+      console.error(`${label} ⚠️  ${logCtx} — could not update record to 'failed':`, updateErr.message);
+    }
+    throw err;
+  }
+}
+
+/**
  * Processes one tenant end-to-end:
  *   anti-dup check → create 'generating' lock → build data → update 'ready' → send email.
  *
@@ -188,159 +251,44 @@ async function runMonthlyReportCheck(prisma) {
  * @param {string} label  — log prefix for this scheduler tick
  */
 async function processTenant(prisma, tenant, reportMonth, reportYear, label) {
-
-  // ── Step 1: Anti-duplication ──────────────────────────────────────────────
-  // Thought: we check for 'ready' only — not 'generating' or 'failed'.
-  //   'ready'      → skip (report already delivered successfully this month)
-  //   'generating' → this is a stale lock from a previous crash; we should
-  //                  retry (the record will be updated to 'failed' if it fails
-  //                  again, making the state explicit)
-  //   'failed'     → retry (we want to attempt recovery within the same monthly run)
-  //   absent       → proceed normally
-  const existingReady = await prisma.monthlyReport.findFirst({
-    where: {
-      tenantId:    tenant.id,
-      reportMonth,
-      reportYear,
-      status:      'ready',
-    },
-    select: { id: true },
-  });
-
-  if (existingReady) {
-    console.log(
-      `${label} ⏭️  ${tenant.email} — report already ready for ${reportMonth}/${reportYear}, skipping`
-    );
-    return;
-  }
-
-  // ── Step 2: Create (or overwrite) a 'generating' lock record ─────────────
-  // Thought: use upsert on the (tenantId, reportMonth, reportYear) composite.
-  // This handles two scenarios cleanly:
-  //   a) No record exists → create it with status 'generating'
-  //   b) A 'failed' or stale 'generating' record exists → reset it to 'generating'
-  //      so we get a fresh attempt tracked in DB
-  // We save the record ID so we can update it later without a second lookup.
-  //
-  // Thought on schema: the schema defines a unique constraint on
-  // (tenantId, reportMonth, reportYear) — confirmed by the migration. Without
-  // that constraint, upsert's `where` clause would fail. If the constraint is
-  // not present, replace upsert with findFirst + create/update branches.
-  let reportRecord;
+  // Tenant-wide row — storeId: null. This is what the email and the
+  // default (unfiltered) dashboard archive read.
+  let reportData;
   try {
-    reportRecord = await prisma.monthlyReport.upsert({
-      where: {
-        tenantId_reportMonth_reportYear: {
-          tenantId: tenant.id,
-          reportMonth,
-          reportYear,
-        },
-      },
-      create: {
-        tenantId:    tenant.id,
-        reportMonth,
-        reportYear,
-        status:      'generating',
-      },
-      update: {
-        status: 'generating',
-        // Data fields (totalAttacks, etc.) are now nullable in the schema,
-        // so we don't need to reset them to null — they'll be overwritten
-        // with real data when the report is generated. Prisma leaves
-        // unspecified fields unchanged on update, so any stale values from
-        // a previous failed attempt simply get replaced in Step 4 once
-        // buildMonthlyReportData succeeds.
-      },
-      select: { id: true },
-    });
+    reportData = await generateOneReport(prisma, tenant.id, null, reportMonth, reportYear, label, tenant.email);
   } catch (err) {
-    // Thought: if we can't even write the lock record, abort this tenant.
-    // There's no record to clean up, and the next hourly tick will retry
-    // (since no 'ready' record exists).
-    console.error(
-      `${label} ❌ ${tenant.email} — failed to create generating record:`, err.message
-    );
-    return;
-  }
-
-  // From this point on: any error must update the record to 'failed'.
-  // We wrap the rest of the function in a try/catch for exactly this reason.
-  try {
-
-    // ── Step 3: Build report data ───────────────────────────────────────────
-    // Thought: this is the heavy call — 7 parallel Prisma queries inside.
-    // It uses the SAME prisma instance passed from app.js, ensuring we stay
-    // within the shared connection pool. No new PrismaClient is created.
-    console.log(`${label} 🔄 ${tenant.email} — building data for ${reportMonth}/${reportYear}`);
-    const reportData = await buildMonthlyReportData(prisma, tenant.id, reportMonth, reportYear);
-
-    // ── Step 4: Update MonthlyReport record with real data ──────────────────
-    // Thought: we update using the record ID we saved in Step 2. This avoids
-    // a second lookup and is safe even if the upsert created a new record.
-    // All scalar fields on MonthlyReport are populated here.
-    await prisma.monthlyReport.update({
-      where: { id: reportRecord.id },
-      data: {
-        status:          'ready',
-        totalAttacks:    reportData.totalAttacks,
-        totalProtected:  reportData.totalProtected,
-        totalFeesSaved:  reportData.totalFeesSaved,
-        securityScore:   reportData.securityScore,
-        topCountry:      reportData.topCountry     ?? null,
-        topReason:       reportData.topReason      ?? null,
-        prevMonthAttacks: reportData.prevMonthAttacks ?? null,
-      },
-    });
-
-    console.log(
-      `${label} ✅ ${tenant.email} — record ready ` +
-      `(${reportData.totalAttacks} attacks, $${reportData.totalProtected.toFixed(2)} protected)`
-    );
-
-    // ── Step 5: Send email (fire-and-forget) ────────────────────────────────
-    // Thought: the record is already 'ready' in DB. A failed email is NOT a
-    // reason to mark the report as 'failed' — the data is correct and the
-    // tenant can still access the report via the dashboard. We log the error
-    // but do not re-throw it. This matches the pattern in weeklySummaryScheduler.
-    const downloadUrl = buildDownloadUrl(tenant.id, reportMonth, reportYear);
-
-    sendMonthlyReportEmail({ tenant, reportData, downloadUrl })
-      .then(() => {
-        console.log(`${label} 📬 Email sent → ${tenant.email} (${reportData.monthName} ${reportYear})`);
-      })
-      .catch(err => {
-        console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
-      });
-
-  } catch (err) {
-    // ── Error recovery: mark record as 'failed' ─────────────────────────────
-    // Thought: we MUST update the record here. Without this, a crash between
-    // Step 2 and Step 4 leaves a 'generating' record that looks like an active
-    // lock, causing all future hourly ticks to skip this tenant for the month.
-    // Setting status to 'failed' makes the problem visible and allows manual
-    // or future automated recovery.
-    console.error(
-      `${label} ❌ ${tenant.email} — report generation failed:`, err.message
-    );
-
-    try {
-      await prisma.monthlyReport.update({
-        where: { id: reportRecord.id },
-        data:  { status: 'failed' },
-      });
-    } catch (updateErr) {
-      // If even the failure update fails (e.g. DB connection lost), log and
-      // move on. The 'generating' ghost record will be detectable by operators.
-      console.error(
-        `${label} ⚠️  ${tenant.email} — could not update record to 'failed':`,
-        updateErr.message
-      );
-    }
-
-    // Re-throw so the outer loop's catch can log the unhandled error with
-    // tenant context. This does NOT break the loop for other tenants.
     throw err;
   }
+  if (!reportData) return;
+
+  // Per-store breakdown — additive. Starter/Pro tenants simply have zero
+  // Store rows, so this loop is a no-op for them.
+  const stores = await prisma.store.findMany({
+    where:  { tenantId: tenant.id, isActive: true },
+    select: { id: true, label: true, storeUrl: true },
+  });
+
+  for (let i = 0; i < stores.length; i++) {
+    const store = stores[i];
+    const storeLabel = store.label || store.storeUrl || store.id;
+    try {
+      await generateOneReport(prisma, tenant.id, store.id, reportMonth, reportYear, label, `${tenant.email} / ${storeLabel}`);
+    } catch (err) {
+      console.error(`${label} ❌ Unhandled per-store error for ${tenant.id}/${store.id}:`, err.message);
+    }
+    if (i < stores.length - 1) {
+      await new Promise(res => setTimeout(res, STORE_DELAY_MS));
+    }
+  }
+
+  const downloadUrl = buildDownloadUrl(tenant.id, reportMonth, reportYear);
+  sendMonthlyReportEmail({ tenant, reportData, downloadUrl })
+    .then(() => {
+      console.log(`${label} 📬 Email sent → ${tenant.email} (${reportData.monthName} ${reportYear})`);
+    })
+    .catch(err => {
+      console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
+    });
 }
 
 // ─── Public API ──────────────────────────────────────────────────────────────

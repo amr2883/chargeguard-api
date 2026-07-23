@@ -49,134 +49,173 @@ async function sendViaGmail({ from, to, subject, html }) {
 }
 
 async function sendApiKeyEmail(email, apiKey) {
-  console.log('[Email] Attempting to send API key email to:', email);
   // L5 fix: escaped sibling of apiKey — same pattern as storeDisplaySafe.
   const apiKeySafe = escapeHtml(apiKey);
 
-  await sendViaGmail({
-    from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
-    to: email,
-    subject: '🔑 Your ChargeGuard API Key',
-    html: `
-      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
-        
-        <!-- Header -->
-        <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
-          <table cellpadding="0" cellspacing="0" style="width:100%;">
-            <tr>
-              <td>
-                <table cellpadding="0" cellspacing="0">
-                  <tr>
-                    <td style="padding-right:10px;vertical-align:middle;">
-                      <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
-                          <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
-                        </svg>
-                      </div>
-                    </td>
-                    <td style="vertical-align:middle;">
-                      <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
-                    </td>
-                  </tr>
-                </table>
-              </td>
-              <td style="text-align:right;vertical-align:middle;">
-                <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Early Access</span>
-              </td>
-            </tr>
-          </table>
-        </div>
-
-        <!-- Body -->
-        <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
-          <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">Welcome aboard 🎉</h2>
-          <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your ChargeGuard API key is ready. Save it somewhere safe — you'll need it to activate protection on your store.</p>
-
-          <!-- API Key Box -->
-          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
-            <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your API Key</p>
-            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${apiKeySafe}</p>
-          </div>
-
-          <!-- Warning -->
-          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
-            <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Never share this key.</strong> It grants full access to your store's fraud protection — treat it like a password.</p>
-          </div>
-
-          <!-- Steps -->
-          <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">Get protected in 3 steps</h3>
-          <table cellpadding="0" cellspacing="0" style="width:100%;">
-            <tr><td style="padding-bottom:12px;">
-              <table cellpadding="0" cellspacing="0"><tr>
-                <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
-                  <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">1</div>
-                </td>
-                <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Install the plugin</strong> — Download and upload via Plugins → Add New → Upload Plugin</p></td>
-              </tr></table>
-            </td></tr>
-            <tr><td style="padding-bottom:12px;">
-              <table cellpadding="0" cellspacing="0"><tr>
-                <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
-                  <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">2</div>
-                </td>
-                <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Activate & configure</strong> — Go to WooCommerce → Settings → ChargeGuard and paste your key</p></td>
-              </tr></table>
-            </td></tr>
-            <tr><td>
-              <table cellpadding="0" cellspacing="0"><tr>
-                <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
-                  <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">3</div>
-                </td>
-                <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">You're protected</strong> — The firewall activates instantly. Bots blocked. Fees stopped.</p></td>
-              </tr></table>
-            </td></tr>
-          </table>
-        </div>
-
-        <!-- Footer -->
-        <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
-          <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">You received this email because you signed up for ChargeGuard Early Access. If you didn't register, you can safely ignore this email.</p>
-        </div>
-
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+      
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr>
+            <td>
+              <table cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="padding-right:10px;vertical-align:middle;">
+                    <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                      <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                        <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                      </svg>
+                    </div>
+                  </td>
+                  <td style="vertical-align:middle;">
+                    <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+                  </td>
+                </tr>
+              </table>
+            </td>
+            <td style="text-align:right;vertical-align:middle;">
+              <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Early Access</span>
+            </td>
+          </tr>
+        </table>
       </div>
-    `
-  });
 
-  console.log('[Email] ✅ Sent successfully to:', email);
+      <!-- Body -->
+      <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">Welcome aboard 🎉</h2>
+        <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your ChargeGuard API key is ready. Save it somewhere safe — you'll need it to activate protection on your store.</p>
+
+        <!-- API Key Box -->
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
+          <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your API Key</p>
+          <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${apiKeySafe}</p>
+        </div>
+
+        <!-- Warning -->
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
+          <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Never share this key.</strong> It grants full access to your store's fraud protection — treat it like a password.</p>
+        </div>
+
+        <!-- Steps -->
+        <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">Get protected in 3 steps</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr><td style="padding-bottom:12px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">1</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Install the plugin</strong> — Download and upload via Plugins → Add New → Upload Plugin</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td style="padding-bottom:12px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">2</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">Activate & configure</strong> — Go to WooCommerce → Settings → ChargeGuard and paste your key</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td>
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;">
+                <div style="width:22px;height:22px;background:#f97316;border-radius:50%;text-align:center;line-height:22px;font-size:12px;font-weight:700;color:white;">3</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;"><strong style="color:#0f172a;">You're protected</strong> — The firewall activates instantly. Bots blocked. Fees stopped.</p></td>
+            </tr></table>
+          </td></tr>
+        </table>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">You received this email because you signed up for ChargeGuard Early Access. If you didn't register, you can safely ignore this email.</p>
+      </div>
+
+    </div>
+  `;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[ApiKeyEmail] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: email,
+        subject: '🔑 Your ChargeGuard API Key',
+        html,
+      });
+      console.log(`[ApiKeyEmail] ✅ Sent successfully to: ${email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[ApiKeyEmail] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[ApiKeyEmail] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
 }
 
 async function sendRotatedKeyEmail(email, newApiKey) {
-  console.log('[Email] Sending rotated API key to:', email);
   // L5 fix: escaped sibling of newApiKey.
   const newApiKeySafe = escapeHtml(newApiKey);
-  await sendViaGmail({
-    from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
-    to: email,
-    subject: '🔑 Your ChargeGuard API Key Has Been Rotated',
-    html: `
-      <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
-        <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
-          <span style="font-size:20px;font-weight:700;color:#ffffff;">Charge<span style="color:#f97316;">Guard</span></span>
-        </div>
-        <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
-          <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">API Key Rotated 🔄</h2>
-          <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your API key has been successfully rotated. Your old key is now invalid.</p>
-          <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
-            <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your New API Key</p>
-            <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${newApiKeySafe}</p>
-          </div>
-          <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
-            <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Action required:</strong> Update your plugin settings immediately with this new key to maintain protection.</p>
-          </div>
-          <p style="font-size:13px;color:#64748b;">If you didn't request this rotation, contact support immediately.</p>
-        </div>
-        <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
-          <p style="font-size:12px;color:#94a3b8;margin:0;">ChargeGuard Security Team</p>
-        </div>
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <span style="font-size:20px;font-weight:700;color:#ffffff;">Charge<span style="color:#f97316;">Guard</span></span>
       </div>
-    `
-  });
-  console.log('[Email] ✅ Rotation email sent to:', email);
+      <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h2 style="font-size:22px;font-weight:700;color:#0f172a;margin:0 0 8px;">API Key Rotated 🔄</h2>
+        <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Your API key has been successfully rotated. Your old key is now invalid.</p>
+        <div style="background:#f8fafc;border:1px solid #e2e8f0;border-left:4px solid #f97316;border-radius:8px;padding:20px 24px;margin-bottom:20px;">
+          <p style="font-size:11px;letter-spacing:0.1em;text-transform:uppercase;color:#94a3b8;margin:0 0 8px;">Your New API Key</p>
+          <p style="font-family:'Courier New',Courier,monospace;font-size:13px;color:#0f172a;word-break:break-all;margin:0;line-height:1.6;">${newApiKeySafe}</p>
+        </div>
+        <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 16px;margin-bottom:28px;">
+          <p style="font-size:13px;color:#dc2626;margin:0;">⚠️ <strong>Action required:</strong> Update your plugin settings immediately with this new key to maintain protection.</p>
+        </div>
+        <p style="font-size:13px;color:#64748b;">If you didn't request this rotation, contact support immediately.</p>
+      </div>
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;">ChargeGuard Security Team</p>
+      </div>
+    </div>
+  `;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[RotatedKeyEmail] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: email,
+        subject: '🔑 Your ChargeGuard API Key Has Been Rotated',
+        html,
+      });
+      console.log(`[RotatedKeyEmail] ✅ Rotation email sent to: ${email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[RotatedKeyEmail] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[RotatedKeyEmail] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
 }
 
 async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinutes = 10) {
@@ -1263,7 +1302,7 @@ async function sendRenewalReminderEmail(tenant, { daysRemaining, planLabel, rene
 // ══════════════════════════════════════════════════════════════════════════════
 // sendGracePeriodEmail — إشعار "اشتراكك انتهى، لديك 7 أيام سماح"
 // ══════════════════════════════════════════════════════════════════════════════
-async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, renewUrl }) {
+async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, gracePeriodDays, renewUrl }) {
   const storeDisplay = tenant.storeUrl
     ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     : 'your store';
@@ -1313,7 +1352,7 @@ async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, renewUrl }
       <div style="padding:28px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
         <div style="background:#fefce8;border:1px solid #fde68a;border-radius:10px;padding:18px 20px;margin-bottom:24px;">
           <p style="font-size:14px;color:#92400e;margin:0;line-height:1.7;">
-            <strong>Good news:</strong> We've extended your <strong>${planLabel}</strong> protection for 7 days at no charge.
+            <strong>Good news:</strong> We've extended your <strong>${planLabel}</strong> protection for ${gracePeriodDays} day${gracePeriodDays === 1 ? '' : 's'} at no charge.
             Your store is still fully shielded — all 53 features remain active.
             Renew before <strong>${graceDateStr}</strong> to avoid any interruption.
           </p>
@@ -1355,7 +1394,7 @@ async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, renewUrl }
       <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
         <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
           You're receiving this because your ChargeGuard subscription has expired.
-          Your store remains protected during the 7-day grace period.
+          Your store remains protected during the ${gracePeriodDays}-day grace period.
         </p>
       </div>
     </div>`;
@@ -1760,5 +1799,133 @@ async function sendSubscriptionConfirmationEmail(email, {
   }
   throw lastError;
 }
+// ══════════════════════════════════════════════════════════════════════════════
+// sendDowngradeEmail — إشعار فوري "انتهت فترة السماح، تم خفض خطتك لـ Starter"
+// يُرسل من: processGraceToExpired في subscriptionScheduler.js
+// ══════════════════════════════════════════════════════════════════════════════
+async function sendDowngradeEmail(tenant, { previousPlanLabel, renewUrl }) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+  const storeDisplaySafe = escapeHtml(storeDisplay);
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail };
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Plan Changed</span>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Banner -->
+      <div style="background:linear-gradient(135deg,#450a0a,#7f1d1d);padding:28px 32px;border-left:1px solid #991b1b;border-right:1px solid #991b1b;">
+        <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#fca5a5;margin:0 0 8px;font-weight:600;">⏰ Grace Period Ended</p>
+        <h1 style="font-size:26px;font-weight:800;color:#ffffff;margin:0 0 8px;line-height:1.2;">
+          Your plan has been downgraded to Starter
+        </h1>
+        <p style="font-size:15px;color:#fecaca;margin:0;">
+          <strong>${storeDisplaySafe}</strong> is still monitored — but ${previousPlanLabel} features are now paused
+        </p>
+      </div>
+
+      <!-- What changed -->
+      <div style="padding:28px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">What's changed on your store:</h3>
+        <table cellpadding="0" cellspacing="0" style="width:100%;">
+          <tr><td style="padding-bottom:10px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:11px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Monthly protection limit reduced to 500 blocked attempts</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td style="padding-bottom:10px;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:11px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">BIN Intelligence, Threat Origins, and real-time PayPal/Slack/Discord alerts are locked</p></td>
+            </tr></table>
+          </td></tr>
+          <tr><td>
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:12px;vertical-align:top;padding-top:2px;width:28px;">
+                <div style="width:22px;height:22px;background:#fef2f2;border:1px solid #fecaca;border-radius:50%;text-align:center;line-height:20px;font-size:11px;">❌</div>
+              </td>
+              <td><p style="font-size:14px;color:#334155;margin:0;line-height:1.5;">Multi-store management is disabled (your existing stores are paused, not deleted)</p></td>
+            </tr></table>
+          </td></tr>
+        </table>
+      </div>
+
+      <!-- Reassurance -->
+      <div style="padding:16px 32px 4px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 18px;">
+          <p style="font-size:13px;color:#166534;margin:0;line-height:1.6;">✅ Core fraud detection — card testing, velocity checks, and blacklist blocking — remains active on the Starter plan. Your store is not unprotected.</p>
+        </div>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:24px 32px 28px;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+        <a href="${renewUrl}"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          Restore ${previousPlanLabel} Protection →
+        </a>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your ChargeGuard grace period ended without renewal.
+        </p>
+      </div>
+    </div>`;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[Downgrade] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: tenant.email,
+        subject: `Your ChargeGuard plan has been downgraded to Starter`,
+        html,
+      });
+      console.log(`[Downgrade] ✅ Sent to ${tenant.email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[Downgrade] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[Downgrade] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail, sendDowngradeEmail };

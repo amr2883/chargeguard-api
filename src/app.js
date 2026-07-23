@@ -5,6 +5,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const prometheus = require('./lib/prometheus');
+const logger = require('./lib/logger');
+const { safeErrorPayload } = require('./lib/errorResponse');
 
 const app = express();
 app.set('trust proxy', true);
@@ -52,6 +54,10 @@ app.use(morgan('dev', {
 const path = require('path');
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Periodic replay of PayPal/Stripe post-payment enrichments that arrived
+// before their backend Order row existed — see jobs/replayPendingEnrichments.js.
+require('./jobs/replayPendingEnrichments').start();
+
 const riskRoutes      = require('./routes/risk');
 const authRoutes      = require('./routes/auth');
 const adminRoutes     = require('./routes/admin');
@@ -75,10 +81,20 @@ app.use('/admin', (req, res, next) => {
 // ?? Global error handler ? MUST be after all routes ??????????
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    // Unchanged: forwarded to Express's built-in final handler. This path
+    // only fires for errors thrown before that route's own try/catch could
+    // run (e.g. a raw-body-parsing failure upstream) — Express's default
+    // handler still responds with a 5xx status, which is all the plugin's
+    // circuit breaker (class-api-client.php) actually inspects.
     return next(err);
   }
-  console.error('?? Global error handler caught:', err.stack || err.message || err);
-  res.status(500).json({ error: 'Internal server error', details: err.message });
+  // Full detail (message + stack) goes to the structured logger only —
+  // never to the client. safeErrorPayload() returns a generic
+  // { error: 'Internal server error' } in production, and only reveals
+  // err.message/err.stack when NODE_ENV === 'development' or
+  // DEBUG_ERRORS=true (see lib/errorResponse.js).
+  logger.error({ module: 'app', path: req.originalUrl, error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  res.status(500).json(safeErrorPayload(err));
 });
 
 app.get('/health', (req, res) => {

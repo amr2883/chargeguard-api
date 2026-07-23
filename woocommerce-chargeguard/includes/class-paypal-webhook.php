@@ -16,6 +16,15 @@ class ChargeGuard_PayPal_Webhook {
     public function __construct() {
         $this->api_client = new ChargeGuard_API_Client();
         add_action( 'rest_api_init', [ $this, 'register_rest_route' ] );
+
+        // Mirrors ChargeGuard_Stripe_Webhook's consume_pending_enrichment()
+        // pattern exactly. PayPal's find_order_id() already tries
+        // _transaction_id meta as one of its resolution paths — by the
+        // time woocommerce_payment_complete fires, WooCommerce's PayPal
+        // gateway has normally set that meta (via $order->get_transaction_id()),
+        // so this is the earliest reliable point to re-resolve an order
+        // that wasn't found at webhook-delivery time.
+        add_action( 'woocommerce_payment_complete', [ $this, 'consume_pending_enrichment' ] );
     }
 
     /**
@@ -66,7 +75,14 @@ class ChargeGuard_PayPal_Webhook {
             'PAYMENT.CAPTURE.DENIED',
             'CHECKOUT.ORDER.APPROVED',
             'PAYMENT.AUTHORIZATION.CREATED',
-            'RISK.DISPUTE.CREATED',
+            // CUSTOMER.DISPUTE.RESOLVED — NOT RISK.DISPUTE.CREATED. The
+            // creation-time event fires the moment a dispute is OPENED,
+            // before PayPal has decided anything; its payload carries no
+            // outcome field. Only the RESOLVED event's resource includes
+            // dispute_outcome.outcome_code, the one trustworthy signal for
+            // "did the merchant actually lose this dispute." See
+            // handle_dispute_event() below.
+            'CUSTOMER.DISPUTE.RESOLVED',
         ];
 
         if ( ! in_array( $payload['event_type'], $supported_events, true ) ) {
@@ -119,10 +135,19 @@ class ChargeGuard_PayPal_Webhook {
 
         if ( ! $extracted ) {
             // حدث لا يحتوي على بيانات دفع قابلة للمعالجة (مثل RISK.DISPUTE.CREATED)
-            // No send_enrich() call happens on this path, so there is no
-            // transient-failure risk — safe to mark this delivery
-            // processed immediately.
-            $this->handle_dispute_event( $payload );
+            // handle_dispute_event() returns false only when a confirmed
+            // dispute-loss send_feedback() call failed (transient backend
+            // error or open circuit) — that path must not be marked
+            // processed, so PayPal's own redelivery of this
+            // transmission_id can retry it. Every other branch inside
+            // handle_dispute_event() is deterministic given this payload
+            // and returns true.
+            $processed = $this->handle_dispute_event( $payload );
+
+            if ( ! $processed ) {
+                return new WP_REST_Response( [ 'error' => 'feedback dispatch failed' ], 500 );
+            }
+
             if ( $cache_key ) {
                 set_transient( $cache_key, 1, 48 * HOUR_IN_SECONDS );
             }
@@ -136,6 +161,56 @@ class ChargeGuard_PayPal_Webhook {
 
         // ── 9. ربط الـ WooCommerce Order ─────────────────────────────
         $order_id = $this->find_order_id( $extracted, $payload );
+
+        // No order resolved yet (webhook raced ahead of _transaction_id
+        // meta being set) — queue the enrichment locally, keyed by
+        // PayPal's txn_id, for consume_pending_enrichment() to pick up
+        // on woocommerce_payment_complete. This is the fix for the
+        // synthetic 'paypal_<txnId>' orderId that previously created a
+        // permanently-orphaned PendingEnrichment row on the backend: the
+        // backend can never resolve that synthetic ID to a real order,
+        // so only the plugin — which alone learns the real order ID once
+        // WooCommerce links it — can complete this enrichment.
+        $has_card_or_payer_data = ! empty( $extracted['bin'] ) || ! empty( $extracted['last4'] ) || ! empty( $extracted['payer_email'] );
+
+        if ( ! $order_id && ! empty( $extracted['txn_id'] ) && $has_card_or_payer_data ) {
+            set_transient( 'chargeguard_pending_enrich_paypal_' . $extracted['txn_id'], [
+                'orderId'     => null,
+                'bin'         => $extracted['bin'] ?? null,
+                'last4'       => $extracted['last4'] ?? null,
+                'expMonth'    => $extracted['exp_month'] ?? null,
+                'expYear'     => $extracted['exp_year'] ?? null,
+                'brand'       => $extracted['brand'] ?? null,
+                'cardBrand'   => $extracted['brand'] ?? null,
+                'cardCountry' => $extracted['card_country'] ?? null,
+                'funding'     => $extracted['funding'] ?? null,
+                'issuer'      => null,
+                'source'      => 'paypal',
+                'paypalTxnId' => $extracted['txn_id'],
+                'eventType'   => $payload['event_type'],
+                'deviceToken' => null, // re-resolved fresh in consume_pending_enrichment()
+            ], HOUR_IN_SECONDS );
+
+            if ( $cache_key ) {
+                set_transient( $cache_key, 1, 48 * HOUR_IN_SECONDS );
+            }
+            return new WP_REST_Response( [ 'status' => 'pending', 'message' => 'Order not found, enrichment queued locally.' ], 202 );
+        }
+
+        // Threads the checkout-time device token through to this
+        // post-payment enrichment call — same rationale/meta key as
+        // class-stripe-webhook.php::handle_webhook(). Null when there's
+        // no resolved order, or on orders predating this fix / older
+        // plugin versions; /enrich treats a missing token exactly like
+        // today's unsigned fingerprint (deviceTrustFactor 1.0).
+        $device_token = null;
+        if ( $order_id ) {
+            $order_for_token = wc_get_order( $order_id );
+            if ( $order_for_token ) {
+                $meta_token = $order_for_token->get_meta( '_chargeguard_device_token' );
+                $device_token = ! empty( $meta_token ) ? $meta_token : null;
+            }
+        }
 
         // ── 10. بناء بيانات enrich وإرسالها ─────────────────────────
         $enrich_data = [
@@ -152,6 +227,7 @@ class ChargeGuard_PayPal_Webhook {
             'source'      => 'paypal',
             'paypalTxnId' => $extracted['txn_id'] ?? null,
             'eventType'   => $payload['event_type'],
+            'deviceToken' => $device_token,
         ];
 
         // نرسل فقط إذا كان هناك BIN أو last4 (بيانات بطاقة حقيقية)
@@ -176,10 +252,27 @@ class ChargeGuard_PayPal_Webhook {
                 $mark_processed = false;
             } elseif ( $order_id ) {
                 // إذا كان القرار block وكانت الـ auto-block مفعلة وعندنا order_id
+                //
+                // Refund context is only populated for PAYMENT.CAPTURE.COMPLETED
+                // — for every other subscribed event type (CHECKOUT.ORDER.APPROVED,
+                // PAYMENT.AUTHORIZATION.CREATED, etc.) resource.id is NOT a capture
+                // ID, and attempting a refund against it would target the wrong
+                // PayPal object or simply 404.
+                $refund_context = null;
+                if ( $payload['event_type'] === 'PAYMENT.CAPTURE.COMPLETED' && ! empty( $extracted['txn_id'] ) ) {
+                    $refund_context = [
+                        'gateway'    => 'paypal',
+                        'capture_id' => $extracted['txn_id'],
+                    ];
+                }
+
+                $this->chargeguard_fire_device_fraud_hook( $result, $order_id, 'paypal_post_payment_block' );
+
                 $this->chargeguard_maybe_block_order(
                     $result,
                     $order_id,
-                    __( 'Blocked by ChargeGuard: Suspicious PayPal payment detected.', 'chargeguard-woocommerce' )
+                    __( 'Blocked by ChargeGuard: Suspicious PayPal payment detected.', 'chargeguard-woocommerce' ),
+                    $refund_context
                 );
             }
         } elseif ( ! empty( $extracted['payer_email'] ) ) {
@@ -210,6 +303,85 @@ class ChargeGuard_PayPal_Webhook {
         }
 
         return $response;
+    }
+
+    /**
+     * Consume any enrichment data queued by handle_webhook() for a PayPal
+     * transaction that arrived before its order existed.
+     *
+     * Mirrors ChargeGuard_Stripe_Webhook::consume_pending_enrichment()
+     * exactly. Fires on woocommerce_payment_complete rather than order
+     * creation, because the PayPal transaction ID is not reliably present
+     * as order meta/transaction_id until the gateway has actually
+     * processed payment.
+     *
+     * At-least-once safe: the transient is deleted before the API call,
+     * so a payment-complete hook firing twice for the same order is a
+     * no-op on the second call. If the transient has expired (1h TTL) or
+     * was never set, this silently returns — the common case, since most
+     * PayPal webhooks resolve an order on the first attempt.
+     *
+     * @param int $order_id
+     * @return void
+     */
+    public function consume_pending_enrichment( $order_id ) {
+        $order = wc_get_order( $order_id );
+        if ( ! $order ) {
+            return;
+        }
+
+        // WooCommerce's PayPal-family gateways set this via
+        // $order->set_transaction_id() by payment-complete time — the
+        // same field find_order_id()'s third resolution path already
+        // searches by by the time this fires.
+        $txn_id = $order->get_transaction_id();
+        if ( empty( $txn_id ) ) {
+            return;
+        }
+
+        $transient_key = 'chargeguard_pending_enrich_paypal_' . $txn_id;
+        $pending = get_transient( $transient_key );
+
+        if ( $pending === false ) {
+            return;
+        }
+
+        // Delete before the API call so a slow/failed send_enrich() can't
+        // cause this to be reprocessed on a subsequent payment-complete
+        // fire for the same order.
+        delete_transient( $transient_key );
+
+        $pending['orderId'] = (string) $order_id;
+
+        // Re-resolve fresh from order meta — the queued payload's
+        // deviceToken slot is always null at queue time (the order didn't
+        // exist yet). By now _chargeguard_device_token, if any, is set.
+        $meta_token = $order->get_meta( '_chargeguard_device_token' );
+        $pending['deviceToken'] = ! empty( $meta_token ) ? $meta_token : null;
+
+        $result = $this->api_client->send_enrich( $pending );
+
+        if ( is_wp_error( $result ) ) {
+            error_log( '[ChargeGuard] Deferred PayPal enrichment failed for order ' . $order_id . ': ' . $result->get_error_message() );
+            return;
+        }
+
+        $refund_context = null;
+        if ( ( $pending['eventType'] ?? null ) === 'PAYMENT.CAPTURE.COMPLETED' && ! empty( $pending['paypalTxnId'] ) ) {
+            $refund_context = [
+                'gateway'    => 'paypal',
+                'capture_id' => $pending['paypalTxnId'],
+            ];
+        }
+
+        $this->chargeguard_fire_device_fraud_hook( $result, $order_id, 'paypal_post_payment_block' );
+
+        $this->chargeguard_maybe_block_order(
+            $result,
+            $order_id,
+            __( 'Blocked by ChargeGuard: Suspicious PayPal payment detected.', 'chargeguard-woocommerce' ),
+            $refund_context
+        );
     }
 
     /**
@@ -448,10 +620,41 @@ class ChargeGuard_PayPal_Webhook {
      */
     private function handle_dispute_event( $payload ) {
         $resource = $payload['resource'] ?? [];
-        $txn_id   = $resource['disputed_transactions'][0]['seller_transaction_id'] ?? null;
+
+        // Defense-in-depth: the $supported_events allow-list in
+        // handle_webhook() should already guarantee only
+        // CUSTOMER.DISPUTE.RESOLVED reaches this method, but that
+        // event's own resource also carries a 'status' field — checking
+        // it here costs nothing and protects against a future accidental
+        // widening of the allow-list (e.g. someone adding
+        // CUSTOMER.DISPUTE.UPDATED without re-reading this method).
+        $status = $resource['status'] ?? null;
+        if ( $status !== 'RESOLVED' ) {
+            return true;
+        }
+
+        // The outcome only exists once resolved. Documented outcome_code
+        // values:
+        //   RESOLVED_BUYER_FAVOUR   — merchant lost. Confirmed loss.
+        //   RESOLVED_SELLER_FAVOUR  — merchant won, claim rejected.
+        //   RESOLVED_WITH_PAYOUT    — PayPal paid the buyer itself, not a
+        //                             merchant loss.
+        //   CANCELED_BY_BUYER / ACCEPTED / DENIED / NONE — other terminal
+        //                             states, none a confirmed merchant loss.
+        // Only RESOLVED_BUYER_FAVOUR may blacklist a device or send a
+        // fraud=true signal.
+        $outcome_code = $resource['dispute_outcome']['outcome_code'] ?? null;
+
+        if ( $outcome_code !== 'RESOLVED_BUYER_FAVOUR' ) {
+            // Merchant won, or some other non-loss outcome — do nothing.
+            // Deterministic given this payload — safe to mark processed.
+            return true;
+        }
+
+        $txn_id = $resource['disputed_transactions'][0]['seller_transaction_id'] ?? null;
 
         if ( ! $txn_id ) {
-            return;
+            return true;
         }
 
         // البحث عن الطلب المرتبط بهذه المعاملة
@@ -463,13 +666,39 @@ class ChargeGuard_PayPal_Webhook {
         ] );
 
         if ( empty( $orders ) ) {
-            return;
+            // Deterministic — a redelivery carries the same txn_id and
+            // will fail the same lookup, so mark processed rather than
+            // let PayPal retry indefinitely.
+            return true;
         }
 
         $order_id = $orders[0];
 
-        // إرسال feedback للـ ChargeGuard Backend (isFraud = true)
-        $this->api_client->send_feedback( $order_id, true );
+        // A confirmed RESOLVED_BUYER_FAVOUR loss is a confirmed-fraud
+        // signal, not just a heuristic — activate the local firewall for
+        // this device the same as any other definitive block decision.
+        // Best-effort: does not gate the return value below.
+        // Canonical accessor — see ChargeGuard_Dynamic_Firewall::get_order_device_fp()
+        // for the read-both (canonical + legacy), write-one rationale.
+        $device_fp = ChargeGuard_Dynamic_Firewall::get_order_device_fp( $order_id );
+        if ( ! empty( $device_fp ) && $device_fp !== 'unknown' ) {
+            do_action( 'chargeguard_mark_device_fraud', $device_fp, 'paypal_dispute_lost' );
+        }
+
+        // إرسال feedback للـ ChargeGuard Backend (isFraud = true) — only
+        // ever reached now for a genuinely confirmed, resolved loss.
+        //
+        // Returns false on WP_Error so the caller withholds the
+        // idempotency transient and returns non-2xx, letting PayPal's own
+        // redelivery retry this confirmed fraud ruling instead of
+        // silently dropping it — mirrors handle_dispute_closed() in
+        // class-stripe-webhook.php. Safe to repeat: send_feedback() is
+        // gated by the backend's own idempotency check on orderId, and
+        // chargeguard_mark_device_fraud() above just re-overwrites the
+        // same blacklist entry.
+        $result = $this->api_client->send_feedback( $order_id, true );
+
+        return ! is_wp_error( $result );
     }
 
     }

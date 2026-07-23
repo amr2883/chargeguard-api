@@ -169,6 +169,9 @@ async function calculateRiskScore(
   externalVelocity = null,   // { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
   cardHashRecord = null,     // ← إضافة معامل cardHashRecord
   merchantConfig = null,     // ← merchant country overrides
+  limitedScoring = false,    // ← true when caller's monthly quota is exhausted:
+                             //   skip expensive external intel (IP/email/BIN),
+                             //   everything else still runs at full strength.
 ) {
     let score = 100;
   let sameIPOrders = [];
@@ -239,21 +242,21 @@ async function calculateRiskScore(
     score -= 40;
     flags.push({
       severity: "critical",
-      text: `Automated browser detected — bot score: ${pixelBotScore} (threshold: 80)`,
+      text: "bot_detected",
     });
     topSignals.push({ type: "BOT", value: "suspicious", contribution: -40 });
   } else if (pixelBotScore >= 80) {
     score -= 40;
     flags.push({
       severity: "critical",
-      text: `Strong bot signals detected — bot score: ${pixelBotScore}/100 (threshold: 80)`,
+      text: "bot_detected",
     });
     topSignals.push({ type: "BOT", value: "suspicious", contribution: -40 });
   } else if (pixelBotScore >= 20) {
     score -= 15;
     flags.push({
       severity: "medium",
-      text: `Suspicious browser behavior detected — bot score: ${pixelBotScore}/100 (threshold: 20)`,
+      text: "bot_suspicious",
     });
     topSignals.push({ type: "BOT", value: "elevated", contribution: -15 });
   }
@@ -272,8 +275,21 @@ async function calculateRiskScore(
     d.order?.deviceFingerprint === deviceId && deviceId && d.result === "lost"
   );
   if (deviceDisputes.length > 0) {
-    score -= 60;
-    flags.push({ severity: "critical", text: `Device fingerprint linked to ${deviceDisputes.length} lost dispute${deviceDisputes.length > 1 ? "s" : ""}` });
+    // deviceTrustFactor is computed further below (deviceVelocityCount
+    // section) — but disputes are evaluated here, earlier in the function.
+    // Recomputed inline from the same inputs rather than reordering the
+    // whole function, since only this one early penalty needs it before
+    // the main deviceTrustFactor block runs.
+    const earlyHasCorroboration = !isNewEmail; // ipVelocityCount/emailVelocityCount not yet computed at this point in the function
+    const earlyDeviceTrustFactor = merchantConfig?.deviceSignal
+      ? (merchantConfig.deviceSignal.trust === 'signed' ? 1.0
+        : merchantConfig.deviceSignal.trust === 'signed_ip_mismatch' ? 0.85
+        : earlyHasCorroboration ? 0.75 : 0.4)
+      : 1.0;
+    const disputePenalty = Math.round(60 * earlyDeviceTrustFactor);
+    score -= disputePenalty;
+    flags.push({ severity: earlyDeviceTrustFactor >= 0.75 ? "critical" : "high", text: "device_dispute_history" });
+    topSignals.push({ type: "DEVICE_DISPUTE", value: "lost", contribution: -disputePenalty });
   }
 
   const ipDisputes = disputes.filter(d =>
@@ -281,7 +297,7 @@ async function calculateRiskScore(
   );
   if (ipDisputes.length >= 3) {
     score -= 50;
-    flags.push({ severity: "critical", text: `IP address linked to ${ipDisputes.length} disputes across network` });
+    flags.push({ severity: "critical", text: "ip_dispute_network" });
   }
 
   // ─── Tier 2 — Strong ──────────────────────────────────────────────────
@@ -293,10 +309,16 @@ async function calculateRiskScore(
   // Promise.allSettled يضمن إن فشل واحد مش بيوقف الباقيين
   const binRaw = order.payment_details?.card_bin ?? order.payment_details?.credit_card_bin ?? null;
   
+  // limitedScoring: quota exhausted for this tenant — skip the three
+  // external network calls entirely (cost + rate-limit protection), but
+  // let every other detector below run at full strength. Skipped intel
+  // resolves to `null`, which every downstream consumer already treats
+  // as "no intel available" (see the ?? fallbacks a few lines down) —
+  // no other code path needs to change.
   const [ipIntelSettled, emailIntelSettled, binIntelSettled] = await Promise.allSettled([
-    ip ? getIPIntelligence(ip, merchantId) : Promise.resolve(null),
-    getEmailIntelligence(email, merchantId),
-    binRaw ? getBINIntelligence(binRaw, merchantId) : Promise.resolve(null),
+    (!limitedScoring && ip)      ? getIPIntelligence(ip, merchantId)         : Promise.resolve(null),
+    limitedScoring                ? Promise.resolve(null)                    : getEmailIntelligence(email, merchantId),
+    (!limitedScoring && binRaw)  ? getBINIntelligence(binRaw, merchantId)    : Promise.resolve(null),
   ]);
 
   // ─── IP Intel Result ──────────────────────────────────────────────────
@@ -365,7 +387,7 @@ async function calculateRiskScore(
       highValuePenaltyApplied = true;
       flags.push({
         severity: "high",
-        text: `Order value (${order.amount.toFixed(0)}) is ${Math.round(orderMultiple)}x above store average — extreme anomaly${isNewCustomer ? " from new customer" : ""}`,
+        text: "order_value_extreme_anomaly",
       });
       topSignals.push({ type: "HIGH_VALUE", value: "extreme", contribution: -penalty });
     } else if (orderMultiple >= 3) {
@@ -375,9 +397,7 @@ async function calculateRiskScore(
       highValuePenaltyApplied = true;
       flags.push({
         severity,
-        text: isNewCustomer
-          ? `New customer with order ${Math.round(orderMultiple)}x above store average`
-          : `Order value ${Math.round(orderMultiple)}x above store average`,
+        text: isNewCustomer ? "new_customer_high_value_order" : "high_value_order",
       });
       topSignals.push({ type: "HIGH_VALUE", value: isNewCustomer ? "new_customer" : "returning", contribution: -penalty });
     }
@@ -388,7 +408,7 @@ async function calculateRiskScore(
   );
   if (emailDisputes.length > 0) {
     score -= 30;
-    flags.push({ severity: "high", text: `Email linked to ${emailDisputes.length} previous dispute${emailDisputes.length > 1 ? "s" : ""}` });
+    flags.push({ severity: "high", text: "email_dispute_history" });
   }
 // ─── Authenticated Account Signal ────────────────────────────────────────
   // customerLoginId = Shopify customer account ID (null for guest checkout)
@@ -418,7 +438,7 @@ async function calculateRiskScore(
       score -= 15;
       flags.push({
         severity: "high",
-        text: `Email closely resembles ${similar.similarEmail.length} dispute${similar.similarEmail.length > 1 ? "s" : ""} — possible identity mutation`,
+        text: "email_similarity_match",
       });
     }
 
@@ -426,7 +446,7 @@ async function calculateRiskScore(
       score -= 10;
       flags.push({
         severity: "medium",
-        text: `IP address in same subnet as ${similar.similarIP.length} previous dispute${similar.similarIP.length > 1 ? "s" : ""} — network proximity flag`,
+        text: "ip_subnet_similarity",
       });
     }
 
@@ -434,7 +454,7 @@ async function calculateRiskScore(
       score -= 10;
       flags.push({
         severity: "medium",
-        text: `Shipping address similar to ${similar.similarAddr.length} previous dispute${similar.similarAddr.length > 1 ? "s" : ""} — possible address mutation`,
+        text: "address_similarity_match",
       });
     }
   } catch (simErr) {
@@ -450,7 +470,7 @@ async function calculateRiskScore(
       score -= cardPenalty;
       flags.push({
         severity: cardPenalty > 30 ? 'critical' : 'high',
-        text: `Same card used ${cardHashRecord.attemptCount} times (blocked ${cardHashRecord.blockCount} times)`,
+        text: 'card_reuse_detected',
       });
       topSignals.push({ type: 'CARD_HASH', value: 'repeated', contribution: -cardPenalty });
     }
@@ -511,7 +531,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       const disposableDomains = ["tempmail.com", "guerrillamail.com", "mailinator.com", "throwam.com", "trashmail.com", "fakeinbox.com"];
       if (disposableDomains.includes(emailDomain)) {
         score -= 35;
-        flags.push({ severity: "critical", text: `Disposable email address detected (${emailDomain}) — high fraud risk` });
+        flags.push({ severity: "critical", text: "disposable_email_domain" });
       }
     }
   } else if (emailIntelSettled.status === 'rejected') {
@@ -561,18 +581,49 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     }
   }
 
+  // ─── Device Trust Factor ───────────────────────────────────────────────
+  // Scales how much weight device-anchored signals (dispute history,
+  // "known trusted device" / "first-time device" heuristics, and the
+  // identity-graph contribution below) carry, based on how forgeable this
+  // request's device fingerprint is. Deliberately NOT applied to the
+  // same-request DEVICE_VELOCITY block immediately below — repeating the
+  // SAME fingerprint across a burst within one hour is a strong signal
+  // regardless of forgeability (the attacker either reused a value or
+  // failed to rotate), so that stays at full weight.
+  //
+  // merchantConfig.deviceSignal is set by risk.js's /evaluate handler.
+  // Absent entirely on /enrich and /woocommerce-webhook (which don't
+  // receive a deviceToken today) — deviceTrustFactor defaults to 1.0 in
+  // that case, i.e. identical to pre-hardening behavior. This is what
+  // makes the change backward compatible for un-upgraded plugin installs
+  // and for call sites that don't pass merchantConfig at all.
+  const deviceSignal = merchantConfig?.deviceSignal || null;
+  const hasCorroboration = ipVelocityCount > 0 || emailVelocityCount > 0 || !isNewEmail;
+  let deviceTrustFactor = 1.0;
+  if (deviceSignal) {
+    if (deviceSignal.trust === 'signed') {
+      deviceTrustFactor = 1.0;
+    } else if (deviceSignal.trust === 'signed_ip_mismatch') {
+      deviceTrustFactor = 0.85;
+    } else {
+      // 'unsigned' (no token sent — un-upgraded plugin or pre-hardening
+      // request) or 'invalid_token' (forged/expired/tampered token).
+      deviceTrustFactor = hasCorroboration ? 0.75 : 0.4;
+    }
+  }
+
   // تطبيق العقوبات بناءً على deviceVelocityCount
   if (deviceVelocityCount >= 3) {
     score -= 40;
-    flags.push({ severity: "critical", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
+    flags.push({ severity: "critical", text: "device_velocity_blocked" });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "critical", contribution: -40 });
   } else if (deviceVelocityCount === 2) {
     score -= 25;
-    flags.push({ severity: "high", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
+    flags.push({ severity: "high", text: "device_velocity_blocked" });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "high", contribution: -25 });
   } else if (deviceVelocityCount === 1) {
     score -= 15;
-    flags.push({ severity: "medium", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
+    flags.push({ severity: "medium", text: "device_velocity_blocked" });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "medium", contribution: -15 });
   }
 
@@ -580,7 +631,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   if (ipVelocityCount >= 2) {
     const ipVelocityPenalty = Math.min(Math.round(15 * Math.log2(ipVelocityCount + 1)), 35);
     score -= ipVelocityPenalty;
-    flags.push({ severity: "high", text: `${ipVelocityCount + 1} orders from same IP in last 24 hours` });
+    flags.push({ severity: "high", text: "ip_velocity_high" });
     topSignals.push({ type: "IP_VELOCITY", value: ipVelocityCount, contribution: -ipVelocityPenalty });
   }
 
@@ -588,7 +639,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   if (emailVelocityCount >= 3) {
     const emailVelocityPenalty = Math.min(Math.round(12 * Math.log2(emailVelocityCount + 1)), 30);
     score -= emailVelocityPenalty;
-    flags.push({ severity: "high", text: `${emailVelocityCount + 1} orders from same email in last 6 hours — velocity attack pattern` });
+    flags.push({ severity: "high", text: "email_velocity_high" });
     topSignals.push({ type: "EMAIL_VELOCITY", value: emailVelocityCount, contribution: -emailVelocityPenalty });
   }
 
@@ -626,17 +677,17 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     if (binCount10min >= 2) {
       const penalty = Math.round(10 * prepaidMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: `${binCount10min + 1} orders from same BIN prefix in 10 minutes — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
+      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_10MIN", value: binCount10min, contribution: -penalty });
     } else if (binCount1h >= 3) {
       const penalty = Math.round(15 * prepaidMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: `${binCount1h + 1} orders from same BIN prefix in 1 hour — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
+      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_1H", value: binCount1h, contribution: -penalty });
     } else if (binCount24h >= 5) {
       const penalty = Math.round(25 * prepaidMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: `${binCount24h + 1} orders from same BIN prefix in 24 hours — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
+      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_24H", value: binCount24h, contribution: -penalty });
     }
   }
@@ -659,22 +710,28 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
    const isFirstTimeDevice = !oldestDeviceOrder;
     if (isFirstTimeDevice && order.amount >= 100) {
       // Device جديد خالص + أوردر فوق $100
-      score -= 15;
-      flags.push({ severity: "medium", text: `First-time device with order $${order.amount.toFixed(0)} — no transaction history` });
+      // Dampened by deviceTrustFactor: an unsigned/uncorroborated
+      // "first-time device" is expected noise from every rotating
+      // attacker AND every legitimate first-time visitor alike — full
+      // weight here mainly penalizes real new customers without adding
+      // much signal against a forger who rotates on every request anyway.
+      const firstTimePenalty = Math.round(15 * deviceTrustFactor);
+      score -= firstTimePenalty;
+      flags.push({ severity: "medium", text: "first_time_device_high_value" });
     } else if (deviceAgeHours < 24 && order.amount >= 200) {
       // Device شفناه من أقل من 24 ساعة + أوردر كبير
-      score -= 10;
-      flags.push({ severity: "medium", text: `New device (${Math.round(deviceAgeHours)}h old) with high-value order` });
+      const newDevicePenalty = Math.round(10 * deviceTrustFactor);
+      score -= newDevicePenalty;
+      flags.push({ severity: "medium", text: "new_device_high_value" });
     }
   }
 
   if (isNewCustomer && order.amount >= 150) {
     // Email جديد خالص + أوردر فوق $150
     // ملاحظة: مش بنعاقب كل عميل جديد — بس مع high value
-    const alreadyFlagged = flags.some(f => f.text.includes("New customer"));
-    if (!alreadyFlagged) {
+    if (!highValuePenaltyApplied) {
       score -= 10;
-      flags.push({ severity: "medium", text: `First order from this email with value $${order.amount.toFixed(0)} — no purchase history` });
+      flags.push({ severity: "medium", text: "new_customer_high_value" });
     }
   }
 
@@ -739,7 +796,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       if (spanDays < 3 && prevGoodOrders.length >= 3) {
         // 3+ orders في أقل من 3 أيام = suspicious pattern
         score -= 10;
-        flags.push({ severity: "medium", text: `Rapid order history (${prevGoodOrders.length} orders in ${Math.round(spanDays * 24)}h) — possible trust farming pattern` });
+        flags.push({ severity: "medium", text: "trust_farming_pattern" });
       }
     }
   } else if (prevGoodOrders.length >= 1) {
@@ -755,7 +812,12 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       !disputes.some(d => d.orderId === o.id)
     );
     if (sameDeviceGood.length >= 2) {
-      totalPositiveBonus += 15;
+      // Dampened by deviceTrustFactor — an unsigned, uncorroborated device
+      // match "looking trusted" is exactly the case a rotating attacker
+      // could otherwise farm by replaying one forged fingerprint across a
+      // handful of low-value clean orders before an attack burst.
+      const trustBonus = Math.round(15 * deviceTrustFactor);
+      totalPositiveBonus += trustBonus;
       positives.push({ text: `Known trusted device — ${sameDeviceGood.length} previous successful orders` });
     }
   }
@@ -766,7 +828,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   const orderHour = new Date(order.createdAt || Date.now()).getHours();
   if (orderHour >= 2 && orderHour <= 5) {
     score -= 10;
-    flags.push({ severity: "medium", text: `Order placed at ${orderHour}:00 AM — unusual hour (high fraud period)` });
+    flags.push({ severity: "medium", text: "unusual_order_hour" });
   }
 
   // High value check — بس لو مش اتحسب قبل كده في الـ orderMultiple block
@@ -776,7 +838,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     score -= penalty;
     flags.push({
       severity: isNewCustomer ? "high" : "medium",
-      text: `Order value ${Math.round(orderMultiple)}x above store average${isNewCustomer ? " — new customer" : ""}`,
+      text: isNewCustomer ? "new_customer_high_value_order" : "high_value_order",
     });
   }
 
@@ -785,7 +847,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       const items = JSON.parse(order.lineItems);
       if (items.length > 10) {
         score -= 10;
-        flags.push({ severity: "medium", text: `Unusually large order — ${items.length} different items` });
+        flags.push({ severity: "medium", text: "large_order_item_count" });
       }
     } catch { /* skip */ }
   }
@@ -803,7 +865,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
         // fingerprintVersion مش موجود في Order schema — بنحسبه من fingerprintStatus
         // identityGraph.js بيشيك على fingerprintVersion === "v3" للـ self-healing
         fingerprintVersion:  order.fingerprintVersion || "v2",
-      }, merchantId || null);
+      }, merchantId || null, { deviceTrustFactor });
       graphRisk = graphResult.connectedRisk;
       graphPath = graphResult.graphPath;
       const graphMatchTier     = graphResult.matchTier     ?? "full";
@@ -822,7 +884,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
 
         flags.push({
           severity: graphRisk > 60 ? "critical" : "high",
-          text: `Identity graph: device connected to ${graphPath.length} suspicious identit${graphPath.length > 1 ? "ies" : "y"}${tierLabel} — network risk ${Math.round(graphRisk)}/100`,
+          text: "identity_graph_risk",
         });
         topSignals.push({ type: "GRAPH", value: graphMatchTier, contribution: -graphPenalty });
       } else if (graphRisk > 0 && graphPath.length > 0) {
@@ -840,7 +902,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
           score -= 20;
           flags.push({
             severity: "critical",
-            text: `Device active across ${earlyWarningNode.merchantsSeen} merchants in last 24h — coordinated fraud network signal`,
+            text: "cross_merchant_fraud_network",
           });
           topSignals.push({ type: "CROSS_MERCHANT", value: earlyWarningNode.merchantsSeen, contribution: -20 });
         }
@@ -1068,7 +1130,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       decisionBg    = "#FFF4F4";
       flags.push({
         severity: "high",
-        text: `Economic risk: $${safeLoss.toFixed(0)} potential loss on $${orderAmount} order — ${(fraudProb * 100).toFixed(1)}% fraud probability, ${(safeLoss / baseThreshold).toFixed(1)}x above safe limit ($${baseThreshold.toFixed(0)})`,
+        text: "economic_risk_block",
       });
       topSignals.push({ type: "ECONOMIC", value: "high_loss_block", contribution: -15 });
     }
@@ -1080,7 +1142,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       decisionBg    = "#FFF4E5";
       flags.push({
         severity: "medium",
-        text: `Economic risk: $${safeLoss.toFixed(0)} potential loss on $${orderAmount} order — ${(safeLoss / baseThreshold).toFixed(1)}x above safe limit ($${baseThreshold.toFixed(0)})`,
+        text: "economic_risk_review",
       });
       topSignals.push({ type: "ECONOMIC", value: "high_loss_review", contribution: -10 });
     }
@@ -1138,6 +1200,8 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     isNewDevice,
     avgOrderValue,
     orderMultiple,
+    deviceTrust: deviceSignal?.trust ?? 'unsigned',
+    deviceTrustFactor,
   };
 
   return {
@@ -1156,6 +1220,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     ipIntel: ipIntelResult,
     emailIntel: emailIntelResult,
     binIntel: binIntelResult,
+    limitedScoring, // surfaced so callers can put it on the response/dashboard
   };
 }
 

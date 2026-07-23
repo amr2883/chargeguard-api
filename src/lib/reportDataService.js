@@ -21,7 +21,7 @@ const { RETENTION } = require('./retention');
  * @param {number} year   — مثل 2025
  * @returns {Promise<object>} — كل بيانات التقرير
  */
-async function buildMonthlyReportData(prisma, tenantId, month, year) {
+async function buildMonthlyReportData(prisma, tenantId, month, year, storeId = null) {
 
   // ── حدود الشهر ─────────────────────────────────────────────────────────
   const monthStart = new Date(Date.UTC(year, month - 1, 1));
@@ -32,6 +32,10 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
   const prevYear       = month === 1 ? year - 1 : year;
   const prevMonthStart = new Date(Date.UTC(prevYear, prevMonth - 1, 1));
   const prevMonthEnd   = new Date(Date.UTC(prevYear, prevMonth,     0, 23, 59, 59, 999));
+
+  // Additive per-store scope. storeId = null (default) is a no-op —
+  // output identical to current behavior for every existing caller.
+  const storeScope = storeId ? { storeId } : {};
 
   // ── جلب كل البيانات بالتوازي ────────────────────────────────────────────
   const [
@@ -54,6 +58,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
     prisma.blockedAttempt.findMany({
       where: {
         tenantId,
+        ...storeScope,
         blockedAt: { gte: monthStart, lte: monthEnd },
       },
       select: {
@@ -69,6 +74,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
     prisma.alertLog.aggregate({
       where: {
         tenantId,
+        ...storeScope,
         alertType: 'weekly_summary',
         sentAt:    { gte: prevMonthStart, lte: prevMonthEnd },
       },
@@ -80,6 +86,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
       by:    ['cardBin'],
       where: {
         tenantId,
+        ...storeScope,
         blockedAt: { gte: monthStart, lte: monthEnd },
         cardBin:   { not: null },
       },
@@ -92,6 +99,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
     prisma.binSequenceAlert.findFirst({
       where: {
         tenantId,
+        ...storeScope,
         detectedAt: { gte: monthStart, lte: monthEnd },
       },
       orderBy: { cardsCount: 'desc' },
@@ -106,7 +114,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
 
     // الإجمالي التاريخي منذ انضمام التاجر
     prisma.blockedAttempt.aggregate({
-      where:  { tenantId },
+      where:  { tenantId, ...storeScope },
       _sum:   { amountAttempted: true },
       _count: { id: true },
     }),
@@ -193,6 +201,7 @@ async function buildMonthlyReportData(prisma, tenantId, month, year) {
     monthName,
     monthStart,
     monthEnd,
+    storeId: storeId ?? null,
 
     // إحصائيات الشهر
     totalAttacks,

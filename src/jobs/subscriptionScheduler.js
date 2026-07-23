@@ -12,12 +12,12 @@
 //   4. حذف جلسات الدفع المنتهية (cleanup)
 // ══════════════════════════════════════════════════════════════════════════════
 
-const { sendRenewalReminderEmail, sendGracePeriodEmail } = require('../lib/email');
+const { sendRenewalReminderEmail, sendGracePeriodEmail, sendDowngradeEmail } = require('../lib/email');
 const { acquireLock } = require('../lib/distributedLock');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const GRACE_PERIOD_DAYS = 7;
+const GRACE_PERIOD_DAYS = 3;
 // عدد أيام فترة السماح بعد انتهاء الاشتراك
 
 const REMINDER_COOLDOWN_HOURS = 20;
@@ -194,14 +194,10 @@ const processExpiredToGrace = async (db) => {
         const planLabel = PLAN_LABELS[tenant.plan] || tenant.plan;
         const planId    = `${tenant.plan}_${normalizeBillingCycle(tenant.billingCycle)}`;
 
-        await sendGracePeriodEmail(
-          { email: tenant.email, storeUrl: tenant.storeUrl },
-          {
-            planLabel,
-            graceEndsAt,
-            renewUrl: buildRenewUrl(planId),
-          }
-        );
+       await sendGracePeriodEmail(
+  { email: tenant.email, storeUrl: tenant.storeUrl },
+  { planLabel, graceEndsAt, gracePeriodDays: GRACE_PERIOD_DAYS, renewUrl: buildRenewUrl(planId) }
+);
 
         await db.tenant.update({
           where: { id: tenant.id },
@@ -265,11 +261,31 @@ const processGraceToExpired = async (db) => {
         }),
       ]);
 
-      console.log(`[SubscriptionScheduler] ⬇️  ${tenant.email} downgraded: ${tenant.plan} → starter (grace ended), ${deactivatedStores.count} store(s) deactivated`);
+     console.log(`[SubscriptionScheduler] ⬇️  ${tenant.email} downgraded: ${tenant.plan} → starter (grace ended), ${deactivatedStores.count} store(s) deactivated`);
 
-      // TODO: يمكن إضافة إيميل "Your protection has ended — renew to restore" هنا
-      // لكن لا نريد تضخيم الـ scope الآن
+if (canSendEmail(tenant.lastDowngradeNoticeSentAt)) {
+  const previousPlanLabel = PLAN_LABELS[tenant.plan] || tenant.plan;
+  const planId = `${tenant.plan}_${normalizeBillingCycle(tenant.billingCycle)}`;
 
+  try {
+    await sendDowngradeEmail(
+      { email: tenant.email, storeUrl: tenant.storeUrl },
+      { previousPlanLabel, renewUrl: buildRenewUrl(planId) }
+    );
+
+    await db.tenant.update({
+      where: { id: tenant.id },
+      data:  { lastDowngradeNoticeSentAt: new Date() },
+    });
+
+    console.log(`[SubscriptionScheduler] ✅ Downgrade notice sent to ${tenant.email}`);
+  } catch (emailErr) {
+    // Email failure must never roll back or retry-block the plan downgrade
+    // itself — the transaction above already committed. Log and move on,
+    // same tolerance as every other email call in this file.
+    console.error(`[SubscriptionScheduler] ❌ Downgrade email failed for ${tenant.email}:`, emailErr.message);
+  }
+}
     } catch (err) {
       console.error(`[SubscriptionScheduler] ❌ Downgrade failed for ${tenant.email}:`, err.message);
     }

@@ -17,16 +17,23 @@ const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
 const { checkBINSequence } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
+const emergencyPause = require('../lib/emergencyPause');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
 const { normalizeBin } = require('../lib/binIntelligence');
-const { buildGraphFromOrder } = require('../lib/identityGraph');
-const prometheus = require('../lib/prometheus');
+const { checkEmailHardBlock } = require('../lib/emailIntelligence');
+const { recordAndCheckGlobalRotation } = require('../lib/globalRotationDetector');
+const { shouldIncrementQuota } = require('../lib/quotaDedup');
+const { buildGraphFromOrder } = require('../lib/identityGraph');const prometheus = require('../lib/prometheus');
 
-const { domainAuthMiddleware, normalizeDomain } = require('../lib/domainAuth');
-const { notifyBINSequenceAlert }               = require('../lib/notify');
-const { isAgency, FREE_PLANS }                  = require('../lib/planAccess');
+const { domainAuthMiddleware, domainAuthMiddlewareWithAutoRegister, normalizeDomain, resolveStoreIdBestEffort } = require('../lib/domainAuth');
+const autoRegisterStoreMiddleware = require('../middleware/autoRegisterStore');const { notifyBINSequenceAlert }               = require('../lib/notify');
+const { isAgency, FREE_PLANS, getStoreScope }   = require('../lib/planAccess');
 const { checkQuotaGate }                        = require('../lib/quotaGate');
+const { mintDeviceToken, verifyDeviceToken }     = require('../lib/deviceToken');
+const { isPlausibleClientIp }                    = require('../lib/utils');
+const { getCloudflareRanges }                    = require('../lib/cloudflareRanges');
+const { safeErrorPayload }                       = require('../lib/errorResponse');
 
 // ── Early Access Pro Grant ────────────────────────────────────────────────
 // Marketing promise (index.html): "Early Access cohort members receive
@@ -39,7 +46,7 @@ const EARLY_ACCESS_END_DATE = process.env.EARLY_ACCESS_END_DATE
   : null;
 
 // ── BIN Sequence Alert Persistence ───────────────────────────────────────
-const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
+const persistBinSequenceAlert = async (tenantId, bin, binSeq, storeId = null) => {
   if (!tenantId) return; // webhook بدون tenant — TODO: ربط webhook بالـ tenant
   try {
     const prefix     = String(bin).replace(/\D/g, '').slice(0, 4);
@@ -55,6 +62,12 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
     });
 
     if (existing) {
+      // storeId is deliberately NOT touched on increment — the detection
+      // window (binSequenceDetector.js) is tenant-wide/pooled by design, so
+      // a single alert row can legitimately be incremented by requests from
+      // several stores. storeId records only which store's request FIRST
+      // created this alert, not a claim that the whole attack is confined
+      // to one store.
       await db.binSequenceAlert.update({
         where: { id: existing.id },
         data:  { cardsCount: { increment: 1 } },
@@ -63,6 +76,7 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq) => {
       const newAlert = await db.binSequenceAlert.create({
         data: {
           tenantId,
+          storeId:       storeId ?? null,
           binPrefix:     prefix,
           layer:         binSeq.layer    || 0,
           reason:        binSeq.reason   || 'BIN sequence detected',
@@ -95,13 +109,13 @@ const { isProOrAbove } = require('../lib/planAccess');
 const apiKeyAuth = requireAuth({
   id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true,
   countryOverrides: true, plan: true, subscriptionStatus: true, subscriptionEndDate: true,
-  monthlyBlockedCount: true, quotaResetDate: true,
+  monthlyBlockedCount: true, quotaResetDate: true, fraudIsolationMode: true,
 });
 
 // Shared auth middleware for the WooCommerce webhook, reusing the same
 // centralized requireAuth() the rest of the file uses, instead of a manual
 // resolveTenantByApiKey/isActive/emailVerified copy (CWE-1059 drift fix).
-const webhookAuth = requireAuth({ id: true, isActive: true, emailVerified: true, plan: true, monthlyBlockedCount: true, quotaResetDate: true });
+const webhookAuth = requireAuth({ id: true, isActive: true, emailVerified: true, plan: true, monthlyBlockedCount: true, quotaResetDate: true, fraudIsolationMode: true, webhookSecret: true });
 
 // Invokes an Express-style middleware inline and resolves true/false
 // depending on whether next() was called or the middleware sent its own
@@ -129,24 +143,129 @@ const recordBlockedAttempt = (tx, {
   riskScore = null,
   amountAttempted = null,
   storeId = null,
-}) => ([
-  tx.blockedAttempt.create({
-    data: {
-      tenantId:        merchantId,
-      storeId:         storeId ?? null,
-      cardBin:         cardBin ?? null,
-      cardType:        cardType ?? null,
-      reason,
-      ipHash:          ipHash ?? null,
-      amountAttempted: amountAttempted ?? null,
-      riskScore:       riskScore ?? null,
-    },
-  }),
-  tx.tenant.update({
-    where: { id: merchantId },
-    data:  { monthlyBlockedCount: { increment: 1 } },
-  }),
-]);
+  // Quota-dedup fix: when false (see lib/quotaDedup.js), this block is a
+  // repeat from an entity already blocked for the same reason within the
+  // dedup window — the BlockedAttempt row is still written for dashboard/
+  // audit purposes, but monthlyBlockedCount is NOT incremented again.
+  // Defaults to true so any caller that doesn't pass it gets the original,
+  // unconditional-increment behavior.
+  incrementQuota = true,
+}) => {
+  const ops = [
+    tx.blockedAttempt.create({
+      data: {
+        tenantId:        merchantId,
+        storeId:         storeId ?? null,
+        cardBin:         cardBin ?? null,
+        cardType:        cardType ?? null,
+        reason,
+        ipHash:          ipHash ?? null,
+        amountAttempted: amountAttempted ?? null,
+        riskScore:       riskScore ?? null,
+      },
+    }),
+  ];
+
+  if (incrementQuota) {
+    ops.push(
+      tx.tenant.update({
+        where: { id: merchantId },
+        data:  { monthlyBlockedCount: { increment: 1 } },
+      })
+    );
+  }
+
+  return ops;
+};
+
+// ── POST /risk/device-token ──────────────────────────────────────────────
+// Mints a server-signed device token for the WooCommerce plugin to store
+// as an HttpOnly cookie (chargeguard_dt). See src/lib/deviceToken.js for
+// the rationale. Rate-limited per-tenant so a compromised/misbehaving
+// plugin install can't hammer this into a token-minting DoS vector.
+const DEVICE_TOKEN_RATE = new Map(); // keyed on tenant id
+const DT_MAX_REQ   = 30;
+const DT_WINDOW_MS = 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of DEVICE_TOKEN_RATE.entries()) {
+    if (now - rec.firstAt > DT_WINDOW_MS) DEVICE_TOKEN_RATE.delete(key);
+  }
+}, DT_WINDOW_MS).unref();
+
+const deviceTokenRateLimit = (req, res, next) => {
+  const key = req.tenant?.id || req.ip || 'unknown';
+  const now = Date.now();
+  const rec = DEVICE_TOKEN_RATE.get(key);
+  if (rec) {
+    if (now - rec.firstAt > DT_WINDOW_MS) {
+      DEVICE_TOKEN_RATE.delete(key);
+    } else if (rec.count >= DT_MAX_REQ) {
+      return res.status(429).json({ error: 'Too Many Requests' });
+    } else {
+      rec.count++;
+    }
+  } else {
+    DEVICE_TOKEN_RATE.set(key, { count: 1, firstAt: now });
+  }
+  next();
+};
+
+// deviceTokenRateLimit runs BEFORE domain resolution, keyed on
+// req.tenant?.id — unaffected by the change below.
+//
+// domainAuthMiddlewareWithAutoRegister (in place of domainAuthMiddleware)
+// + autoRegisterStoreMiddleware (after verifyHmacSignature) closes the
+// "brand-new store's first visitor never gets a device token" gap: for
+// Agency tenants (or any tenant with Store rows) whose domain has no
+// Store row yet, this defers the domain-binding decision until AFTER the
+// HMAC signature is verified — the same "Solution D" pattern already
+// used on /evaluate and /blocked-attempt — then auto-registers the Store
+// from that signature-verified domain. Non-Agency tenants are completely
+// unaffected: they still resolve via the tenant.allowedDomains fallback
+// inside domainAuthCore, exactly as before. No new unauthenticated
+// store-creation path is introduced — auto-registration only ever fires
+// after the request has already proven possession of this tenant's
+// webhookSecret.
+router.post('/device-token', apiKeyAuth, deviceTokenRateLimit, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
+  try {
+    const rawIp = typeof req.body.ip === 'string' ? req.body.ip : '';
+    // Never bind a device token to a private/reserved or unverified
+    // Cloudflare-edge IP — see isPlausibleClientIp() in lib/utils.js. Doing
+    // so would make ipMatches:true a false trust signal for every visitor
+    // who happens to share that same non-unique address, rather than a
+    // genuine per-visitor correlation.
+    const ipCheck = isPlausibleClientIp(rawIp);
+    const ip = ipCheck.ok ? rawIp.trim() : '';
+    if (!ipCheck.ok && rawIp) {
+      logger.warn({ module: 'risk', endpoint: 'device-token', tenantId: req.tenant?.id, reason: ipCheck.reason }, 'Implausible ip on device-token mint — minting without IP binding');
+    }
+    const token = mintDeviceToken(ip);
+    return res.status(200).json({ token });
+  } catch (err) {
+    logger.error({ module: 'risk', endpoint: 'device-token', error: err.message }, 'Failed to mint device token');
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
+
+// ── GET /risk/cloudflare-ranges ───────────────────────────────────────────
+// Single source of truth for Cloudflare's published IP ranges (see
+// lib/cloudflareRanges.js, which owns the daily fetch/cache). The
+// WooCommerce plugin's WP-Cron job (ChargeGuard_Trusted_Proxy::
+// refresh_cf_ranges()) polls this instead of hitting cloudflare.com
+// directly, so both systems ultimately derive their ranges from this one
+// backend fetch — eliminating the drift risk between the plugin's and
+// backend's previously-independent hardcoded copies. Protected by the
+// same auth stack as the other internal endpoints (e.g. /device-token):
+// API key, domain binding, HMAC signature.
+router.get('/cloudflare-ranges', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, (req, res) => {
+  try {
+    return res.status(200).json({ ranges: getCloudflareRanges() });
+  } catch (err) {
+    logger.error({ module: 'risk', endpoint: 'cloudflare-ranges', error: err.message }, 'Failed to return Cloudflare ranges');
+    return res.status(500).json({ error: 'Internal Server Error' });
+  }
+});
 
 /**
  * @swagger
@@ -173,20 +292,77 @@ const recordBlockedAttempt = (tx, {
  *       500:
  *         description: Internal server error
  */
-router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
+router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
   try {
-    // ── 0. Subscription & Quota Gate ─────────────────────────────────────
-    // هذا الفحص هو نقطة التحكم الوحيدة الفعّالة — الـ plugin لا يفحص الاشتراك
-    // لذلك نرفض هنا على مستوى الخادم قبل أي معالجة
+    // ── -1. Emergency Pause Check — the very first thing in the handler,
+    // before any DB query or detection logic. Pure in-memory read (see
+    // lib/emergencyPause.js) — deliberately ahead of even the quota gate,
+    // so a paused tenant doesn't pay for a single DB round trip on the
+    // highest-traffic endpoint in this file. Does NOT touch /enrich or
+    // /woocommerce-webhook — see emergencyPause.js's module comment.
+    const pauseState = emergencyPause.isPaused(req.tenant.id);
+    if (pauseState.paused) {
+      logger.warn(
+        { module: 'risk', endpoint: 'evaluate', merchantId: req.tenant.id, scope: pauseState.scope, expiresAt: pauseState.expiresAt },
+        'Emergency pause active — auto-approving without running detection'
+      );
+      return res.json({
+        orderId: req.body?.orderId || null,
+        score: 0,
+        decision: 'approve',
+        flags: [{ severity: 'warning', text: 'Emergency override active — all orders are being approved' }],
+        connectedRisk: 0,
+        scored: false,
+        emergencyPause: pauseState.scope, // 'global' | 'tenant'
+      });
+    }
 
-       if (await checkQuotaGate(req, res, 'evaluate')) return;
-    // ── End Subscription & Quota Gate ────────────────────────────────────
+    // ── 0. Subscription & Quota Status ───────────────────────────────────
+    // NOTE: this no longer short-circuits the request. Quota only decides
+    // whether calculateRiskScore() below is allowed to call expensive
+    // external intel APIs (IP/email/BIN). Blacklist, velocity, BIN-sequence,
+    // identity graph, and pattern-sharing checks always run, and the order
+    // can still be blocked purely on their output — closing the "burn the
+    // quota, then everything approves" bypass.
+    const quotaStatus = await checkQuotaGate(req, 'evaluate');
+    const limitedScoring = quotaStatus.exceeded;
+    // ── End Subscription & Quota Status ──────────────────────────────────
 
     // ������� ��������
-    const { orderId, ipAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer } = req.body;
+    const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken } = req.body;
     // merchantId is derived from the authenticated tenant (CWE-639 / OWASP API1:2023 fix).
     // It is never read from the request body or x-merchant-id header.
     const merchantId = req.tenant.id;
+
+    // Defense-in-depth (see lib/utils.js isPlausibleClientIp() and the
+    // WooCommerce plugin's ChargeGuard_Trusted_Proxy redesign): this
+    // backend does not trust get_client_ip()'s output blindly. A private/
+    // reserved IP, or an unverified Cloudflare edge IP, getting used
+    // as-is here would corrupt every IP-anchored control below —
+    // whitelist/blacklist matching, velocity counting, and identity-graph
+    // anchoring — usually by silently collapsing many distinct visitors
+    // onto one address. Gating ONCE here, rather than at each of those
+    // call sites, is sufficient because every downstream use of
+    // `ipAddress` in this file already null-guards correctly
+    // (`ipAddress ? ... : null` / `: 0`) — nulling it out here flows
+    // through cleanly with no further changes needed. This never blocks
+    // the order by itself; it only excludes IP from this evaluation's
+    // signals and is recorded in signalsSnapshot.ipAnomaly for visibility.
+    const ipPlausibility = isPlausibleClientIp(rawIpAddress);
+    const ipAddress = ipPlausibility.ok ? rawIpAddress.trim() : null;
+    const ipAnomaly = ipPlausibility.ok ? null : ipPlausibility.reason;
+    if (ipAnomaly) {
+      logger.warn(
+        { module: 'risk', endpoint: 'evaluate', merchantId, orderId, ipAnomaly },
+        'ipAddress failed plausibility check — excluding from IP-based detection for this request'
+      );
+    }
+
+    // Tier-1 fraud-isolation scope (opt-in). {} unless this tenant is in
+    // 'per_store' mode AND req.storeId was resolved by domainAuthMiddleware —
+    // see getStoreScope() in planAccess.js. Deliberately NOT applied to
+    // checkBINSequence() or buildGraphFromOrder() below (Tier 2, always pooled).
+    const storeScope = getStoreScope(req.tenant, req.storeId);
 
 
         // Idempotency: ������ �� ������� ������� ���� ��� 5 �����
@@ -230,6 +406,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       const whitelistCheck = await db.whitelistEntry.findFirst({
         where: {
           merchantId,
+          ...storeScope,
           OR: whitelistConditions,
           AND: [{ OR: [
             { expiresAt: null },
@@ -259,6 +436,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     const blacklistCheck = await db.blacklistEntry.findFirst({
       where: {
         merchantId,
+        ...storeScope,
         OR: [
           { type: 'EMAIL', value: email },
           { type: 'IP', value: ipAddress },
@@ -292,7 +470,12 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
         if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) blacklistAmount = amt;
       }
 
-      try {
+       try {
+        // Dedup entity: the blacklist row's own matched value (email, IP,
+        // or device fingerprint) — whichever actually triggered this hit —
+        // is the most precise identity to dedupe repeat blocks on.
+        const blacklistIncrementQuota = shouldIncrementQuota(merchantId, 'blacklist', blacklistCheck.value);
+
         await db.$transaction(recordBlockedAttempt(db, {
           merchantId:      merchantId,
           storeId:         req.storeId ?? null,
@@ -302,6 +485,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
           ipHash:          blacklistIpHash,
           amountAttempted: blacklistAmount,
           riskScore:       null,
+          incrementQuota:  blacklistIncrementQuota,
         }));
       } catch (counterErr) {
         logger.error(
@@ -309,17 +493,91 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
           'Failed to record BlockedAttempt / increment quota counter (blacklist path)'
         );
       }
-
-      return res.status(403).json({
+       return res.status(403).json({
         error: 'Request blocked: entity is blacklisted',
         reason: blacklistCheck.reason || 'Blacklisted',
         decision: 'block'
       });
     }
 
+    // 0c. Email Hard-Block — disposable domain / no-MX. Deliberately calls
+    // checkEmailHardBlock() directly rather than going through
+    // calculateRiskScore()'s getEmailIntelligence() call, so this runs even
+    // when limitedScoring is true (quota exhausted). Placed after blacklist
+    // (cheapest possible reject first) and before velocity/BIN/rotation,
+    // per the same "cheapest, most definitive gate first" ordering already
+    // used by the other hard gates in this handler.
+    if (email) {
+      const emailHardBlock = await checkEmailHardBlock(email);
+      if (emailHardBlock.blocked) {
+        let emailBlockCardBin = null;
+        if (bin != null) {
+          const b = String(bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) emailBlockCardBin = b;
+        }
+        let emailBlockCardType = null;
+        if (req.body.cardType != null) {
+          const ct = String(req.body.cardType).toLowerCase().trim();
+          emailBlockCardType = VALID_CARD_TYPES.has(ct) ? ct : 'unknown';
+        }
+        const emailBlockIpHash = ipAddress ? hashIp(ipAddress) : null;
+        let emailBlockAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) emailBlockAmount = amt;
+        }
+
+      try {
+          const emailIncrementQuota = shouldIncrementQuota(merchantId, 'email', email);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         emailBlockCardBin,
+            cardType:        emailBlockCardType,
+            reason:          'email',
+            ipHash:          emailBlockIpHash,
+            amountAttempted: emailBlockAmount,
+            riskScore:       null,
+            incrementQuota:  emailIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'email_hard_block', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (email hard-block path)'
+          );
+        }
+        return res.status(403).json({
+          error: 'Request blocked: email address failed validation',
+          reason: 'email_hard_block',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'email_hard_block' }]
+        });
+      }
+    }
 
     // 1. فحص السرعة (Velocity Check)
-    const velocityCheck = await checkVelocity({ ip: ipAddress, deviceFingerprint, merchantId });
+    const velocityCheck = await checkVelocity({ ip: ipAddress, deviceFingerprint, merchantId, storeId: storeScope.storeId ?? null });
+
+    // Observability only — checkVelocity() now degrades to a local
+    // in-memory fallback rather than failing open on a DB error (see
+    // velocityDetector.js). This does not change control flow here:
+    // velocityCheck.blocked (from either the authoritative or the
+    // fallback path) is handled identically below, exactly as before.
+    if (velocityCheck.dbError) {
+      logger.warn(
+        { module: 'risk', endpoint: 'evaluate', merchantId, fallbackBlocked: velocityCheck.blocked },
+        'Velocity check ran in degraded mode — CardTestAttempt query failed, local fallback used'
+      );
+      try {
+        if (typeof prometheus.recordVelocityDbError === 'function') {
+          prometheus.recordVelocityDbError();
+        }
+      } catch (metricErr) {
+        // Metrics must never affect request handling.
+      }
+    }
+
     if (velocityCheck.blocked) {
       let velocityCardBin = null;
       if (bin != null) {
@@ -338,7 +596,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
         if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) velocityAmount = amt;
       }
 
-      try {
+           try {
+        const velocityIncrementQuota = shouldIncrementQuota(merchantId, 'velocity', deviceFingerprint || ipAddress);
+
         await db.$transaction(recordBlockedAttempt(db, {
           merchantId:      merchantId,
           storeId:         req.storeId ?? null,
@@ -348,6 +608,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
           ipHash:          velocityIpHash,
           amountAttempted: velocityAmount,
           riskScore:       null,
+          incrementQuota:  velocityIncrementQuota,
         }));
       } catch (counterErr) {
         logger.error(
@@ -358,7 +619,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 
       return res.status(403).json({
         error: 'Request blocked due to suspicious activity',
-        reason: velocityCheck.reason,
+        reason: 'velocity_blocked',
         decision: 'block'
       });
     }
@@ -370,7 +631,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       // could false-block a different tenant's legitimate customers (CWE-653).
       const binSeq = await checkBINSequence({ tenantId: req.tenant.id, bin, ipAddress, deviceFingerprint });
       if (binSeq.blocked || binSeq.riskAddition > 0) {
-        persistBinSequenceAlert(req.tenant.id, bin, binSeq)
+        persistBinSequenceAlert(req.tenant.id, bin, binSeq, req.storeId ?? null)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
       }
 
@@ -392,7 +653,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
           if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) binSeqAmount = amt;
         }
 
-        try {
+ try {
+          const binSeqIncrementQuota = shouldIncrementQuota(req.tenant.id, 'card_testing', binSeqCardBin || bin);
+
           await db.$transaction(recordBlockedAttempt(db, {
             merchantId:      req.tenant.id,
             storeId:         req.storeId ?? null,
@@ -402,6 +665,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
             ipHash:          binSeqIpHash,
             amountAttempted: binSeqAmount,
             riskScore:       null,
+            incrementQuota:  binSeqIncrementQuota,
           }));
         } catch (counterErr) {
           logger.error(
@@ -409,15 +673,147 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
             'Failed to record BlockedAttempt / increment quota counter (BIN sequence path)'
           );
         }
-
         return res.status(403).json({
           error: 'Request blocked due to suspicious card testing pattern',
-          reason: binSeq.reason,
+          reason: 'bin_sequence_blocked',
           decision: 'block',
-          flags: [{ severity: 'critical', text: binSeq.reason }]
+          flags: [{ severity: 'critical', text: 'bin_sequence_blocked' }]
         });
       }
     }
+
+    // 1c. Device Fingerprint Trust & Rotation Detection
+    // deviceSignal.trust classifies how much weight the device-anchored
+    // signals in calculateRiskScore()/identityGraph.js should carry this
+    // request — see deviceToken.js and the deviceTrustFactor logic in
+    // riskScoring.js. rotationBlocked mirrors checkVelocity/checkBINSequence:
+    // an attacker generating many fresh, forged fingerprints from one IP
+    // is itself a detectable pattern, independent of whether any single
+    // fingerprint can be verified.
+    const deviceSignal = { trust: 'unsigned', ipMatches: null, rotationCount: 0 };
+
+    if (deviceToken) {
+      const verification = verifyDeviceToken(deviceToken, ipAddress);
+      if (verification.valid) {
+        deviceSignal.trust = verification.ipMatches ? 'signed' : 'signed_ip_mismatch';
+        deviceSignal.ipMatches = verification.ipMatches;
+      } else {
+        deviceSignal.trust = 'invalid_token';
+      }
+    }
+
+    if (ipAddress) {
+      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour — matches deviceVelocityCount's own window elsewhere
+      const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct device fingerprints from one IP in 1h
+      const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
+
+      const recentDevicesForIp = await db.order.findMany({
+        where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: rotationWindowStart }, deviceFingerprint: { not: null } },
+        select: { deviceFingerprint: true },
+        distinct: ['deviceFingerprint'],
+        take: 50,
+      });
+      const seenThisOne = deviceFingerprint && recentDevicesForIp.some(d => d.deviceFingerprint === deviceFingerprint);
+      deviceSignal.rotationCount = recentDevicesForIp.length + (deviceFingerprint && !seenThisOne ? 1 : 0);
+
+      if (deviceSignal.rotationCount >= ROTATION_BLOCK_THRESHOLD) {
+        let rotCardBin = null;
+        if (bin != null) {
+          const b = String(bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) rotCardBin = b;
+        }
+        const rotIpHash = hashIp(ipAddress);
+        let rotAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) rotAmount = amt;
+        }
+
+         try {
+          // Keyed on ipAddress — this gate's own detection basis (distinct
+          // fingerprints from one IP), so repeat blocks from the same IP
+          // don't re-count, but a different IP rotating fingerprints still does.
+          const rotIncrementQuota = shouldIncrementQuota(merchantId, 'device_rotation_ip', ipAddress);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         rotCardBin,
+            cardType:        null,
+            reason:          'velocity', // reuses the existing VALID_REASONS enum — conceptually a velocity pattern
+            ipHash:          rotIpHash,
+            amountAttempted: rotAmount,
+            riskScore:       null,
+            incrementQuota:  rotIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'device_rotation', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (device rotation path)'
+          );
+        }
+               return res.status(403).json({
+          error: 'Request blocked due to suspicious device fingerprint rotation',
+          reason: 'device_rotation_ip_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_rotation_ip_blocked' }]
+        });
+      }
+    }
+
+    // 1c-ii. Global (Merchant-Scoped) Device Rotation Detection — complements
+    // the per-IP check above rather than replacing it. Runs independently of
+    // ipAddress: it tracks how fast entirely NEW fingerprints are appearing
+    // for this merchant, so an attacker who rotates IP and fingerprint
+    // together (defeating the per-IP check, which never sees more than 1
+    // fingerprint per IP) still trips this one. In-memory, zero DB calls —
+    // see lib/globalRotationDetector.js for the counter and its tradeoffs.
+    if (deviceFingerprint) {
+      const globalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
+
+      if (globalRotation.blocked) {
+        let globalRotCardBin = null;
+        if (bin != null) {
+          const b = String(bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) globalRotCardBin = b;
+        }
+        const globalRotIpHash = ipAddress ? hashIp(ipAddress) : null;
+        let globalRotAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) globalRotAmount = amt;
+        }
+
+       try {
+          const globalRotIncrementQuota = shouldIncrementQuota(merchantId, 'device_rotation_global', deviceFingerprint);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         globalRotCardBin,
+            cardType:        null,
+            reason:          'device_rotation_global',
+            ipHash:          globalRotIpHash,
+            amountAttempted: globalRotAmount,
+            riskScore:       null,
+            incrementQuota:  globalRotIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'device_rotation_global', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (global device rotation path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious device fingerprint rotation across the merchant',
+          reason: 'device_rotation_global_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_rotation_global_blocked' }]
+        });
+      }
+    }
+    // End 1c. Device Fingerprint Trust & Rotation Detection
 
     // 1. ���� ���� order
     const order = {
@@ -447,7 +843,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     // ��� ������� ������� �� ����� ��������
     // ��� ��� 200 ��� ��� ����� ��������� (���� ����)
     const recentOrders = await db.order.findMany({
-      where: { merchantId, createdAt: { gte: last7days } },
+      where: { merchantId, ...storeScope, createdAt: { gte: last7days } },
       orderBy: { createdAt: 'desc' },
       take: 200
     });
@@ -469,15 +865,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
     const deviceVelocityCount = deviceFingerprint ? await db.order.count({
-      where: { merchantId, deviceFingerprint, createdAt: { gte: last1h } }
+      where: { merchantId, ...storeScope, deviceFingerprint, createdAt: { gte: last1h } }
     }) : 0;
 
     const ipVelocityCount = ipAddress ? await db.order.count({
-      where: { merchantId, ipAddress, createdAt: { gte: last24h } }
+      where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: last24h } }
     }) : 0;
 
     const emailVelocityCount = email ? await db.order.count({
-      where: { merchantId, email, createdAt: { gte: last6h } }
+      where: { merchantId, ...storeScope, email, createdAt: { gte: last6h } }
     }) : 0;
 
     // ����� ��� ����� ��� computedSignals (���� ������� ��� riskScoring ������)
@@ -518,7 +914,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 
     // 4. ������� ���� ������� (�� ����� velocityCounts)
     const merchantConfig = {
-      countryOverrides: req.tenant.countryOverrides || {}
+      countryOverrides: req.tenant.countryOverrides || {},
+      deviceSignal, // see riskScoring.js's deviceTrustFactor for how this is consumed
     };
 
     const riskResult = await calculateRiskScore(
@@ -530,7 +927,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       false,
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount },
       null,           // cardHashRecord — متاح فقط في /enrich
-      merchantConfig
+      merchantConfig,
+      limitedScoring
     );
 
     // 5. ���� ���������
@@ -541,13 +939,21 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
                 riskResult.decision.includes('Review') ? 'review' : 'block',
       flags: riskResult.flags,
       connectedRisk: 0,
+      // `scored` is now always true — every request runs at least the
+      // cheap, always-on detector set. `limitedScoring` is the new,
+      // granular replacement for the old `scored:false`: it tells the
+      // dashboard/plugin that external IP/email/BIN intelligence was
+      // skipped for this request due to exhausted monthly quota, while
+      // detection otherwise ran normally.
+      scored: true,
+      limitedScoring,
     };
 
     // ������� connectedRisk ������ �� ����� Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
    // تسجيل المحاولة الفاشلة عند block
     if (response.decision === 'block') {
-      recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, amount: amount || 0 });
+      recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, storeId: storeScope.storeId ?? null, amount: amount || 0 });
 
       // ── Quota Counter: coupled to the enforcement decision ─────────────
       // BlockedAttempt logging + monthlyBlockedCount increment happen here,
@@ -583,7 +989,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
         if (!isNaN(rs) && rs >= 0 && rs <= 100) evalRiskScore = rs;
       }
 
-      try {
+       try {
+        const patternIncrementQuota = shouldIncrementQuota(req.tenant.id, 'pattern', deviceFingerprint || ipAddress || email);
+
         await db.$transaction(recordBlockedAttempt(db, {
           merchantId:      req.tenant.id,
           storeId:         req.storeId ?? null,
@@ -593,6 +1001,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
           ipHash:          evalIpHash,
           amountAttempted: evalAmount,
           riskScore:       evalRiskScore,
+          incrementQuota:  patternIncrementQuota,
         }));
       } catch (counterErr) {
         // Logged, not fatal: a failed counter write shouldn't turn an
@@ -616,12 +1025,13 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       const isNewCustomerComputed = computed.isNewCustomer || false;
       const amountAnomaly = (computed.orderMultiple || 0) >= 3;
 
-      const shippingMismatchFlag = riskResult.flags.find(f => f.text.includes('Shipping country differs from billing'));
+      const shippingMismatchFlag = riskResult.flags.find(f => f.text === 'shipping_billing_mismatch');
       const shippingBillingMismatch = !!shippingMismatchFlag;
 
       const signalsSnapshot = {
         email,
         ipAddress,
+        ipAnomaly,
         bin: bin || null,
         deviceFingerprint,
         amount,
@@ -648,6 +1058,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
         create: {
           orderId,
           merchantId,
+          // Unconditional attribution (mirrors BlockedAttempt.storeId) —
+          // deliberately NOT storeScope.storeId, which only reflects
+          // fraudIsolationMode==='per_store' and is for DETECTION-query
+          // filtering only (see getStoreScope() in planAccess.js). Without
+          // this fix, PayPal Shield and Monthly Report per-store breakdowns
+          // (which read Order.storeId) would only ever populate for the
+          // small subset of tenants who happened to also opt into fraud
+          // isolation — an unrelated, unintended coupling.
+          storeId: req.storeId ?? null,
           amount: amount || 0,
           currency: 'USD',
           email: email || null,
@@ -712,8 +1131,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     prometheus.recordEvaluateDecision(response.decision);
     res.json(response);
   } catch (error) {
-    logger.error({ module: 'risk', error: error.message, stack: error.stack }, 'Evaluate error');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    // Full detail stays server-side — the client response is generic in
+    // production. /evaluate is the highest-traffic endpoint in this file
+    // (hit on every checkout), so this was the highest-value leak to close.
+    logger.error({ module: 'risk', endpoint: 'evaluate', error: error.message, stack: error.stack }, 'Evaluate error');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ���� ����� ����� ���� ����� ������ ��� ���� (������ �������� ���)
@@ -770,8 +1192,8 @@ router.post('/mark-fraud', apiKeyAuth, verifyHmacSignature, async (req, res) => 
     
     res.json({ success: true, message: `Device ${deviceFingerprint} marked as fraud` });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'mark-fraud', error: error.message }, error.message);
-    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'mark-fraud', error: error.message, stack: error.stack }, 'mark-fraud error');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ���� ����� ������ �� ����� ����� (Feedback Loop)
@@ -826,8 +1248,8 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 
     res.json({ success: true, message: 'Feedback recorded successfully' });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'feedback', error: error.message }, 'Feedback API error');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    logger.error({ module: 'risk', endpoint: 'feedback', error: error.message, stack: error.stack }, 'Feedback API error');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -920,7 +1342,7 @@ router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
     res.json({ success: true });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'reconcile', error: error.message, stack: error.stack }, 'Reconcile error');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -976,8 +1398,8 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
     await buildGraphFromOrder(mockOrder, merchantId);    
     res.json({ success: true, message: 'Graph built' });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'test-graph', error: error.message }, error.message);
-    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'test-graph', error: error.message, stack: error.stack }, 'test-graph error');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ========== Blacklist Management Endpoints ==========
@@ -1033,8 +1455,8 @@ router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
     prometheus.recordAccessControlAction('add', 'blacklist');
     res.json({ success: true, entry: blacklistEntry });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message }, 'Error adding blacklist entry');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message, stack: error.stack }, 'Error adding blacklist entry');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -1080,8 +1502,8 @@ router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
     await db.blacklistEntry.delete({ where: { id } });    prometheus.recordAccessControlAction('delete', 'blacklist');
     res.json({ success: true, message: 'Blacklist entry deleted' });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message }, 'Error deleting blacklist entry');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    logger.error({ module: 'risk', endpoint: 'blacklist-delete', error: error.message, stack: error.stack }, 'Error deleting blacklist entry');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ========== GET Blacklist (Query) ==========
@@ -1113,7 +1535,7 @@ router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
  *                 success: { type: boolean }
  *                 entries: { type: array, items: { $ref: '#/components/schemas/BlacklistEntry' } }
  */
-router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
+router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
@@ -1144,8 +1566,8 @@ router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
     res.json({ success: true, entries: blacklistEntries });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'blacklist-get', error: error.message }, 'Error fetching blacklist');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    logger.error({ module: 'risk', endpoint: 'blacklist-get', error: error.message, stack: error.stack }, 'Error fetching blacklist');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ========== UPDATE Blacklist Entry ==========
@@ -1204,8 +1626,8 @@ router.put('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
 
     res.json({ success: true, entry: updated });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'blacklist-update', error: error.message }, 'Error updating blacklist entry');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    logger.error({ module: 'risk', endpoint: 'blacklist-update', error: error.message, stack: error.stack }, 'Error updating blacklist entry');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -1247,12 +1669,12 @@ router.post('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
     if (error.code === 'P2002') {
       return res.status(409).json({ error: 'This entry already exists in the whitelist' });
     }
-    logger.error({ module: 'risk', endpoint: 'whitelist-add', error: error.message }, 'Error adding whitelist entry');
-    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'whitelist-add', error: error.message, stack: error.stack }, 'Error adding whitelist entry');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
-router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
+router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
@@ -1281,7 +1703,8 @@ router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 
     res.json({ success: true, entries: whitelistEntries });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'whitelist-get', error: error.message }, 'Error fetching whitelist');    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'whitelist-get', error: error.message, stack: error.stack }, 'Error fetching whitelist');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -1301,8 +1724,8 @@ router.delete('/whitelist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
     prometheus.recordAccessControlAction('delete', 'whitelist');
     res.json({ success: true, message: 'Whitelist entry deleted' });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'whitelist-delete', error: error.message }, 'Error deleting whitelist entry');
-    res.status(500).json({ error: error.message });
+    logger.error({ module: 'risk', endpoint: 'whitelist-delete', error: error.message, stack: error.stack }, 'Error deleting whitelist entry');
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 
@@ -1339,6 +1762,27 @@ router.post('/woocommerce-webhook', async (req, res) => {
     if (!authOk) return; // webhookAuth already sent the response (401/403/500)
     const merchantId = req.tenant.id;
 
+    // Note: webhookAuth's select object must also include fraudIsolationMode
+    // (see Change 3a-equivalent for webhookAuth definition) for this to be
+    // anything other than {} — see next required edit below.
+
+    // ── Best-effort store attribution (Agency multi-store) ───────────────
+    // domainAuthMiddleware is NOT applied on this route (see historical
+    // comments below on the two recordBlockedAttempt calls) — and cannot
+    // be applied as-is, because it requires X-Store-Domain, which native
+    // WooCommerce webhook delivery does not send. WooCommerce's own
+    // delivery mechanism sends X-WC-Webhook-Source (the site's home URL)
+    // instead; X-Store-Domain is kept as a fallback in case a future
+    // plugin/proxy configuration ever adds it on this path. This call is
+    // fail-open by design: on a missing header or no Store match,
+    // req.storeId stays null, identical to pre-fix behavior — it never
+    // rejects the request. See resolveStoreIdBestEffort() in domainAuth.js
+    // for why this is a separate function from domainAuthMiddleware rather
+    // than a relaxed mode of it.
+    const webhookSourceDomain = req.headers['x-wc-webhook-source'] || req.headers['x-store-domain'];
+    req.storeId = await resolveStoreIdBestEffort(merchantId, webhookSourceDomain);
+    const storeScope = getStoreScope(req.tenant, req.storeId);
+
     // ── WooCommerce Signature Verification (mirrors /evaluate's ordering:
     // auth → signature → quota → business logic) ───────────────────────────
     // Moved ahead of the quota gate (Issue #3 fix). Previously this ran
@@ -1347,12 +1791,19 @@ router.post('/woocommerce-webhook', async (req, res) => {
     // of "invalid signature" — masking the real root cause in logs and
     // alerts. No security change: requireAuth() already gated both checks
     // before and after this reorder.
-    const wcSecret = process.env.WOOCOMMERCE_WEBHOOK_SECRET;
+    // Per-tenant secret — WooCommerce signs each merchant's webhook
+    // deliveries with THAT merchant's own webhookSecret (generated at
+    // /tenants/register and stored on Tenant.webhookSecret), not a
+    // deployment-wide value. req.tenant is already resolved and scoped to
+    // this request by webhookAuth above (see Edit 1 for the select fix
+    // that makes webhookSecret actually present here).
+    const wcSecret = req.tenant.webhookSecret;
     const signature = req.headers['x-wc-webhook-signature'];
     if (wcSecret && signature) {
-      const { verifyWebhookSignature } = require('../lib/woocommerce');
       const expected = crypto.createHmac('sha256', wcSecret).update(rawBody).digest('base64');
-      
+      const expectedBuf = Buffer.from(expected);
+      const signatureBuf = Buffer.from(signature);
+
       // ��� ������� �������� (���� ������� �� �������� �������)
       logger.warn({
         module: 'risk',
@@ -1362,28 +1813,38 @@ router.post('/woocommerce-webhook', async (req, res) => {
         secretConfigured: !!wcSecret,
         signaturePresent: !!signature,
       }, 'Signature debug info');
-      
-      const isValid = crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(signature));
+
+      // crypto.timingSafeEqual throws on unequal-length buffers rather than
+      // returning false — with a real per-tenant secret now in play, a
+      // forged/garbled signature header is a live possibility, so guard the
+      // length explicitly rather than let it fall into the outer catch as
+      // a generic 500.
+      const isValid = expectedBuf.length === signatureBuf.length &&
+        crypto.timingSafeEqual(expectedBuf, signatureBuf);
       if (!isValid) {
-        logger.warn({ module: 'risk', reason: 'mismatch' }, 'Signature mismatch — rejecting forged webhook request');
+        logger.warn({ module: 'risk', tenantId: merchantId, reason: 'mismatch' }, 'Signature mismatch — rejecting forged webhook request');
         return res.status(401).json({ error: 'Invalid signature' });
       }
     } else if (wcSecret && !signature) {
-      // Secret configured but signature missing � reject
+      // Secret configured but signature missing — reject
       return res.status(401).json({ error: 'Missing signature' });
+    } else if (!wcSecret) {
+      // Legacy tenant that predates webhookSecret provisioning — skip this
+      // defense-in-depth layer gracefully rather than rejecting all
+      // traffic. webhookAuth (X-Api-Key) has already authenticated this
+      // request to a real, active, verified tenant; this only means that
+      // one tenant is missing the extra WooCommerce-signature check, not
+      // that the request is unauthenticated.
+      logger.warn({ module: 'risk', tenantId: merchantId }, 'WooCommerce webhook signature check skipped — tenant has no webhookSecret configured');
     }
-    // If no secret configured, skip signature verification (not recommended for production)
 
-    // ── Quota Gate (mirrors /evaluate's fail-open behavior exactly) ────────
+    // ── Quota Status (mirrors /evaluate's non-blocking behavior) ───────────
     // Both order-evaluation paths must agree on what "quota exhausted"
-    // means. Without this, a Starter/Pro tenant who has hit their monthly
-    // limit still gets orders scored (and potentially blocked) via this
-    // webhook, even though checkout-time /evaluate is already failing
-    // open for the same tenant. Returns the identical unscored-approve
-    // shape /evaluate returns, before calculateRiskScore() or any
-    // BlockedAttempt/monthlyBlockedCount write.
-    if (await checkQuotaGate(req, res, 'woocommerce-webhook')) return;
-    // ── End Quota Gate ──────────────────────────────────────────────────────
+    // means: it now only gates expensive external intel calls inside
+    // calculateRiskScore(), never the detection pipeline itself.
+    const quotaStatus = await checkQuotaGate(req, 'woocommerce-webhook');
+    const limitedScoring = quotaStatus.exceeded;
+    // ── End Quota Status ──────────────────────────────────────────────────
 
    // 5. Extract order data
    const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
@@ -1393,6 +1854,28 @@ router.post('/woocommerce-webhook', async (req, res) => {
    } catch (err) {
      logger.error({ module: 'risk', err: err.message }, 'Failed to extract order data');
      return res.status(400).json({ error: 'Invalid payload structure' });
+   }
+
+   // Same defense-in-depth gate as /evaluate — see the comment there.
+   // extractOrderData() has no way to know whether the plugin's
+   // get_client_ip() resolved correctly; this backend re-validates
+   // independently before extracted.ipAddress touches any IP-anchored
+   // control below (whitelist/blacklist, velocity counts, identity graph).
+   let webhookIpAnomaly = null;
+   {
+     const check = isPlausibleClientIp(extracted.ipAddress);
+     if (!check.ok) {
+       webhookIpAnomaly = check.reason;
+       if (extracted.ipAddress) {
+         logger.warn(
+           { module: 'risk', endpoint: 'woocommerce-webhook', orderId: extracted.orderId, ipAnomaly: webhookIpAnomaly },
+           'ipAddress failed plausibility check — excluding from IP-based detection for this request'
+         );
+       }
+       extracted.ipAddress = null;
+     } else {
+       extracted.ipAddress = extracted.ipAddress.trim();
+     }
    }
 
    // 6. Idempotency: check if order already processed
@@ -1431,6 +1914,29 @@ router.post('/woocommerce-webhook', async (req, res) => {
         if (fpMeta) deviceFingerprint = fpMeta.value;
     }
     riskRequest.deviceFingerprint = deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+
+    // Same treatment for the server-signed device token — mirrors the
+    // fingerprint extraction immediately above. Sourced from order meta
+    // (_chargeguard_device_token, persisted at checkout — see
+    // class-dynamic-firewall.php) via the same meta_data field the
+    // webhook payload already carries.
+    let deviceToken = parsedBody.device_token || null;
+    if (!deviceToken && parsedBody.meta_data) {
+        const dtMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_token');
+        if (dtMeta) deviceToken = dtMeta.value;
+    }
+
+    const webhookDeviceSignal = { trust: 'unsigned', ipMatches: null, rotationCount: 0 };
+    if (deviceToken) {
+      const webhookTokenVerification = verifyDeviceToken(deviceToken, extracted.ipAddress);
+      if (webhookTokenVerification.valid) {
+        webhookDeviceSignal.trust = webhookTokenVerification.ipMatches ? 'signed' : 'signed_ip_mismatch';
+        webhookDeviceSignal.ipMatches = webhookTokenVerification.ipMatches;
+      } else {
+        webhookDeviceSignal.trust = 'invalid_token';
+      }
+    }
+    const webhookMerchantConfig = { deviceSignal: webhookDeviceSignal };
 
     // 7a. Whitelist Check
     const webhookWhitelistConditions = [];
@@ -1483,7 +1989,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       // this path had no tenant association and were invisible to the
       // dashboard and to notifyBINSequenceAlert's tenant lookup.
       if (binSeq.blocked || binSeq.riskAddition > 0) {
-        persistBinSequenceAlert(merchantId, extracted.bin, binSeq)
+        persistBinSequenceAlert(merchantId, extracted.bin, binSeq, req.storeId ?? null)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
       }
 
@@ -1500,15 +2006,15 @@ router.post('/woocommerce-webhook', async (req, res) => {
           if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookBinSeqAmount = amt;
         }
 
-        // storeId is always null here — this route does not run
-        // domainAuthMiddleware, so req.storeId is never populated for
-        // webhook-originated blocks (known limitation; see class-api-client.php
-        // notes). cardType is also always null — extractOrderData() does not
+        // storeId is now best-effort resolved above from X-WC-Webhook-Source
+        // (see resolveStoreIdBestEffort call near the top of this handler) —
+        // still null if the header was missing or unmatched, exactly as
+        // before. cardType remains always null — extractOrderData() does not
         // capture a card-type field from the WooCommerce payload.
         try {
           await db.$transaction(recordBlockedAttempt(db, {
             merchantId:      merchantId,
-            storeId:         null,
+            storeId:         req.storeId ?? null,
             cardBin:         webhookBinSeqCardBin,
             cardType:        null,
             reason:          'card_testing',
@@ -1525,9 +2031,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
 
         return res.status(403).json({
           error: 'Request blocked due to suspicious card testing pattern',
-          reason: binSeq.reason,
+          reason: 'bin_sequence_blocked',
           decision: 'block',
-          flags: [{ severity: 'critical', text: binSeq.reason }]
+          flags: [{ severity: 'critical', text: 'bin_sequence_blocked' }]
         });
       }
     }
@@ -1535,7 +2041,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     // 8. Load recent orders, disputes, blacklist for this merchant
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentOrders = await db.order.findMany({
-      where: { merchantId, createdAt: { gte: last7days } },
+      where: { merchantId, ...storeScope, createdAt: { gte: last7days } },
       orderBy: { createdAt: 'desc' },
       take: 200
     });
@@ -1622,13 +2128,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
       blacklist,
       merchantId,
       true,  // saveEvaluation
-      { deviceVelocityCount, ipVelocityCount, emailVelocityCount }
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount },
+      null,            // cardHashRecord — not available on this path
+      webhookMerchantConfig, // threads deviceSignal into deviceTrustFactor — see above
+      limitedScoring
     );
 
     // 11. Build signals snapshot
     const signalsSnapshot = {
       email: extracted.email,
       ipAddress: extracted.ipAddress,
+      ipAnomaly: webhookIpAnomaly,
       bin: extracted.bin,
       deviceFingerprint: riskRequest.deviceFingerprint,
       amount: extracted.amount,
@@ -1656,6 +2166,10 @@ router.post('/woocommerce-webhook', async (req, res) => {
       create: {
         orderId: extracted.orderId,
         merchantId,
+        // Same unconditional-attribution fix as /evaluate (Change 2a).
+        // req.storeId here comes from resolveStoreIdBestEffort() via
+        // X-WC-Webhook-Source, set earlier in this handler.
+        storeId: req.storeId ?? null,
         amount: extracted.amount,
         currency: 'USD',
         email: extracted.email,
@@ -1745,7 +2259,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       try {
         await db.$transaction(recordBlockedAttempt(db, {
           merchantId:      merchantId,
-          storeId:         null, // domainAuthMiddleware does not run on this route
+          storeId:         req.storeId ?? null, // best-effort, resolved above from X-WC-Webhook-Source
           cardBin:         webhookFinalCardBin,
           cardType:        null, // not captured by extractOrderData()
           reason:          'pattern',
@@ -1768,11 +2282,16 @@ router.post('/woocommerce-webhook', async (req, res) => {
       decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
       flags: riskResult.flags,
       connectedRisk: riskResult.graphRisk || 0,
+      scored: true,
+      limitedScoring,
     });
 
   } catch (error) {
+    // Status code (500) is unchanged — this is what the plugin's circuit
+    // breaker (class-api-client.php) keys on. Only the response body is
+    // sanitized.
     logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', error: error.message, stack: error.stack }, 'Webhook error');
-    res.status(500).json({ error: error.message, stack: error.stack });
+    res.status(500).json(safeErrorPayload(error));
   }
 });
 // ========== Check Device Endpoint ==========
@@ -1828,9 +2347,10 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
 
     res.json({ blocked, reason });
   } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'check-device', error: error.message }, 'Check-device error');
-    // �� ���� ����á ���� blocked: false ���� ���������� �������
-    res.status(500).json({ blocked: false, error: error.message });
+    logger.error({ module: 'risk', endpoint: 'check-device', error: error.message, stack: error.stack }, 'Check-device error');
+    // blocked: false preserved — the plugin reads this field on every
+    // response shape from this endpoint, including error paths.
+    res.status(500).json({ blocked: false, ...safeErrorPayload(error) });
   }
 });
 
@@ -1850,7 +2370,8 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
       expMonth,
       expYear,
       brand,
-      idempotencyKey 
+      idempotencyKey,
+      deviceToken
     } = req.body;
 
     if (!orderId) {
@@ -1861,6 +2382,21 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     }
 
     const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
+
+    // Tier-1 fraud-isolation scope (opt-in) — same call as /evaluate and
+    // /woocommerce-webhook (CWE-1059 drift fix: this was previously
+    // omitted here, causing a ReferenceError on every /enrich call).
+    const storeScope = getStoreScope(req.tenant, req.storeId);
+
+    // ── Quota Status (mirrors /evaluate and /woocommerce-webhook) ──────────
+    // Previously missing entirely on this path — a tenant that exhausted
+    // its monthly block quota still received full external IP/email/BIN
+    // intelligence on every post-payment enrichment call, indefinitely.
+    // Quota only gates the expensive external lookups inside
+    // calculateRiskScore(); it never blocks or short-circuits this request.
+    const quotaStatus = await checkQuotaGate(req, 'enrich');
+    const limitedScoring = quotaStatus.exceeded;
+    // ── End Quota Status ──────────────────────────────────────────────────
 
     // ??? CardHash generation (if last4+expiry+brand provided) ???rovided) ???
     let cardHashRecord = null;
@@ -1916,6 +2452,10 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
+          // merchantId is already resolved from the authenticated tenant
+          // above (never trusted from the body) — this closes the
+          // cross-tenant scoping gap described in the schema migration.
+          merchantId,
           orderId,
           paymentIntentId: paymentIntentId || null,
           enrichData: JSON.stringify(req.body),
@@ -1928,253 +2468,12 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
         orderId 
       });
     }
-
-    // 3. ������ �� ����� ������
-    if (existingOrder.merchantId !== merchantId) {
-      return res.status(403).json({ error: 'Merchant ID mismatch. Order belongs to another merchant.' });
-    }
-
-
-
-    // 5. ����� ����� ������� enrichment
-    let snapshot = {};
-    try {
-      snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}');
-    } catch {}
-
-    // ���� �� ���� ������ ������� �� snapshot
-    snapshot.bin = bin;
-    if (cardBrand) snapshot.cardBrand = cardBrand;
-    if (cardCountry) snapshot.cardIssuerCountry = cardCountry;
-    if (funding) snapshot.cardFunding = funding;
-    if (issuer) snapshot.cardIssuer = issuer;
-    snapshot.enrichedAt = new Date().toISOString();
-    // L3 perf fix: single source of truth for enrichment source, written
-    // both into the JSON snapshot (existing consumers) and the indexed
-    // top-level column below (db.order.update) — never derive one from
-    // the other separately, or they can drift.
-    const enrichmentSourceValue = req.body.source || 'stripe';
-    snapshot.enrichmentSource = enrichmentSourceValue;
-
-    // 6. ����� ����� ������ ������
-    const enrichedOrder = {
-      id: existingOrder.id,
-      orderId: existingOrder.orderId,
-      email: existingOrder.email,
-      ipAddress: existingOrder.ipAddress,
-      deviceFingerprint: existingOrder.deviceFingerprint,
-      amount: existingOrder.amount,
-      billingAddress: (() => {
-        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.billingCountry ? JSON.stringify({ country: s.billingCountry }) : null; } catch { return null; }
-      })(),
-      shippingAddress: (() => {
-        try { const s = JSON.parse(existingOrder.signalsSnapshot || '{}'); return s.shippingCountry ? JSON.stringify({ country: s.shippingCountry }) : null; } catch { return null; }
-      })(),
-      customerLoginId: existingOrder.customerLoginId,
-      createdAt: existingOrder.createdAt.toISOString(),
-      payment_details: { card_bin: bin },
-      fingerprintVersion: existingOrder.fingerprintVersion || 'v3',
-      fingerprintConfig: null,
-      fingerprintHardware: null,
-      eciCode: null,
-      avsResponse: null,
-      cvv2Response: null,
-      isNewCustomer: false,
-    };
-
-    // ����� �������� ��������
-    const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-    const recentOrders = await db.order.findMany({
-      where: { merchantId, createdAt: { gte: last7days } },
-      orderBy: { createdAt: 'desc' },
-      take: 200
-    });
-    const formattedOrders = recentOrders.map(o => ({
-      id: o.orderId,
-      email: o.email,
-      ipAddress: o.ipAddress,
-      deviceFingerprint: o.deviceFingerprint,
-      amount: o.amount,
-      createdAt: o.createdAt,
-      riskLevel: o.riskLevel,
-    }));
-    const disputes = await db.disputeOutcome.findMany({
-      where: { merchantId, resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) } },
-      include: { order: true },
-      take: 200
-    });
-    const blacklist = [];
-
-    // 7. ����� ���� �������
-    const { calculateRiskScore } = require('../lib/riskScoring');
-    const riskResult = await calculateRiskScore(
-      enrichedOrder,
-      formattedOrders,
-      disputes,
-      blacklist,
-      merchantId,
-      false, // �� ���� ������� �������� ��� �� �����
-      null,
-      cardHashRecord   // ? ����� ����� cardHashRecord
-    );
-
-    // 8. ��� ������� �������
-    const updatedSnapshot = {
-      ...snapshot,
-      ipIntel: riskResult.ipIntel || null,
-      emailIntel: riskResult.emailIntel || null,
-      binIntel: riskResult.binIntel || null,
-      flags: riskResult.flags,
-      positives: riskResult.positives,
-    };
-
-     await db.order.update({
-      where: { id: existingOrder.id },
-      data: {
-        riskScore: riskResult.score,
-        riskLevel: riskResult.riskLevel,
-        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        cardHash: cardHashRecord?.cardHash ?? null,   // <-- ????? ??????
-        enrichmentSource: enrichmentSourceValue,       // L3 perf fix — indexed column mirrors JSON value
-        signalsSnapshot: JSON.stringify(updatedSnapshot),
-      }
-    });
-
-    // 9. ��� RiskEvaluation ����� (upsert ����� ����� orderId)
-    await db.riskEvaluation.upsert({
-      where: { orderId: existingOrder.id },
-      create: {
-        orderId: existingOrder.id,
-        staticScore: riskResult.score,
-        learningScore: riskResult.score,
-        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
-        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
-        positiveSignals: JSON.stringify(riskResult.positives || []),
-        scoringVersion: riskResult.scoringVersion || 'v1.0',
-        fraudProb: riskResult.economicData?.fraudProb ?? null,
-        expectedLoss: riskResult.economicData?.expectedLoss ?? null,
-        thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
-        decisionBefore: riskResult.economicData?.decisionBefore ?? null,
-        decisionAfter: riskResult.economicData?.decisionAfter ?? null,
-      },
-      update: {
-        staticScore: riskResult.score,
-        learningScore: riskResult.score,
-        finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
-        topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
-        positiveSignals: JSON.stringify(riskResult.positives || []),
-        fraudProb: riskResult.economicData?.fraudProb ?? null,
-        expectedLoss: riskResult.economicData?.expectedLoss ?? null,
-        thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
-        decisionBefore: riskResult.economicData?.decisionBefore ?? null,
-        decisionAfter: riskResult.economicData?.decisionAfter ?? null,
-      },
-    });
-
-    // 10. ������ �� pending enrichments (��� ���� ���� �����) - ����� ����� ����
-    await db.pendingEnrichment.deleteMany({
-      where: { orderId, status: 'pending' }
-    });
-
-    // ── 11. PayPal Alert (fire-and-forget) ───────────────────────────
-    const enrichSource   = req.body.source || null;
-    const enrichDecision = riskResult.decision.includes('Approve') ? 'approve'
-                         : riskResult.decision.includes('Review')  ? 'review'
-                         : 'block';
-
-    // ── Quota Counter: post-enrichment block upgrade ────────────────────
-    // existingOrder.decision (selected above, before this route's own
-    // db.order.update() overwrote it) is the pre-enrichment decision.
-    // Comparing it against enrichDecision distinguishes a genuine
-    // review/approve → block upgrade from an order that was already
-    // block and stays block — the latter must NOT re-trigger this, or
-    // repeated /enrich calls on the same order would double-count.
-    if (enrichDecision === 'block' && existingOrder.decision !== 'block') {
-      let enrichCardBin = null;
-      if (bin != null) {
-        const b = String(bin).replace(/\D/g, '').slice(0, 6);
-        if (b.length === 6) enrichCardBin = b;
-      }
-      // cardType is not part of /enrich's documented request shape today
-      // (the plugin sends cardBrand, not cardType) — normalized the same
-      // way as /evaluate for forward-compatibility, but will resolve to
-      // null under the current payload.
-      let enrichCardType = null;
-      if (req.body.cardType != null) {
-        const ct = String(req.body.cardType).toLowerCase().trim();
-        enrichCardType = VALID_CARD_TYPES.has(ct) ? ct : 'unknown';
-      }
-      const enrichIpHash = existingOrder.ipAddress ? hashIp(existingOrder.ipAddress) : null;
-      let enrichAmount = null;
-      if (existingOrder.amount != null) {
-        const amt = parseFloat(existingOrder.amount);
-        if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) enrichAmount = amt;
-      }
-      let enrichRiskScore = null;
-      if (riskResult.score != null) {
-        const rs = parseInt(riskResult.score, 10);
-        if (!isNaN(rs) && rs >= 0 && rs <= 100) enrichRiskScore = rs;
-      }
-
-      try {
-        await db.$transaction(recordBlockedAttempt(db, {
-          merchantId:      merchantId,
-          storeId:         req.storeId ?? null,
-          cardBin:         enrichCardBin,
-          cardType:        enrichCardType,
-          reason:          'pattern',
-          ipHash:          enrichIpHash,
-          amountAttempted: enrichAmount,
-          riskScore:       enrichRiskScore,
-        }));
-      } catch (counterErr) {
-        logger.error(
-          { module: 'risk', endpoint: 'enrich', tenantId: merchantId, error: counterErr.message },
-          'Failed to record BlockedAttempt / increment quota counter from /enrich'
-        );
-      }
-    }
-
-    if (enrichSource === 'paypal' && riskResult.score >= 70 && isProOrAbove(req.tenant.plan)) {
-      const { notifyPaypalAlert } = require('../lib/notify');
-
-       db.tenant.findUnique({
-        where:  { id: req.tenant.id },
-        select: { id: true, email: true, storeUrl: true, webhookUrl: true, webhookType: true, plan: true },
-      }).then(tenantFull => {
-        if (!tenantFull) return;
-
-        const estimatedSavings = req.body.amount
-          ? Math.round(Number(req.body.amount) * 0.15 * 100) / 100
-          : null;
-
-        return notifyPaypalAlert(tenantFull, {
-          paypalTxnId:     req.body.paypalTxnId   || null,
-          brand:           req.body.brand         || req.body.cardBrand || null,
-          last4:           req.body.last4          || null,
-          cardCountry:     req.body.cardCountry    || null,
-          amount:          req.body.amount         || null,
-          currency:        req.body.currency       || 'USD',
-          riskScore:       riskResult.score,
-          decision:        enrichDecision,
-          flags:           riskResult.flags        || [],
-          estimatedSavings,
-        });
-      }).catch(err =>
-        logger.error({ module: 'risk', endpoint: 'enrich', err: err.message }, 'PayPal alert failed')
-      );
-    }
-
-    // ��������� ��������
-    res.json({
-      success: true,
-      orderId,
-      enriched: true,
-      newRiskScore: riskResult.score,
-      newDecision: enrichDecision,
-      flags: riskResult.flags,
-    });
-
+// 3. ������ �� ����� ������ + core enrichment logic — delegated to the
+    // shared processor so the replay job (see jobs/replayPendingEnrichments.js)
+    // can never drift out of sync with this route's behavior.
+    const { processEnrichment } = require('../lib/enrichmentProcessor');
+    const result = await processEnrichment({ merchantId, orderId, body: req.body, storeId: req.storeId ?? null, tenant: req.tenant, limitedScoring });
+    return res.status(result.status).json(result.body);
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'enrich', error: error.message, stack: error.stack }, 'Enrich error');
     res.status(500).json({ error: 'Internal server error' });
@@ -2664,8 +2963,7 @@ const blockedAttemptRateLimit = (req, res, next) => {
   next();
 };
 
-const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern']);
-const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
+const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern', 'email', 'device_rotation_global']);const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
 
 // L3 fix: blockedAttemptRateLimit now runs after apiKeyAuth rather than
 // before it. Only a request that has already presented a real, valid
@@ -2674,7 +2972,7 @@ const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unk
 // touches the map at all. This also means the rate-limit key (req.tenant.id,
 // set inside the middleware above) is now trustworthy tenant identity
 // rather than a client-supplied header value.
-router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
+router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
   try {
     const { cardBin, cardType, reason, ipHash, amountAttempted } = req.body;
 
