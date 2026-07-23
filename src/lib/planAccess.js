@@ -40,9 +40,40 @@ function isAgency(plan) {
   return plan === 'agency';
 }
 
+/**
+ * Returns a Prisma `where`-clause fragment for Tier-1 fraud-detection
+ * queries (Order velocity/history, CardTestAttempt velocity, Blacklist,
+ * Whitelist). Spread into the existing `where: { merchantId, ... }` object
+ * at each call site.
+ *
+ * Returns {} (a no-op spread) unless the tenant has explicitly opted into
+ * fraudIsolationMode === 'per_store' AND a storeId was actually resolved
+ * for this request (req.storeId, set by domainAuthMiddleware). This means:
+ *   - Starter/Pro tenants (no Store rows, req.storeId always undefined): {}
+ *   - Agency tenants who haven't opted in (default 'pooled'): {}
+ *   - Agency tenants in 'per_store' mode, request missing storeId
+ *     (e.g. legacy allowedDomains fallback path): {} — fails open to
+ *     pooled behavior rather than silently under-matching.
+ *   - Agency tenants in 'per_store' mode with a resolved storeId: { storeId }
+ *
+ * Deliberately NEVER used for BIN sequence detection or the Identity
+ * Graph — those remain unconditionally tenant-wide (Tier 2).
+ *
+ * @param {{fraudIsolationMode?: string}} tenant
+ * @param {string|null|undefined} storeId - req.storeId
+ * @returns {{storeId?: string}}
+ */
+function getStoreScope(tenant, storeId) {
+  if (tenant?.fraudIsolationMode === 'per_store' && storeId) {
+    return { storeId };
+  }
+  return {};
+}
+
 module.exports = {
   PRO_PLUS_PLANS,
   FREE_PLANS,
   isProOrAbove,
   isAgency,
+  getStoreScope,
 };

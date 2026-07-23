@@ -429,6 +429,7 @@ class ChargeGuard_Admin_Settings {
         // WordPress core's wp-admin/options.php.
         add_filter('option_page_capability_chargeguard_firewall_settings', fn() => 'manage_woocommerce');
         add_filter('option_page_capability_chargeguard_autoblock_settings', fn() => 'manage_woocommerce');
+        add_filter('option_page_capability_chargeguard_apidown_settings', fn() => 'manage_woocommerce');
     }
 
     public function add_admin_menu() {
@@ -529,7 +530,23 @@ class ChargeGuard_Admin_Settings {
     public function register_settings() {
         register_setting('chargeguard_firewall_settings', 'chargeguard_enable_firewall', 'intval');
         register_setting('chargeguard_firewall_settings', 'chargeguard_firewall_block_duration', 'intval');
+        // Legacy toggle — kept ONLY as the migration source read once by
+        // get_client_ip()'s backward-compat shim. No longer written by
+        // this settings page once chargeguard_proxy_trust_mode exists.
         register_setting('chargeguard_firewall_settings', 'chargeguard_trust_proxy_headers', 'intval');
+
+        register_setting('chargeguard_firewall_settings', 'chargeguard_proxy_trust_mode', [
+            'type'              => 'string',
+            'sanitize_callback' => function ($value) {
+                return in_array($value, ['off', 'cloudflare', 'custom', 'both'], true) ? $value : 'off';
+            },
+            'default' => 'off',
+        ]);
+        register_setting('chargeguard_firewall_settings', 'chargeguard_trusted_proxy_cidrs', [
+            'type'              => 'string',
+            'sanitize_callback' => 'sanitize_textarea_field',
+            'default'           => '',
+        ]);
         
         // Auto-block on fraud decision
         register_setting( 'chargeguard_autoblock_settings', 'chargeguard_auto_block', [
@@ -541,6 +558,49 @@ class ChargeGuard_Admin_Settings {
             'type'              => 'number',
             'sanitize_callback' => 'floatval',
             'default'           => 0,
+        ] );
+
+        // Auto-refund — separate, opt-in, and deliberately more dangerous
+        // than auto-block: it moves real money. Only ever takes effect
+        // when chargeguard_auto_block is ALSO 'yes' — see
+        // chargeguard_maybe_block_order() in trait-chargeguard-auto-block.php,
+        // which gates the entire method (including the refund branch) on
+        // that flag first.
+        register_setting( 'chargeguard_autoblock_settings', 'chargeguard_auto_refund', [
+            'type'              => 'string',
+            'sanitize_callback' => function( $value ) { return $value === 'yes' ? 'yes' : 'no'; },
+            'default'           => 'no',
+        ] );
+
+        // ── API-Unavailable Fallback Behavior ───────────────────────────
+        // Governs what ChargeGuard_Dynamic_Firewall::resolve_api_unavailable_decision()
+        // does at checkout when the backend cannot be reached (circuit
+        // breaker open, or a single failed/5xx request). Default is the
+        // safer 'local_checks' mode, not the legacy unconditional approve.
+        register_setting( 'chargeguard_apidown_settings', 'chargeguard_api_down_behavior', [
+            'type'              => 'string',
+            'sanitize_callback' => function( $value ) {
+                $allowed = [ 'block_all', 'local_checks', 'allow_all' ];
+                return in_array( $value, $allowed, true ) ? $value : 'local_checks';
+            },
+            'default'           => 'local_checks',
+        ] );
+        // Separate, explicit opt-in required before 'allow_all' takes
+        // effect — see resolve_api_unavailable_decision(). A merchant
+        // cannot end up in fail-open-everything mode by a single dropdown
+        // click alone.
+        register_setting( 'chargeguard_apidown_settings', 'chargeguard_api_down_allow_all_ack', [
+            'type'              => 'string',
+            'sanitize_callback' => function( $value ) { return $value === '1' ? '1' : '0'; },
+            'default'           => '0',
+        ] );
+        register_setting( 'chargeguard_apidown_settings', 'chargeguard_api_down_rate_limit', [
+            'type'              => 'number',
+            'sanitize_callback' => function( $value ) {
+                $v = intval( $value );
+                return ( $v >= 1 && $v <= 50 ) ? $v : 3;
+            },
+            'default'           => 3,
         ] );
     }
     public function ajax_verify_key() {
@@ -1849,21 +1909,101 @@ class ChargeGuard_Admin_Settings {
                     <span class="cg-info-label">Block Duration (hours)</span>
                     <input type="number" name="chargeguard_firewall_block_duration" value="<?php echo esc_attr($block_duration); ?>" style="width:70px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;" />
                 </div>
-                <div class="cg-info-row">
-                    <span class="cg-info-label"><?php esc_html_e( 'Site is behind a trusted proxy/CDN (Cloudflare, load balancer, etc.)', 'chargeguard-woocommerce' ); ?></span>
-                    <input type="checkbox" name="chargeguard_trust_proxy_headers" value="1" <?php checked(1, $trust_proxy_headers); ?> />
+                <?php
+                $proxy_mode = get_option( 'chargeguard_proxy_trust_mode', $trust_proxy_headers ? 'both' : 'off' );
+                $custom_cidrs = get_option( 'chargeguard_trusted_proxy_cidrs', '' );
+                $detected = ChargeGuard_Trusted_Proxy::looks_like_behind_proxy();
+                ?>
+                <?php if ( $detected && $proxy_mode === 'off' ) : ?>
+                <div class="notice notice-warning inline" style="margin:0 0 14px;">
+                    <p style="font-size:13px;">
+                        <?php echo $detected === 'cloudflare'
+                            ? esc_html__( 'ChargeGuard detected Cloudflare headers on incoming requests, but proxy trust is currently OFF. Every visitor is likely resolving to the same edge IP, disabling IP-based fraud detection. Select "Cloudflare" below to fix this.', 'chargeguard-woocommerce' )
+                            : esc_html__( 'ChargeGuard detected forwarded-for headers on incoming requests, but proxy trust is currently OFF. If this site is behind a reverse proxy or load balancer, IP-based fraud detection may be degraded. Configure the correct mode below.', 'chargeguard-woocommerce' ); ?>
+                    </p>
+                </div>
+                <?php endif; ?>
+
+                <div class="cg-info-row" style="align-items:flex-start;">
+                    <span class="cg-info-label"><?php esc_html_e( 'IP resolution mode', 'chargeguard-woocommerce' ); ?></span>
+                    <select name="chargeguard_proxy_trust_mode" style="min-width:260px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;">
+                        <option value="off" <?php selected('off', $proxy_mode); ?>><?php esc_html_e('Direct connection only (default)', 'chargeguard-woocommerce'); ?></option>
+                        <option value="cloudflare" <?php selected('cloudflare', $proxy_mode); ?>><?php esc_html_e('Behind Cloudflare', 'chargeguard-woocommerce'); ?></option>
+                        <option value="custom" <?php selected('custom', $proxy_mode); ?>><?php esc_html_e('Behind another reverse proxy / load balancer', 'chargeguard-woocommerce'); ?></option>
+                        <option value="both" <?php selected('both', $proxy_mode); ?>><?php esc_html_e('Behind Cloudflare AND another proxy', 'chargeguard-woocommerce'); ?></option>
+                    </select>
+                </div>
+
+                <div class="cg-info-row" style="align-items:flex-start;<?php echo in_array($proxy_mode, ['custom','both'], true) ? '' : 'display:none;'; ?>" id="cg-custom-proxy-row">
+                    <span class="cg-info-label"><?php esc_html_e( 'Trusted proxy IP ranges (CIDR, one per line)', 'chargeguard-woocommerce' ); ?></span>
+                    <textarea name="chargeguard_trusted_proxy_cidrs" rows="3" style="flex:1;min-width:240px;font-family:monospace;font-size:12px;" placeholder="10.0.0.0/8&#10;203.0.113.5/32"><?php echo esc_textarea( $custom_cidrs ); ?></textarea>
                 </div>
                 <p style="margin:6px 0 0;font-size:11px;color:#94a3b8;">
-                    <?php esc_html_e( 'Only enable this if the site truly sits behind Cloudflare or a similar reverse proxy/load balancer. Enabling it on a site that is directly reachable lets a visitor spoof their IP address by sending forwarded-for headers themselves.', 'chargeguard-woocommerce' ); ?>
+                    <?php esc_html_e( 'Only requests whose direct connection IP falls inside these ranges will have their forwarded-for header trusted. This is only safe if your proxy always strips any client-supplied forwarded-for header before adding its own.', 'chargeguard-woocommerce' ); ?>
                 </p>
                 <?php submit_button('Save Settings', 'secondary', 'submit', false, ['style' => 'margin-top:14px;']); ?>
             </form>
         </div>
 
+        <!-- API-Unavailable Fallback Behavior -->
+        <?php
+        $api_down_behavior  = get_option('chargeguard_api_down_behavior', 'local_checks');
+        $api_down_ack       = get_option('chargeguard_api_down_allow_all_ack', '0');
+        $api_down_rate_limit = get_option('chargeguard_api_down_rate_limit', 3);
+        ?>
+        <div class="cg-card" id="cg-apidown-settings">
+            <h3 style="margin:0 0 4px;font-size:15px;">🔌 <?php esc_html_e( 'When the ChargeGuard API Is Unreachable', 'chargeguard-woocommerce' ); ?></h3>
+            <p style="margin:0 0 16px;font-size:13px;color:#64748b;">
+                <?php esc_html_e( 'Controls what happens to checkout when the fraud-scoring API cannot be reached (e.g. an outage, or the circuit breaker opening after repeated failures).', 'chargeguard-woocommerce' ); ?>
+            </p>
+            <form method="post" action="options.php">
+                <?php settings_fields('chargeguard_apidown_settings'); ?>
+
+                <div class="cg-info-row" style="align-items:flex-start;">
+                    <span class="cg-info-label"><?php esc_html_e( 'Fallback Mode', 'chargeguard-woocommerce' ); ?></span>
+                    <select name="chargeguard_api_down_behavior" id="cg-apidown-mode" style="min-width:260px;padding:6px 8px;border:1px solid #ddd;border-radius:6px;">
+                        <option value="local_checks" <?php selected('local_checks', $api_down_behavior); ?>>
+                            <?php esc_html_e( 'Local checks (recommended) — block on device blacklist or IP flood, else allow', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                        <option value="block_all" <?php selected('block_all', $api_down_behavior); ?>>
+                            <?php esc_html_e( 'Block all orders (fail-closed) — safest, but stops taking orders during an outage', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                        <option value="allow_all" <?php selected('allow_all', $api_down_behavior); ?>>
+                            <?php esc_html_e( 'Allow all orders unscored (fail-open) — NOT RECOMMENDED', 'chargeguard-woocommerce' ); ?>
+                        </option>
+                    </select>
+                </div>
+
+                <div class="cg-info-row" style="align-items:flex-start;">
+                    <span class="cg-info-label"><?php esc_html_e( 'Local Fallback Rate Limit', 'chargeguard-woocommerce' ); ?></span>
+                    <span>
+                        <input type="number" min="1" max="50" name="chargeguard_api_down_rate_limit" value="<?php echo esc_attr($api_down_rate_limit); ?>" style="width:70px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;" />
+                        <span style="font-size:11px;color:#94a3b8;"><?php esc_html_e( 'unscored orders allowed per IP per 5 minutes while the API is down (Local Checks mode only)', 'chargeguard-woocommerce' ); ?></span>
+                    </span>
+                </div>
+
+                <div id="cg-apidown-ack-wrap" style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 14px;margin:12px 0;<?php echo $api_down_behavior === 'allow_all' ? '' : 'display:none;'; ?>">
+                    <p style="margin:0 0 8px;font-size:12px;color:#991b1b;line-height:1.5;">
+                        ⚠️ <?php esc_html_e( '"Allow all orders unscored" means EVERY order is approved with zero fraud screening for as long as the API is unreachable — including a deliberately-triggered outage. Only enable this if you fully understand and accept that risk.', 'chargeguard-woocommerce' ); ?>
+                    </p>
+                    <label style="font-size:12px;color:#991b1b;display:flex;align-items:center;gap:6px;">
+                        <input type="checkbox" name="chargeguard_api_down_allow_all_ack" value="1" <?php checked('1', $api_down_ack); ?> />
+                        <?php esc_html_e( 'I understand and accept this risk.', 'chargeguard-woocommerce' ); ?>
+                    </label>
+                </div>
+                <p style="margin:6px 0 0;font-size:11px;color:#94a3b8;">
+                    <?php esc_html_e( 'Without the acknowledgment checkbox above, "Allow all orders unscored" is automatically treated as "Local checks" for safety.', 'chargeguard-woocommerce' ); ?>
+                </p>
+
+                <?php submit_button('Save Fallback Settings', 'secondary', 'submit', false, ['style' => 'margin-top:14px;']); ?>
+            </form>
+        </div>
+
         <!-- Auto-Block Settings -->
         <?php
-        $auto_block_enabled = get_option( 'chargeguard_auto_block', 'no' );
-        $block_min_amount   = get_option( 'chargeguard_block_min_amount', 0 );
+        $auto_block_enabled  = get_option( 'chargeguard_auto_block', 'no' );
+        $block_min_amount    = get_option( 'chargeguard_block_min_amount', 0 );
+        $auto_refund_enabled = get_option( 'chargeguard_auto_refund', 'no' );
         ?>
         <div class="cg-card">
             <h3 style="margin:0 0 4px;font-size:15px;">🚫 <?php esc_html_e( 'Auto-Block on Fraud Decision', 'chargeguard-woocommerce' ); ?></h3>
@@ -1872,7 +2012,7 @@ class ChargeGuard_Admin_Settings {
             </p>
             <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:12px 14px;margin-bottom:16px;font-size:12px;color:#9a3412;line-height:1.5;">
                 ⚠️ <strong><?php esc_html_e( 'Important:', 'chargeguard-woocommerce' ); ?></strong>
-                <?php esc_html_e( 'Stripe and PayPal webhooks fire after the payment has already been captured. Enabling this will mark the order as "Failed" in WooCommerce, but it will NOT automatically refund the customer on Stripe or PayPal. You must issue any refund manually.', 'chargeguard-woocommerce' ); ?>
+                <?php esc_html_e( 'Stripe and PayPal webhooks fire after the payment has already been captured. Enabling this will mark the order as "Failed" in WooCommerce, but it will NOT automatically refund the customer — see Auto-Refund below if you also want that.', 'chargeguard-woocommerce' ); ?>
             </div>
             <form method="post" action="options.php">
                 <?php settings_fields( 'chargeguard_autoblock_settings' ); ?>
@@ -1884,10 +2024,29 @@ class ChargeGuard_Admin_Settings {
                     <span class="cg-info-label"><?php esc_html_e( 'Minimum Order Amount', 'chargeguard-woocommerce' ); ?></span>
                     <input type="number" step="0.01" min="0" name="chargeguard_block_min_amount" value="<?php echo esc_attr( $block_min_amount ); ?>" style="width:100px;padding:4px 8px;border:1px solid #ddd;border-radius:6px;" />
                 </div>
-                <p style="margin:6px 0 0;font-size:11px;color:#94a3b8;">
+                <p style="margin:6px 0 16px;font-size:11px;color:#94a3b8;">
                     <?php esc_html_e( 'Orders below this amount will never be auto-blocked, even on a "block" decision. Set to 0 to apply to all amounts.', 'chargeguard-woocommerce' ); ?>
                 </p>
-                <?php submit_button( __( 'Save Auto-Block Settings', 'chargeguard-woocommerce' ), 'secondary', 'submit', false, [ 'style' => 'margin-top:14px;' ] ); ?>
+
+                <hr style="border:none;border-top:1px solid #f0f0f0;margin:16px 0;" />
+
+                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px 14px;margin-bottom:14px;">
+                    <p style="margin:0 0 8px;font-size:13px;font-weight:700;color:#991b1b;">
+                        🛑 <?php esc_html_e( 'Auto-Refund (Dangerous — moves real money)', 'chargeguard-woocommerce' ); ?>
+                    </p>
+                    <p style="margin:0 0 10px;font-size:12px;color:#991b1b;line-height:1.5;">
+                        <?php esc_html_e( 'When enabled, ChargeGuard will automatically refund the FULL payment on Stripe or PayPal immediately after auto-blocking an order. This action cannot be easily undone. Only enable this if you understand and accept the risk of an automated refund being issued on a false positive.', 'chargeguard-woocommerce' ); ?>
+                    </p>
+                    <div class="cg-info-row" style="margin:0;">
+                        <span class="cg-info-label"><?php esc_html_e( 'Enable Auto-Refund', 'chargeguard-woocommerce' ); ?></span>
+                        <input type="checkbox" name="chargeguard_auto_refund" value="yes" <?php checked( 'yes', $auto_refund_enabled ); ?> />
+                    </div>
+                    <p style="margin:8px 0 0;font-size:11px;color:#991b1b;">
+                        <?php esc_html_e( 'Has no effect unless Enable Auto-Block above is also checked.', 'chargeguard-woocommerce' ); ?>
+                    </p>
+                </div>
+
+                <?php submit_button( __( 'Save Auto-Block Settings', 'chargeguard-woocommerce' ), 'secondary', 'submit', false, [ 'style' => 'margin-top:0;' ] ); ?>
             </form>
         </div>
 

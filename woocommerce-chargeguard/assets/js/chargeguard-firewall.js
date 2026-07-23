@@ -181,11 +181,11 @@
                 nonce: chargeguard_fw.nonce
             }, function(response) {
                 if (response.success && response.data.blocked) {
-                    // عرض رسالة واضحة بدلاً من نموذج الدفع
+                    // Show a clear message in place of the checkout form
                     var checkoutForm = $('form.checkout');
                     if (checkoutForm.length) {
                         var message = '<div class="woocommerce-error" style="padding:20px; text-align:center; font-size:1.2em;">' +
-                            'عذراً، لا يمكن معالجة طلبك حالياً. يرجى التواصل مع الدعم.' +
+                            'Sorry, your order cannot be processed. Please contact support.' +
                             '</div>';
                         checkoutForm.replaceWith(message);
                     }

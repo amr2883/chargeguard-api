@@ -4,7 +4,7 @@
 const crypto = require('crypto');
 const db     = require('./db');
 const logger = require('./logger');
-
+const { isAgency } = require('./planAccess');
 // ─── ثوابت بيئات التطوير ───────────────────────────────────────────────────
 
 const DEV_EXACT = new Set([
@@ -91,9 +91,8 @@ function isDevDomain(domain) {
  *
  * @type {import('express').RequestHandler}
  */
-const domainAuthMiddleware = async (req, res, next) => {
+const domainAuthCore = async (req, res, next, { deferForAgencyAutoRegister }) => {
   try {
-
     // ── ١. تجاوز الطلبات الداخلية ─────────────────────────────────────────
     const internalTokenRaw = req.headers['x-internal-token'];
     const internalTokenEnv = process.env.INTERNAL_TOKEN;
@@ -183,7 +182,7 @@ const domainAuthMiddleware = async (req, res, next) => {
     // never drifts out of sync with a billing field. Starter/Pro tenants
     // (zero Store rows) fall through unchanged to the legacy allowedDomains
     // check below (step ٦).
-    const matchedStore = await db.store.findFirst({
+   const matchedStore = await db.store.findFirst({
       where: {
         tenantId:         req.tenant.id,
         normalizedDomain: normalizedDomain,
@@ -202,37 +201,46 @@ const domainAuthMiddleware = async (req, res, next) => {
       return next();
     }
 
+    // Legacy allowedDomains fallback — covers the tenant's own site
+    // (registered via /connect), regardless of whether any Store rows
+    // exist yet. Hoisted above the tenantHasStores branch (and reused by
+    // step ٦ below) so it runs exactly once and so an Agency tenant who
+    // hasn't added their first client Store yet still gets this check
+    // before falling into the auto-register path.
+    const tenantRecordForFallback = await db.tenant.findUnique({
+      where:  { id: req.tenant.id },
+      select: { allowedDomains: true },
+    });
+    const legacyAllowedDomains = tenantRecordForFallback?.allowedDomains ?? [];
+
+    if (legacyAllowedDomains.includes(normalizedDomain)) {
+      req.storeDomain = normalizedDomain;
+      logger.debug(
+        { module: 'domainAuth', domain: normalizedDomain, tenantId: req.tenant.id },
+        'Domain verified against legacy allowedDomains'
+      );
+      return next();
+    }
+
     const tenantHasStores = await db.store.count({
       where: { tenantId: req.tenant.id, isActive: true },
     }) > 0;
 
-    if (tenantHasStores) {
-      // Store-managed tenant: primary path is the Store table. But the
-      // tenant's own site (registered via /connect before they ever added
-      // a client Store) lives in legacy allowedDomains, not the Store
-      // table — so we consult it as a fallback for exactly this one case,
-      // rather than treating "has Store rows" as "must be a Store row."
-      const tenantRecordForFallback = await db.tenant.findUnique({
-        where:  { id: req.tenant.id },
-        select: { allowedDomains: true },
-      });
-
-      const legacyAllowedDomains = tenantRecordForFallback?.allowedDomains ?? [];
-
-      if (legacyAllowedDomains.includes(normalizedDomain)) {
-        // Agency's own site, authenticated via its original /connect
-        // allowedDomains entry — not a specific managed Store, so
-        // req.storeId stays undefined.
-        req.storeDomain = normalizedDomain;
+    if (tenantHasStores || isAgency(req.tenant.plan)) {
+      // Store-managed tenant, OR an Agency tenant bootstrapping their very
+      // first Store — no match above. Domain-binding must still be
+      // enforced (CWE-636); only the timing differs: reject immediately,
+      // or defer until THIS request's signature is verified as
+      // domain-bound (Solution D — see autoRegisterStoreMiddleware).
+      if (deferForAgencyAutoRegister && isAgency(req.tenant.plan)) {
+        req.pendingStoreDomain = normalizedDomain;
         logger.debug(
           { module: 'domainAuth', domain: normalizedDomain, tenantId: req.tenant.id },
-          'Domain verified against legacy allowedDomains (agency own-site fallback)'
+          'Domain unresolved for Agency tenant — deferring to post-HMAC auto-registration'
         );
         return next();
       }
 
-      // Store-managed tenant, and this domain isn't a registered Store NOR
-      // the tenant's own legacy allowedDomains entry — reject.
       logger.warn(
         { module: 'domainAuth', tenantId: req.tenant.id, requestDomain: normalizedDomain },
         'Domain mismatch — request rejected (store-managed tenant)'
@@ -244,12 +252,7 @@ const domainAuthMiddleware = async (req, res, next) => {
     }
 
     // ── ٦. Legacy allowedDomains check (Starter/Pro — unchanged) ──────────
-    const tenantRecord = await db.tenant.findUnique({
-      where:  { id: req.tenant.id },
-      select: { allowedDomains: true },
-    });
-
-    const allowedDomains = tenantRecord?.allowedDomains ?? [];
+    const allowedDomains = legacyAllowedDomains;
 
     // Default-deny (OWASP ASVS V4.1.1; CWE-636 fix): an empty allowedDomains
     // array means this tenant has no authorized origin, not "skip the check."
@@ -313,8 +316,57 @@ const domainAuthMiddleware = async (req, res, next) => {
 
 // ─── Exports ────────────────────────────────────────────────────────────────
 
+// ─── resolveStoreIdBestEffort ───────────────────────────────────────────────
+
+/**
+ * Best-effort store attribution for contexts where domain verification
+ * must NEVER block the request — currently only the native WooCommerce
+ * webhook route (POST /risk/woocommerce-webhook), which is authenticated
+ * and integrity-checked entirely by webhookAuth + the x-wc-webhook-signature
+ * check before this is ever called. This function adds attribution only;
+ * it is not a security boundary and must not become one.
+ *
+ * Contrast with domainAuthMiddleware: that function is fail-closed (403 on
+ * mismatch) because it gates plugin-originated, HMAC-signed calls where
+ * the caller is expected to always supply a valid X-Store-Domain. This
+ * function is fail-open by design — WooCommerce's own webhook delivery
+ * does not send X-Store-Domain at all (it sends X-WC-Webhook-Source
+ * instead), so treating a missing/unmatched domain as an error here would
+ * reject every native webhook delivery, not just unattributed ones.
+ *
+ * @param  {string} tenantId
+ * @param  {string|undefined} rawDomain
+ * @returns {Promise<string|null>} matching active Store.id, or null
+ */
+async function resolveStoreIdBestEffort(tenantId, rawDomain) {
+  const normalizedDomain = normalizeDomain(rawDomain);
+  if (!normalizedDomain || !tenantId) return null;
+
+  try {
+    const matchedStore = await db.store.findFirst({
+      where: { tenantId, normalizedDomain, isActive: true },
+      select: { id: true },
+    });
+    return matchedStore?.id ?? null;
+  } catch (err) {
+    logger.error(
+      { module: 'domainAuth', tenantId, error: err.message },
+      'resolveStoreIdBestEffort failed — continuing without store attribution'
+    );
+    return null;
+  }
+}
+
+const domainAuthMiddleware = (req, res, next) =>
+  domainAuthCore(req, res, next, { deferForAgencyAutoRegister: false });
+
+const domainAuthMiddlewareWithAutoRegister = (req, res, next) =>
+  domainAuthCore(req, res, next, { deferForAgencyAutoRegister: true });
+
 module.exports = {
   domainAuthMiddleware,
+  domainAuthMiddlewareWithAutoRegister,
   normalizeDomain,
   isDevDomain,
+  resolveStoreIdBestEffort,
 };

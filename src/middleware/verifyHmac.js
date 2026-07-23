@@ -63,7 +63,29 @@ if (!signature || !timestamp) {
   // unambiguous way to separate "v2" from the digest that follows it.
   const eqIdx        = signature.indexOf('=');
   const sigVersion   = eqIdx === -1 ? '' : signature.slice(0, eqIdx);
-  const rawBody      = req.body instanceof Buffer ? req.body : Buffer.from(JSON.stringify(req.body));
+
+  // Every current caller of this middleware that sends no body (all GET
+  // routes, and the empty-body DELETE calls) reaches Express as an
+  // empty Buffer via express.raw({ type: 'application/json' }) — see
+  // app.js — because the plugin always sends Content-Type: application/json
+  // even on bodyless requests (class-api-client.php). req.body should
+  // therefore always be a Buffer by the time it reaches this middleware.
+  // This branch is a defensive fallback only, for any future call site
+  // that reaches here without going through express.raw() first (e.g. a
+  // missing Content-Type header) — it fails closed with 401 rather than
+  // crashing on Buffer.from(undefined)/Buffer.from(null).
+  let rawBody;
+  if (req.body instanceof Buffer) {
+    rawBody = req.body;
+  } else if (req.body === undefined || req.body === null) {
+    logger.warn(
+      { tenantId: req.tenant?.id, path: req.path },
+      'HMAC_BODY_NOT_BUFFER — request reached verifyHmacSignature without a parsed raw body (missing Content-Type on a bodyless request?)'
+    );
+    rawBody = Buffer.from('');
+  } else {
+    rawBody = Buffer.from(JSON.stringify(req.body));
+  }
 
   let signedStr;
 
@@ -127,6 +149,13 @@ if (!signature || !timestamp) {
     );
     return res.status(401).json({ error: 'Unauthorized' });
   }
+
+  // Exposes which signed-string format this request verified against, for
+  // any downstream middleware that must treat v2 (domain-bound) and v1
+  // (legacy, NOT domain-bound) differently — currently only
+  // autoRegisterStoreMiddleware, which must never trust
+  // req.pendingStoreDomain unless this is 'v2'.
+  req.hmacSignatureVersion = sigVersion;
 
   // C-V1STORE fix: v1's signed string never included domain, so req.storeId
   // (set upstream by domainAuthMiddleware from the caller-supplied

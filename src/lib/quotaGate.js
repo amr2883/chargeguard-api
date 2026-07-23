@@ -12,27 +12,40 @@ const PLAN_QUOTA_LIMITS = {
 };
 const STARTER_FALLBACK_LIMIT = 500;
 
+// Shared by checkQuotaGate's lazy reset and subscriptionActions.resetQuota's
+// admin-triggered reset — a single definition so the two paths can never
+// compute a different "next cycle start" and drift apart (CWE-1059).
+function computeStartOfNextMonth(now) {
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+}
+
 /**
- * Centralized quota-gate check. Call once, immediately after req.tenant is
- * resolved, before any route-specific business logic.
+ * Centralized quota-status lookup. Call once, immediately after req.tenant
+ * is resolved, before any route-specific business logic.
+ *
+ * IMPORTANT (post-fix behavior): this function NO LONGER writes an HTTP
+ * response and NO LONGER short-circuits the request. Quota only gates
+ * *expensive external intel lookups* inside calculateRiskScore() — cheap,
+ * always-on detectors (blacklist, velocity, BIN sequence, identity graph,
+ * pattern sharing) must keep running even when the merchant's monthly
+ * blocked-attempt quota is exhausted. See risk.js call sites.
  *
  * @param {object} req - req.tenant must include { id, plan, monthlyBlockedCount, quotaResetDate }
- * @param {object} res
  * @param {string} [logContext] - endpoint name for structured logging
- * @returns {Promise<boolean>} true if quota was exceeded and a fail-open 200
- *   response was already sent (caller MUST `return` immediately); false if
- *   the caller should proceed normally.
+ * @returns {Promise<{exceeded: boolean, plan: string, limit: number, monthlyCount: number}>}
  */
-async function checkQuotaGate(req, res, logContext = 'unknown') {
+async function checkQuotaGate(req, logContext = 'unknown') {
   const tenantPlan = req.tenant.plan;
-  if (isAgency(tenantPlan)) return false;
+  if (isAgency(tenantPlan)) {
+    return { exceeded: false, plan: tenantPlan, limit: Infinity, monthlyCount: req.tenant.monthlyBlockedCount ?? 0 };
+  }
 
   const monthlyLimitForPlan = PLAN_QUOTA_LIMITS[tenantPlan] !== undefined
     ? PLAN_QUOTA_LIMITS[tenantPlan]
     : STARTER_FALLBACK_LIMIT;
 
   const now = new Date();
-  const startOfNextMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0, 0));
+  const startOfNextMonth = computeStartOfNextMonth(now);
 
   let monthlyCount = req.tenant.monthlyBlockedCount;
   const needsReset = !req.tenant.quotaResetDate || new Date(req.tenant.quotaResetDate) <= now;
@@ -62,26 +75,20 @@ async function checkQuotaGate(req, res, logContext = 'unknown') {
   }
 
   if (monthlyCount >= monthlyLimitForPlan) {
+    // Quota exceeded is no longer fail-open. It no longer approves the
+    // order or skips detection — it only tells the caller to skip
+    // *expensive external intel calls* inside calculateRiskScore().
+    // Cheap, always-on detectors (blacklist/velocity/BIN-sequence/graph/
+    // pattern-sharing) still run in risk.js regardless of this flag, and
+    // the order can still be blocked on their output.
     logger.warn(
       { module: 'quotaGate', endpoint: logContext, tenantId: req.tenant.id, plan: tenantPlan, monthlyCount, monthlyLimit: monthlyLimitForPlan },
-      'Monthly block-quota exceeded — failing open, order will NOT be scored'
+      'Monthly block-quota exceeded — external intel lookups will be skipped; cheap detectors remain active'
     );
-    const upgradeMessage = tenantPlan === 'pro'
-      ? 'Monthly Pro protection limit (5,000 blocked attempts) reached. Orders are no longer being screened — upgrade to Agency to restore protection.'
-      : 'Monthly protection limit (500 blocked attempts) reached. Orders are no longer being screened — upgrade to Pro to restore protection.';
-
-    res.status(200).json({
-      decision: 'approve',
-      scored: false,
-      score: null,
-      flags: [{ severity: 'critical', text: upgradeMessage }],
-      connectedRisk: 0,
-      blocked_reason: tenantPlan === 'pro' ? 'pro_quota_exceeded' : 'quota_exceeded',
-    });
-    return true;
+    return { exceeded: true, plan: tenantPlan, limit: monthlyLimitForPlan, monthlyCount };
   }
 
-  return false;
+  return { exceeded: false, plan: tenantPlan, limit: monthlyLimitForPlan, monthlyCount };
 }
 
-module.exports = { checkQuotaGate, PLAN_QUOTA_LIMITS, STARTER_FALLBACK_LIMIT };
+module.exports = { checkQuotaGate, computeStartOfNextMonth, PLAN_QUOTA_LIMITS, STARTER_FALLBACK_LIMIT };

@@ -82,17 +82,37 @@ class ChargeGuard_Stripe_Webhook {
             return new \WP_REST_Response(['error' => 'Invalid signature'], 403);
         }
 
-        // معالجة حدث payment_intent.succeeded فقط
-        if ($event->type !== 'payment_intent.succeeded') {
+        // ── فلترة الأحداث — نعالج فقط ما يهمنا ──────────────────
+        // Allow-list mirrors ChargeGuard_PayPal_Webhook::handle_webhook().
+        // charge.dispute.closed is subscribed — deliberately NOT
+        // charge.dispute.created — for the same reason PayPal only
+        // listens to CUSTOMER.DISPUTE.RESOLVED: .created fires the
+        // instant a dispute is OPENED, before any outcome exists. Only
+        // .closed's `status` field tells us whether the merchant lost.
+        $supported_events = [
+            'payment_intent.succeeded',
+            'charge.dispute.closed',
+        ];
+
+        if (!in_array($event->type, $supported_events, true)) {
             return new \WP_REST_Response(['status' => 'ignored'], 200);
         }
 
         // ── Idempotency — منع معالجة نفس الحدث مرتين ────────────
         // Mirrors the PayPal handler's transient-based guard, keyed on
-        // Stripe's own event ID (unique per delivery attempt group).
+        // Stripe's own event ID (unique per delivery, and distinct
+        // across event types, so this key scheme is safe to reuse here).
         $cache_key = 'cg_stripe_processed_' . md5($event->id);
         if (get_transient($cache_key)) {
             return new \WP_REST_Response(['status' => 'already_processed'], 200);
+        }
+
+        // Disputes are handled by a dedicated method with their own
+        // resolution logic — dispatch and return here, before the
+        // payment_intent-only code below (which assumes $event->data->object
+        // is a PaymentIntent, not a Dispute).
+        if ($event->type === 'charge.dispute.closed') {
+            return $this->handle_dispute_closed($event, $cache_key);
         }
 
         // NOTE: the "processed" marker is intentionally NOT set here.
@@ -170,6 +190,22 @@ class ChargeGuard_Stripe_Webhook {
             }
         }
 
+        // Threads the checkout-time device token through to this
+        // post-payment enrichment call so /enrich can apply the same
+        // deviceTrustFactor dampening /evaluate already applies pre-payment.
+        // Absent for orders placed before this fix, on older plugin
+        // versions, or when $order_id isn't resolved yet — deviceToken
+        // stays null and /enrich falls back to deviceTrustFactor 1.0,
+        // identical to today's behavior.
+        $device_token = null;
+        if ($order_id) {
+            $order_for_token = wc_get_order($order_id);
+            if ($order_for_token) {
+                $meta_token = $order_for_token->get_meta('_chargeguard_device_token');
+                $device_token = !empty($meta_token) ? $meta_token : null;
+            }
+        }
+
         if (!$order_id) {
             // تخزين مؤقت للبيانات حتى يصل Webhook الطلب
             set_transient('chargeguard_pending_enrich_' . $payment_intent->id, [
@@ -184,6 +220,7 @@ class ChargeGuard_Stripe_Webhook {
                 'expMonth'    => $expMonth,
                 'expYear'     => $expYear,
                 'brand'       => $brand,
+                'deviceToken' => $device_token,
             ], HOUR_IN_SECONDS);
             // Data is now safely persisted for the deferred consumer to
             // pick up — this delivery has concluded successfully, so mark
@@ -206,6 +243,7 @@ class ChargeGuard_Stripe_Webhook {
             'expMonth'        => $expMonth,
             'expYear'         => $expYear,
             'brand'           => $brand,
+            'deviceToken'     => $device_token,
         ];
 
         $result = $this->api_client->send_enrich($enrich_data);
@@ -223,11 +261,22 @@ class ChargeGuard_Stripe_Webhook {
         // mark it processed now.
         set_transient($cache_key, 1, 48 * HOUR_IN_SECONDS);
 
+        // Activate the local firewall independently of whether auto-block is
+        // enabled: blacklisting a device is a separate capability from
+        // auto-cancelling this specific order, and shouldn't require the
+        // merchant to have opted into auto-block just to get it.
+        $this->chargeguard_fire_device_fraud_hook($result, $order_id, 'stripe_post_payment_block');
+
         // إذا كان القرار block، نقوم بإلغاء الطلب تلقائيًا إذا كان التاجر قد فعّل الميزة
+        // (and, if chargeguard_auto_refund is separately enabled, refund it)
         $this->chargeguard_maybe_block_order(
             $result,
             $order_id,
-            __('Blocked by ChargeGuard: Card Testing detected.', 'chargeguard-woocommerce')
+            __('Blocked by ChargeGuard: Card Testing detected.', 'chargeguard-woocommerce'),
+            [
+                'gateway'           => 'stripe',
+                'payment_intent_id' => $payment_intent->id,
+            ]
         );
 
         return new \WP_REST_Response(['status' => 'enriched', 'result' => $result], 200);
@@ -296,6 +345,14 @@ class ChargeGuard_Stripe_Webhook {
 
         $pending['orderId'] = (string) $order_id;
 
+        // Re-resolve fresh from order meta — the queued payload's
+        // deviceToken slot is always null at queue time (see
+        // handle_webhook() above, where the order didn't exist yet). By
+        // the time this fires (woocommerce_payment_complete) the order
+        // exists and _chargeguard_device_token, if any, is set.
+        $meta_token = $order->get_meta('_chargeguard_device_token');
+        $pending['deviceToken'] = !empty($meta_token) ? $meta_token : null;
+
         $result = $this->api_client->send_enrich($pending);
 
         if (is_wp_error($result)) {
@@ -303,10 +360,16 @@ class ChargeGuard_Stripe_Webhook {
             return;
         }
 
+        $this->chargeguard_fire_device_fraud_hook($result, $order_id, 'stripe_post_payment_block');
+
         $this->chargeguard_maybe_block_order(
             $result,
             $order_id,
-            __('Blocked by ChargeGuard: Card Testing detected.', 'chargeguard-woocommerce')
+            __('Blocked by ChargeGuard: Card Testing detected.', 'chargeguard-woocommerce'),
+            [
+                'gateway'           => 'stripe',
+                'payment_intent_id' => $payment_intent_id,
+            ]
         );
     }
 
@@ -338,6 +401,122 @@ class ChargeGuard_Stripe_Webhook {
                 : $payment_intent->latest_charge->id;
 
             return \Stripe\Charge::retrieve($charge_id);
+        }
+
+        return null;
+    }
+
+    /**
+     * معالجة حدث charge.dispute.closed لتغذية الـ Feedback Loop.
+     *
+     * Mirrors ChargeGuard_PayPal_Webhook::handle_dispute_event() — only a
+     * confirmed loss may blacklist a device or report fraud=true.
+     *
+     * @param \Stripe\Event $event
+     * @param string        $cache_key Idempotency key already computed by handle_webhook().
+     * @return \WP_REST_Response
+     */
+    private function handle_dispute_closed($event, $cache_key) {
+        $dispute = $event->data->object;
+        $status  = $dispute->status ?? null;
+
+        // Documented terminal statuses: lost / won / warning_closed.
+        // Only 'lost' is a confirmed merchant loss. This branch is
+        // deterministic given the payload — status cannot change on
+        // redelivery — so it's safe to mark processed immediately.
+        if ($status !== 'lost') {
+            set_transient($cache_key, 1, 48 * HOUR_IN_SECONDS);
+            return new \WP_REST_Response(['status' => 'ignored', 'dispute_status' => $status], 200);
+        }
+
+        $order_id = $this->find_order_id_for_dispute($dispute);
+
+        if (!$order_id) {
+            // Also deterministic: a redelivery carries the same
+            // payment_intent/charge IDs and will fail the same lookup, so
+            // mark processed and log for manual follow-up rather than let
+            // Stripe retry a match that cannot succeed.
+            set_transient($cache_key, 1, 48 * HOUR_IN_SECONDS);
+            error_log('[ChargeGuard] Stripe dispute ' . $dispute->id . ' closed as lost, but no matching order was found (payment_intent: ' . ($dispute->payment_intent ?? 'none') . ', charge: ' . ($dispute->charge ?? 'none') . ').');
+            return new \WP_REST_Response(['status' => 'order_not_found'], 200);
+        }
+
+        // Best-effort, does not gate the idempotency marker or response
+        // below — the send_feedback() call further down is the
+        // higher-value signal and must not be blocked by this step.
+        // Canonical accessor — see ChargeGuard_Dynamic_Firewall::get_order_device_fp()
+        // for the read-both (canonical + legacy), write-one rationale.
+        $device_fp = ChargeGuard_Dynamic_Firewall::get_order_device_fp($order_id);
+        if (!empty($device_fp) && $device_fp !== 'unknown') {
+            do_action('chargeguard_mark_device_fraud', $device_fp, 'stripe_dispute_lost');
+        }
+
+        $result = $this->api_client->send_feedback($order_id, true);
+
+        if (is_wp_error($result)) {
+            // Do NOT mark processed. A confirmed 'lost' dispute is a
+            // financial institution's final fraud ruling — losing it to
+            // a transient backend failure (or an open circuit breaker) is
+            // strictly worse than losing a BIN-enrichment row, and Stripe
+            // already retries non-2xx webhook responses for up to several
+            // days. Returning 500 lets that redelivery retry
+            // send_feedback() later instead of silently dropping a
+            // ground-truth fraud label. Safe to repeat on redelivery:
+            // chargeguard_mark_device_fraud() above idempotently
+            // overwrites the same blacklist entry, and the backend's
+            // feedback endpoint has its own idempotency gate on orderId.
+            error_log('[ChargeGuard] send_feedback failed for order ' . $order_id . ' (Stripe dispute ' . $dispute->id . '), code: ' . $result->get_error_code() . ', message: ' . $result->get_error_message() . ' — returning 500 for Stripe redelivery.');
+            return new \WP_REST_Response(['error' => 'send_feedback failed'], 500);
+        }
+
+        // Confirmed success — this delivery has genuinely concluded.
+        set_transient($cache_key, 1, 48 * HOUR_IN_SECONDS);
+
+        return new \WP_REST_Response(['status' => 'handled', 'order_id' => $order_id], 200);
+    }
+
+    /**
+     * البحث عن WooCommerce Order ID المرتبط بنزاع Stripe.
+     *
+     * Tries payment_intent first against the _chargeguard_payment_intent_id
+     * meta key already populated for payment_intent.succeeded (no new meta
+     * key needed). Falls back to charge ID against _transaction_id,
+     * matching the pattern already used elsewhere in this plugin.
+     *
+     * @param \Stripe\Dispute $dispute
+     * @return int|null
+     */
+    private function find_order_id_for_dispute($dispute) {
+        $payment_intent_id = is_string($dispute->payment_intent ?? null)
+            ? $dispute->payment_intent
+            : ($dispute->payment_intent->id ?? null);
+
+        if ($payment_intent_id) {
+            $orders = wc_get_orders([
+                'limit'      => 1,
+                'meta_key'   => '_chargeguard_payment_intent_id',
+                'meta_value' => $payment_intent_id,
+                'return'     => 'ids',
+            ]);
+            if (!empty($orders)) {
+                return $orders[0];
+            }
+        }
+
+        $charge_id = is_string($dispute->charge ?? null)
+            ? $dispute->charge
+            : ($dispute->charge->id ?? null);
+
+        if ($charge_id) {
+            $orders = wc_get_orders([
+                'limit'      => 1,
+                'meta_key'   => '_transaction_id',
+                'meta_value' => $charge_id,
+                'return'     => 'ids',
+            ]);
+            if (!empty($orders)) {
+                return $orders[0];
+            }
         }
 
         return null;

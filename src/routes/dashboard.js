@@ -6,9 +6,46 @@ const { PrismaClient } = require('@prisma/client');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
-const { isProOrAbove } = require('../lib/planAccess');
+const { isProOrAbove, isAgency } = require('../lib/planAccess');
+const logger = require('../lib/logger');
 
 const prisma = new PrismaClient();
+
+// ── Store filter resolution ────────────────────────────────────────────
+// Single source of truth for validating a client-supplied ?storeId=.
+// Deliberately does NOT check isAgency(tenant.plan) separately — a
+// Starter/Pro tenant has zero Store rows, and a downgraded-from-Agency
+// tenant's old stores are deactivated (see subscriptionScheduler.js
+// processGraceToExpired), so the ownership+isActive lookup below already
+// returns null for every case a plan check would also reject. One check,
+// not two, per the same drift-avoidance rationale used elsewhere in this
+// codebase (CWE-1059).
+const resolveRequestedStoreId = async (req) => {
+  const raw = req.query.storeId;
+  if (!raw || typeof raw !== 'string') return { storeId: null, invalid: false };
+
+  const store = await prisma.store.findFirst({
+    where:  { id: raw, tenantId: req.tenant.id, isActive: true },
+    select: { id: true },
+  });
+
+  return store
+    ? { storeId: store.id, invalid: false }
+    : { storeId: null, invalid: true };
+};
+
+// Fetches the dropdown's store list server-side. Deliberately does NOT call
+// GET /api/stores — that route requires domainAuthMiddleware (X-Store-Domain
+// header), which a browser rendering this dashboard page has no natural way
+// to supply. Every other dashboard.js route already bypasses domain auth
+// entirely (authByApiKey only), so this stays consistent with that pattern.
+const getActiveStoresForDropdown = async (tenantId) => {
+  return prisma.store.findMany({
+    where:   { tenantId, isActive: true },
+    select:  { id: true, label: true, storeUrl: true },
+    orderBy: { createdAt: 'asc' },
+  });
+};
 
 // ── Constants ─────────────────────────────────────────────────
 const { SAVINGS_PER_ATTACK: FEES_PER_ATTEMPT } = require('../lib/constants');
@@ -131,56 +168,62 @@ const calculateSecurityScore = (attacks24h, weekTotal, uniqueReasonCount, daysSi
 };
 
 // ── Dashboard queries ─────────────────────────────────────────
-const getDashboardData = async (tenantId, tenantCreatedAt) => {
+const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null) => {
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
   const oneHourAgo         = new Date(Date.now() - 60 * 60 * 1000);
 
+  // Spread into every BlockedAttempt where-clause below. When storeId is
+  // null (default — "All Stores"), this is a no-op and behavior is
+  // byte-for-byte identical to before this change.
+  const storeScope = storeId ? { storeId } : {};
+
   const [totalBlocked, recentAttempts, lastEight, lastActivity, amountData, reasonData, attacks24h, binAttackData, topBinsForOrigin, totalTenants] = await Promise.all([
-    prisma.blockedAttempt.count({ where: { tenantId } }),
+    prisma.blockedAttempt.count({ where: { tenantId, ...storeScope } }),
     prisma.blockedAttempt.findMany({
-      where:   { tenantId, blockedAt: { gte: sevenDaysAgo } },
+      where:   { tenantId, ...storeScope, blockedAt: { gte: sevenDaysAgo } },
       select:  { blockedAt: true },
       orderBy: { blockedAt: 'asc' },
     }),
     prisma.blockedAttempt.findMany({
-      where:   { tenantId },
+      where:   { tenantId, ...storeScope },
       select:  { blockedAt: true, cardType: true, reason: true, cardBin: true, amountAttempted: true, riskScore: true },
       orderBy: { blockedAt: 'desc' },
       take:    8,
     }),
     prisma.blockedAttempt.findFirst({
-      where:   { tenantId },
+      where:   { tenantId, ...storeScope },
       select:  { blockedAt: true },
       orderBy: { blockedAt: 'desc' },
     }),
     prisma.blockedAttempt.aggregate({
-      where:  { tenantId },
+      where:  { tenantId, ...storeScope },
       _sum:   { amountAttempted: true },
     }),
     prisma.blockedAttempt.groupBy({
       by:     ['reason'],
-      where:  { tenantId },
+      where:  { tenantId, ...storeScope },
       _count: { reason: true },
     }),
     prisma.blockedAttempt.count({
-      where: { tenantId, blockedAt: { gte: twentyFourHoursAgo } },
+      where: { tenantId, ...storeScope, blockedAt: { gte: twentyFourHoursAgo } },
     }),
     prisma.blockedAttempt.groupBy({
       by:      ['cardBin'],
-      where:   { tenantId, blockedAt: { gte: oneHourAgo }, cardBin: { not: null } },
+      where:   { tenantId, ...storeScope, blockedAt: { gte: oneHourAgo }, cardBin: { not: null } },
       _count:  { cardBin: true },
       orderBy: { _count: { cardBin: 'desc' } },
       take:    3,
     }),
     prisma.blockedAttempt.groupBy({
       by:      ['cardBin'],
-      where:   { tenantId, cardBin: { not: null } },
+      where:   { tenantId, ...storeScope, cardBin: { not: null } },
       _count:  { cardBin: true },
       orderBy: { _count: { cardBin: 'desc' } },
       take:    10,
     }),
+    // Platform-wide social-proof number — intentionally never store-scoped.
     prisma.tenant.count({ where: { isActive: true } }),
   ]);
 
@@ -252,12 +295,20 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
   // ── PayPal Shield Stats (from AlertLog) ───────────────────────────────
   const sevenDaysAgoPaypal = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
+  // AlertLog carries BOTH a tenant-wide aggregate row (storeId: null) AND
+  // additive per-store rows for the same week. The generic storeScope
+  // above is wrong here — on "All Stores" (storeId null) it becomes {},
+  // no filter, summing the aggregate row plus every per-store row. This
+  // must be an explicit equality check instead.
+  const paypalStoreScope = { storeId: storeId ?? null };
+
   const [paypalWeeklyLogs, paypalAllTimeLogs, tenantPaypalMeta] = await Promise.all([
 
     // آخر 7 أيام من تنبيهات PayPal
     prisma.alertLog.findMany({
       where: {
         tenantId:  tenantId,
+        ...paypalStoreScope,
         alertType: 'paypal_weekly_shield',
         sentAt:    { gte: sevenDaysAgoPaypal },
       },
@@ -267,7 +318,7 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
 
     // إجمالي كل الوقت
     prisma.alertLog.aggregate({
-      where:   { tenantId: tenantId, alertType: 'paypal_weekly_shield' },
+      where:   { tenantId: tenantId, ...paypalStoreScope, alertType: 'paypal_weekly_shield' },
       _sum:    { attackCount: true, savedAmount: true },
       _count:  { id: true },
     }),
@@ -313,13 +364,35 @@ const getDashboardData = async (tenantId, tenantCreatedAt) => {
     recentEight:      lastEight,
     connectionStatus: getConnectionStatus(lastActivity?.blockedAt ?? null),
     paypalStats,
+    // Signals to the UI/API consumer which sections above did NOT respect
+    // the store filter, because their underlying models (AlertLog,
+    // MonthlyReport) have no storeId column, and binSequenceStats comes
+    // from an in-memory tenant-keyed store (binSequenceDetector.js) not
+    // verified to support per-store scoping. Always tenant-wide regardless
+    // of storeId.
+    storeFilter: {
+      applied:        !!storeId,
+      storeId:        storeId ?? null,
+      // paypalStats removed — now filterable per store (AlertLog.storeId).
+      // monthlyReports stays pending the reportDataService.js change.
+      // binSequenceStats/identityGraph stay pooled by design (Tier 2).
+      tenantWideOnly: ['monthlyReports', 'binSequenceStats', 'identityGraph'],
+    },
   };
 };
 
 // ── GET /api/dashboard  (JSON) ───────────────────────────────
 router.get('/', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+    const { storeId, invalid } = await resolveRequestedStoreId(req);
+    if (invalid) {
+      return res.status(400).json({
+        error: 'Invalid storeId — must be an active store owned by this tenant.',
+        code:  'INVALID_STORE_FILTER',
+      });
+    }
+
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId);
 
     // Broken Object Level Authorization fix (OWASP API1:2023): the HTML
     // renderer (buildDashboardHtml) already soft-locks BIN intelligence
@@ -358,7 +431,18 @@ router.get('/', rateLimit, authByApiKey, async (req, res) => {
 // ── GET /api/dashboard/page  (HTML) ─────────────────────────
 router.get('/page', rateLimit, authByApiKey, async (req, res) => {
   try {
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt);
+    const { storeId, invalid } = await resolveRequestedStoreId(req);
+    if (invalid) {
+      // A stale/foreign storeId in the URL (e.g. a bookmarked link to a
+      // store that was later deactivated) falls back to "All Stores"
+      // rather than erroring the whole page — this is a navigational
+      // aid, not a security boundary, so fail-open here is correct
+      // (contrast with the JSON API above, which fails closed with 400
+      // since it's meant for programmatic callers who should notice).
+      logger.warn?.({ module: 'dashboard', tenantId: req.tenant.id, storeId: req.query.storeId }, 'Invalid storeId in dashboard page — falling back to All Stores');
+    }
+
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId);
 
     // Consistency fix: GET /api/dashboard (JSON) already replaces
     // binActivity/binSequenceStats/threatOrigins with a locked stub for
@@ -384,10 +468,14 @@ router.get('/page', rateLimit, authByApiKey, async (req, res) => {
       data.threatOrigins    = proLocked;
     }
 
+    const stores = isAgency(req.tenant.plan)
+      ? await getActiveStoresForDropdown(req.tenant.id)
+      : [];
+
     res.setHeader('Content-Type',  'text/html; charset=utf-8');
     res.setHeader('Cache-Control', 'no-store');
     res.setHeader('X-Robots-Tag',  'noindex');
-    res.send(await buildDashboardHtml(req.tenant, data));
+    res.send(await buildDashboardHtml(req.tenant, data, stores, storeId));
   } catch (err) {
     console.error('[Dashboard] Page error:', err.message);
     res.status(500).send('Internal Server Error');
@@ -434,7 +522,7 @@ const statusBg    = { green: '#052e16', yellow: '#1c1202', gray: '#0f172a', red:
 const statusBorder= { green: '#166534', yellow: '#713f12', gray: '#1e293b', red: '#7f1d1d' };
 
 // ── Build HTML ────────────────────────────────────────────────
-const buildDashboardHtml = async (tenant, data) => {
+const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = null) => {
   const { totalBlocked, feesSaved, chartData, recentEight, connectionStatus } = data;
   const maxChart  = Math.max(...chartData.map(d => d.count), 1);
   const isNew     = totalBlocked === 0;
@@ -1421,7 +1509,7 @@ const buildDashboardHtml = async (tenant, data) => {
   </style>
 </head>
 <body>
-<div class="wrap">
+  <div class="wrap">
 
   <!-- ── Header ── -->
   <div class="header">
@@ -1434,6 +1522,21 @@ const buildDashboardHtml = async (tenant, data) => {
       <span class="plan-badge">${escapeHtml(planDisplay)}</span>
     </div>
   </div>
+
+  ${(() => {
+    if (stores.length === 0) return '';
+    const selectedId = selectedStoreId || '';
+    return `
+    <div style="margin-bottom:1.25rem;display:flex;align-items:center;gap:.6rem;flex-wrap:wrap;">
+      <label for="cg-store-select" style="font-size:.72rem;color:var(--text-dim);font-weight:600;text-transform:uppercase;letter-spacing:.06em;">Viewing</label>
+      <select id="cg-store-select" onchange="location.href = this.value === '__all__' ? '/api/dashboard/page' : '/api/dashboard/page?storeId=' + encodeURIComponent(this.value)"
+        style="background:var(--surface);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:.4rem .7rem;font-size:.8rem;font-family:'DM Sans',sans-serif;cursor:pointer;">
+        <option value="__all__" ${!selectedId ? 'selected' : ''}>All Stores</option>
+        ${stores.map(s => `<option value="${escapeHtml(s.id)}" ${s.id === selectedId ? 'selected' : ''}>${escapeHtml(s.label || s.storeUrl || s.id)}</option>`).join('')}
+      </select>
+      ${data.storeFilter?.applied ? `<span style="font-size:.68rem;color:var(--text-dim);">PayPal Shield, BIN Sequence, and Monthly Reports below remain account-wide (all stores)</span>` : ''}
+    </div>`;
+  })()}
 
   <!-- ── Status bar ── -->
   <div class="status">

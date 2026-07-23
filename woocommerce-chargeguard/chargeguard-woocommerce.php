@@ -69,7 +69,9 @@ require_once __DIR__ . '/includes/trait-chargeguard-auto-block.php';
 require_once __DIR__ . '/includes/class-admin-settings.php';
 require_once __DIR__ . '/includes/class-stripe-webhook.php';
 require_once __DIR__ . '/includes/class-paypal-webhook.php';
+require_once __DIR__ . '/includes/class-trusted-proxy.php';
 require_once __DIR__ . '/includes/class-dynamic-firewall.php';
+require_once __DIR__ . '/includes/class-remote-config.php';
 require_once __DIR__ . '/includes/class-privacy.php';
 require_once __DIR__ . '/includes/class-plugin-updater.php';
 
@@ -87,14 +89,17 @@ add_action('before_woocommerce_init', function () {
     }
 });
 
-if (!function_exists('chargeguard_add_device_fingerprint_to_order')) {
-    function chargeguard_add_device_fingerprint_to_order($order, $data) {
-        if (isset($_COOKIE['chargeguard_fp'])) {
-            $fingerprint = sanitize_text_field(wp_unslash($_COOKIE['chargeguard_fp']));
-            $order->update_meta_data('_chargeguard_device_fingerprint', $fingerprint);
-        }
-    }
-}
+// chargeguard_add_device_fingerprint_to_order() removed — its sole
+// purpose was writing the now-deprecated `_chargeguard_device_fingerprint`
+// meta key on woocommerce_checkout_create_order. That hook only fires for
+// classic checkout (Blocks/Store API checkout builds its order via a
+// separate code path and doesn't reliably fire it), which meant this
+// function silently never ran for Blocks-checkout orders — exactly the
+// kind of two-key drift this unification removes. `_chargeguard_device_fp`
+// (written by ChargeGuard_Dynamic_Firewall::intercept_checkout_block() and
+// reconcile_pre_order_id()) already covers both checkout flows and is now
+// the single canonical key; see get_order_device_fp() there for the
+// read-both, write-one transitional strategy.
 
 if (!function_exists('chargeguard_add_fingerprint_to_webhook_payload')) {
     function chargeguard_add_fingerprint_to_webhook_payload($payload, $resource, $resource_id, $webhook_id) {
@@ -107,12 +112,34 @@ if (!function_exists('chargeguard_add_fingerprint_to_webhook_payload')) {
         }
 
         if ($resource === 'order' && isset($payload['id'])) {
-            $order = wc_get_order($resource_id);
-            if ($order) {
-                $fingerprint = $order->get_meta('_chargeguard_device_fingerprint');
-                if ($fingerprint) {
-                    $payload['device_fingerprint'] = $fingerprint;
-                }
+            // Canonical accessor — see ChargeGuard_Dynamic_Firewall::get_order_device_fp()
+            // for the read-both (canonical + legacy), write-one rationale.
+            // This also fixes a live bug: Blocks-checkout orders never had
+            // the old `_chargeguard_device_fingerprint` key populated at
+            // all, so this filter previously always sent a null
+            // device_fingerprint for them.
+            $fingerprint = ChargeGuard_Dynamic_Firewall::get_order_device_fp($resource_id);
+            if ($fingerprint) {
+                $payload['device_fingerprint'] = $fingerprint;
+            }
+
+            // Server-signed device token (see maybe_issue_device_token() /
+            // ChargeGuard_Dynamic_Firewall::get_order_device_token()). This
+            // is a NEW top-level field — `_chargeguard_device_token` is a
+            // private (underscore-prefixed) meta key, which WooCommerce's
+            // webhook payload serializer excludes from `meta_data` by
+            // default, so the backend's meta_data fallback lookup in
+            // /woocommerce-webhook could never find it. Injecting it
+            // explicitly here is the only way to get it into the payload.
+            // Omitted entirely (never sent as null/empty) for orders with
+            // no token — pre-device-token-feature orders, older plugin
+            // versions, or a visitor for whom maybe_issue_device_token()
+            // never successfully minted one; the backend already treats a
+            // missing deviceToken as 'unsigned', identical to today's
+            // behavior on /evaluate and /enrich.
+            $device_token = ChargeGuard_Dynamic_Firewall::get_order_device_token($resource_id);
+            if ($device_token) {
+                $payload['device_token'] = $device_token;
             }
         }
         return $payload;
@@ -184,11 +211,26 @@ function chargeguard_init() {
     new ChargeGuard_Stripe_Webhook();
 new ChargeGuard_PayPal_Webhook();
     new ChargeGuard_Dynamic_Firewall();
+    new ChargeGuard_Remote_Config();
     new ChargeGuard_Privacy();
-    // ط¥ط¶ط§ظپط© ط¨طµظ…ط© ط§ظ„ط¬ظ‡ط§ط² ظƒط­ظ‚ظ„ ظ…ط®طµطµ ظپظٹ ط§ظ„ط·ظ„ط¨ ظˆط¥ط±ط³ط§ظ„ظ‡ط§ ط¹ط¨ط± Webhook
-    add_action('woocommerce_checkout_create_order', 'chargeguard_add_device_fingerprint_to_order', 10, 2);
+    // Device-fingerprint order meta is now written solely by
+    // ChargeGuard_Dynamic_Firewall (intercept_checkout_block() /
+    // reconcile_pre_order_id()) under the single canonical key
+    // `_chargeguard_device_fp` — no separate hook needed here anymore.
     add_filter('woocommerce_webhook_payload', 'chargeguard_add_fingerprint_to_webhook_payload', 10, 4);
 }
+
+// Daily refresh of Cloudflare's published IP ranges, entirely off the
+// checkout request path — see ChargeGuard_Trusted_Proxy::refresh_cf_ranges().
+add_action('chargeguard_refresh_cf_ranges', ['ChargeGuard_Trusted_Proxy', 'refresh_cf_ranges']);
+register_activation_hook(__FILE__, function () {
+    if (!wp_next_scheduled('chargeguard_refresh_cf_ranges')) {
+        wp_schedule_event(time(), 'daily', 'chargeguard_refresh_cf_ranges');
+    }
+});
+register_deactivation_hook(__FILE__, function () {
+    wp_clear_scheduled_hook('chargeguard_refresh_cf_ranges');
+});
 
 add_action('init', 'chargeguard_init_updater');
 function chargeguard_init_updater() {
