@@ -13,7 +13,7 @@ const app = express();
 app.set('trust proxy', true);
 
 // TEMPORARY — remove after test
-app.get('/ping', (req, res) => res.send('pong'));
+
 
 // Middlewares
 app.use(helmet());
