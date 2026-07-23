@@ -25,11 +25,16 @@
  * reintroduce the duplicate-send bug this helper exists to fix.
  */
 
-const Redis = require('ioredis');
+let Redis = null;
+try {
+  Redis = require('ioredis');
+} catch (e) {
+  // ioredis is optional — the app boots without it
+}
 
 let redisClient = null;
 
-if (process.env.REDIS_URL) {
+if (process.env.REDIS_URL && Redis) {
   redisClient = new Redis(process.env.REDIS_URL, {
     maxRetriesPerRequest: 2,
     lazyConnect: false,
@@ -43,6 +48,11 @@ if (process.env.REDIS_URL) {
   redisClient.on('connect', () => {
     console.log('[distributedLock] Redis connected — distributed scheduler locking active');
   });
+} else if (!Redis) {
+  console.warn(
+    '[distributedLock] ioredis module not installed — distributed locking is DISABLED. ' +
+    'Install ioredis and set REDIS_URL before scaling horizontally.'
+  );
 } else {
   console.warn(
     '[distributedLock] REDIS_URL not set — distributed locking is DISABLED. ' +
