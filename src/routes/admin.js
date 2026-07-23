@@ -299,6 +299,8 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
         <button data-action="reset-quota" data-id="${t.id}" ${isAgency(t.plan) ? 'disabled' : ''}>Reset Quota</button>
         <button class="view-orders-btn" data-id="${t.id}" data-email="${escapeHtml(t.email)}">View Orders</button>
         <button class="view-config-btn" data-id="${t.id}" data-email="${escapeHtml(t.email)}">View Config</button>
+        <button class="view-blacklist-btn" data-id="${t.id}" data-email="${escapeHtml(t.email)}">Blacklist</button>
+        <button class="view-whitelist-btn" data-id="${t.id}" data-email="${escapeHtml(t.email)}">Whitelist</button>
         ${tenantPause
           ? `<button data-action="unpause" data-id="${t.id}" title="Paused until ${escapeHtml(tenantPause.expiresAt.toISOString())}">▶ Resume (paused)</button>`
           : `<button data-action="pause" data-id="${t.id}">⏸ Pause Blocking</button>`}
@@ -568,6 +570,48 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
     </div>
   </div>
 
+  <div class="modal-overlay" id="blacklistModal">
+    <div class="modal-box" style="max-width:760px;">
+      <button class="modal-close" id="blacklistModalClose">✕ Close</button>
+      <h3 id="blacklistModalTitle">Blacklist</h3>
+      <form id="blacklistAddForm" class="filter-form" onsubmit="return false;" style="margin-bottom:1rem;">
+        <select id="blacklistType">
+          <option value="EMAIL">EMAIL</option>
+          <option value="IP">IP</option>
+          <option value="DEVICE_FINGERPRINT">DEVICE_FINGERPRINT</option>
+        </select>
+        <input type="text" id="blacklistValue" placeholder="Value"/>
+        <input type="text" id="blacklistReason" placeholder="Reason (optional)"/>
+        <button type="button" id="blacklistAddBtn">Add Entry</button>
+      </form>
+      <table id="blacklistTable">
+        <thead><tr><th>Type</th><th>Value</th><th>Reason</th><th>Added</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="blacklistRows"><tr><td colspan="6" style="text-align:center;padding:1rem;color:#64748b">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="whitelistModal">
+    <div class="modal-box" style="max-width:760px;">
+      <button class="modal-close" id="whitelistModalClose">✕ Close</button>
+      <h3 id="whitelistModalTitle">Whitelist</h3>
+      <form id="whitelistAddForm" class="filter-form" onsubmit="return false;" style="margin-bottom:1rem;">
+        <select id="whitelistType">
+          <option value="EMAIL">EMAIL</option>
+          <option value="IP">IP</option>
+          <option value="BIN">BIN</option>
+        </select>
+        <input type="text" id="whitelistValue" placeholder="Value"/>
+        <input type="text" id="whitelistReason" placeholder="Reason (optional)"/>
+        <button type="button" id="whitelistAddBtn">Add Entry</button>
+      </form>
+      <table id="whitelistTable">
+        <thead><tr><th>Type</th><th>Value</th><th>Reason</th><th>Added</th><th>Expires</th><th></th></tr></thead>
+        <tbody id="whitelistRows"><tr><td colspan="6" style="text-align:center;padding:1rem;color:#64748b">Loading…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+
   <script>
     document.querySelectorAll('button[data-action]').forEach(btn => {
       btn.addEventListener('click', async () => {
@@ -820,6 +864,8 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
                 <br/><strong>Signals summary:</strong> <code>\${escapeHtmlClient(JSON.stringify(o.signalsSummary))}</code>
                 <br/><strong>Enrichment source:</strong> \${escapeHtmlClient(o.enrichmentSource || '—')}
                 &nbsp;|&nbsp; <strong>Feedback processed:</strong> \${o.feedbackProcessedAt ? new Date(o.feedbackProcessedAt).toISOString() : 'not yet'}
+                <br/><br/>
+                <button class="override-order-btn" data-orderid="\${escapeHtmlClient(o.orderId)}" data-current="\${escapeHtmlClient(o.decision || '')}">Override Decision</button>
               </td>
             </tr>\`;
           }).join('');
@@ -828,6 +874,13 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
             row.addEventListener('click', () => {
               const target = document.getElementById(row.dataset.target);
               target.style.display = target.style.display === 'none' ? 'table-row' : 'none';
+            });
+          });
+
+          rowsEl.querySelectorAll('.override-order-btn').forEach(btn => {
+            btn.addEventListener('click', (ev) => {
+              ev.stopPropagation();
+              overrideOrder(btn.dataset.orderid, btn.dataset.current);
             });
           });
         }
@@ -868,6 +921,163 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
     document.getElementById('ordersNext').addEventListener('click', () => {
       ordersState.offset += ordersState.limit;
       loadOrders();
+    });
+
+    // ── Order Override ────────────────────────────────────────────────
+    async function overrideOrder(orderId, currentDecision) {
+      const decision = prompt('New decision for order ' + orderId + ' (approve / review / block). Current: ' + (currentDecision || '\u2014'));
+      if (!decision) return;
+      const normalized = decision.trim().toLowerCase();
+      if (!['approve', 'review', 'block'].includes(normalized)) {
+        alert('Decision must be approve, review, or block');
+        return;
+      }
+      const reason = prompt('Reason for this override (required):');
+      if (!reason || !reason.trim()) { alert('Reason is required'); return; }
+
+      const key = getAdminKey();
+      if (!key) return;
+
+      try {
+        const res = await fetch('/admin/tenants/' + ordersState.tenantId + '/orders/' + encodeURIComponent(orderId) + '/override', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
+          body: JSON.stringify({ decision: normalized, reason: reason.trim() }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          alert('✅ ' + data.message);
+          loadOrders();
+        } else {
+          alert('❌ ' + data.message);
+        }
+      } catch (e) {
+        alert('❌ Network error');
+      }
+    }
+
+    // ── Blacklist / Whitelist management ────────────────────────────────
+    function renderListRows(tbodyId, entries, listName, tenantId) {
+      const tbody = document.getElementById(tbodyId);
+      if (!entries.length) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#64748b">No entries</td></tr>';
+        return;
+      }
+      tbody.innerHTML = entries.map(function(e) {
+        return '<tr>' +
+          '<td>' + escapeHtmlClient(e.type) + '</td>' +
+          '<td style="font-family:monospace;">' + escapeHtmlClient(e.value) + '</td>' +
+          '<td>' + escapeHtmlClient(e.reason || '\u2014') + '</td>' +
+          '<td>' + new Date(e.createdAt).toISOString().replace('T',' ').slice(0,19) + '</td>' +
+          '<td>' + (e.expiresAt ? new Date(e.expiresAt).toISOString().replace('T',' ').slice(0,19) : '\u2014') + '</td>' +
+          '<td><button class="list-delete-btn" data-list="' + listName + '" data-tenant="' + tenantId + '" data-entry="' + e.id + '">Delete</button></td>' +
+          '</tr>';
+      }).join('');
+
+      tbody.querySelectorAll('.list-delete-btn').forEach(btn => {
+        btn.addEventListener('click', () => deleteListEntry(btn.dataset.list, btn.dataset.tenant, btn.dataset.entry));
+      });
+    }
+
+    async function loadListEntries(listName, tenantId) {
+      const key = getAdminKey();
+      if (!key) return;
+      const tbodyId = listName + 'Rows';
+      const tbody = document.getElementById(tbodyId);
+      tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#64748b">Loading…</td></tr>';
+      try {
+        const res = await fetch('/admin/tenants/' + tenantId + '/' + listName, { headers: { 'x-admin-key': key } });
+        if (res.status === 401) {
+          cachedAdminKey = null;
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#f87171">Invalid admin key — reopen to retry</td></tr>';
+          return;
+        }
+        const data = await res.json();
+        if (!data.success) {
+          tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#f87171">' + escapeHtmlClient(data.message || 'Error') + '</td></tr>';
+          return;
+        }
+        renderListRows(tbodyId, data.entries, listName, tenantId);
+      } catch (e) {
+        tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;padding:1rem;color:#f87171">Network error</td></tr>';
+      }
+    }
+
+    async function addListEntry(listName, tenantId) {
+      const key = getAdminKey();
+      if (!key) return;
+      const type = document.getElementById(listName + 'Type').value;
+      const value = document.getElementById(listName + 'Value').value.trim();
+      const reason = document.getElementById(listName + 'Reason').value.trim();
+      if (!value) { alert('Value is required'); return; }
+
+      try {
+        const res = await fetch('/admin/tenants/' + tenantId + '/' + listName, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'x-admin-key': key },
+          body: JSON.stringify({ type, value, reason: reason || undefined }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          document.getElementById(listName + 'Value').value = '';
+          document.getElementById(listName + 'Reason').value = '';
+          loadListEntries(listName, tenantId);
+        } else {
+          alert('❌ ' + data.message);
+        }
+      } catch (e) {
+        alert('❌ Network error');
+      }
+    }
+
+    async function deleteListEntry(listName, tenantId, entryId) {
+      if (!confirm('Delete this ' + listName + ' entry?')) return;
+      const key = getAdminKey();
+      if (!key) return;
+      try {
+        const res = await fetch('/admin/tenants/' + tenantId + '/' + listName + '/' + entryId, {
+          method: 'DELETE',
+          headers: { 'x-admin-key': key },
+        });
+        const data = await res.json();
+        if (data.success) {
+          loadListEntries(listName, tenantId);
+        } else {
+          alert('❌ ' + data.message);
+        }
+      } catch (e) {
+        alert('❌ Network error');
+      }
+    }
+
+    document.querySelectorAll('.view-blacklist-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById('blacklistModalTitle').textContent = 'Blacklist \u2014 ' + btn.dataset.email;
+        document.getElementById('blacklistAddBtn').dataset.tenant = btn.dataset.id;
+        document.getElementById('blacklistModal').classList.add('open');
+        loadListEntries('blacklist', btn.dataset.id);
+      });
+    });
+    document.getElementById('blacklistModalClose').addEventListener('click', () => {
+      document.getElementById('blacklistModal').classList.remove('open');
+    });
+    document.getElementById('blacklistAddBtn').addEventListener('click', (e) => {
+      addListEntry('blacklist', e.target.dataset.tenant);
+    });
+
+    document.querySelectorAll('.view-whitelist-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.getElementById('whitelistModalTitle').textContent = 'Whitelist \u2014 ' + btn.dataset.email;
+        document.getElementById('whitelistAddBtn').dataset.tenant = btn.dataset.id;
+        document.getElementById('whitelistModal').classList.add('open');
+        loadListEntries('whitelist', btn.dataset.id);
+      });
+    });
+    document.getElementById('whitelistModalClose').addEventListener('click', () => {
+      document.getElementById('whitelistModal').classList.remove('open');
+    });
+    document.getElementById('whitelistAddBtn').addEventListener('click', (e) => {
+      addListEntry('whitelist', e.target.dataset.tenant);
     });
   </script>
 </body>

@@ -1138,64 +1138,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     res.status(500).json(safeErrorPayload(error));
   }
 });
-// ���� ����� ����� ���� ����� ������ ��� ���� (������ �������� ���)
-/**
- * @swagger
- * /risk/mark-fraud:
- *   post:
- *     summary: Mark a device as fraudulent (for testing)
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [deviceFingerprint, merchantId]
- *             properties:
- *               deviceFingerprint: { type: string }
- *               email: { type: string }
- *               ipAddress: { type: string }
- *               merchantId: { type: string }
- *     responses:
- *       200:
- *         description: Device marked as fraud
- *       400:
- *         description: Missing deviceFingerprint or merchantId
- *       500:
- *         description: Internal error
- */
-router.post('/mark-fraud', apiKeyAuth, verifyHmacSignature, async (req, res) => {
-  // ��� ������ �� ���� �������
-  if (process.env.NODE_ENV === 'production') {
-    return res.status(404).json({ error: 'Endpoint not available in production' });
-  }
-  try {
-    const { deviceFingerprint, email, ipAddress } = req.body;
-    if (!deviceFingerprint) {
-      return res.status(400).json({ error: 'deviceFingerprint required' });
-    }
 
-    const { markOrderAsFraud } = require('../lib/identityGraph');
-    
-    const mockOrder = {
-      deviceFingerprint,
-      deviceId: deviceFingerprint,
-      email: email || 'fraud@test.com',
-      ipAddress: ipAddress || '192.168.1.1',
-      shippingAddress: JSON.stringify({ country: 'US' }),
-      fingerprintVersion: 'v3',
-    };
-
-     const merchantId = req.tenant.id;
-    await markOrderAsFraud(mockOrder, merchantId);
-
-    
-    res.json({ success: true, message: `Device ${deviceFingerprint} marked as fraud` });
-  } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'mark-fraud', error: error.message, stack: error.stack }, 'mark-fraud error');
-    res.status(500).json(safeErrorPayload(error));
-  }
-});
 // ���� ����� ������ �� ����� ����� (Feedback Loop)
 // ������ orderId � isFraud (true = ����� ��� ������, false = ����� ��� ������)
 const { processFeedback } = require('../lib/feedbackLoop');
@@ -2735,42 +2678,7 @@ router.post('/tenants/register', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
-// ========== Auto-Cleanup Blocked Orders ==========
-router.post('/cleanup-blocked', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
-  try {
-    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // ����� �� ������� �������� (decision = 'block')
-    const blockedOrders = await db.order.findMany({
-      where: { merchantId, decision: 'block' },
-      select: { id: true, orderId: true }
-    });
-
-    if (blockedOrders.length === 0) {
-      return res.json({ success: true, cleanedCount: 0, message: 'No blocked orders to clean' });
-    }
-
-    // ��� ������� ��������
-    const deleteResult = await db.order.deleteMany({
-      where: { merchantId, decision: 'block' }
-    });
-
-    logger.info({ 
-      module: 'risk', 
-      merchantId, 
-      cleanedCount: deleteResult.count 
-    }, 'Auto-cleanup completed');
-
-    res.json({ 
-      success: true, 
-      cleanedCount: deleteResult.count,
-      message: `Cleaned ${deleteResult.count} blocked orders` 
-    });
-  } catch (error) {
-    logger.error({ module: 'risk', endpoint: 'cleanup-blocked', error: error.message }, 'Cleanup error');
-    res.status(500).json({ error: 'Internal server error' });
-  }
-});
 
 // ========== GET /risk/verify-key ==========
 // ������� ������ �� "���� �� �������" �� ����� WooCommerce
