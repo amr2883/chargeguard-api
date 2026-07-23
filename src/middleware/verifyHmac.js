@@ -201,10 +201,21 @@ if (!signature || !timestamp) {
 
   // الـ signature صحيح — parse الـ body وتابع
   if (req.body instanceof Buffer) {
-    try {
-      req.body = JSON.parse(req.body.toString('utf8'));
-    } catch (_) {
-      return res.status(400).json({ error: 'Invalid JSON body' });
+    if (req.body.length === 0) {
+      // Bodyless requests (GET, or DELETE with no body) sign an empty
+      // string and never carried a JSON payload to begin with. Falling
+      // through to JSON.parse('') here throws unconditionally
+      // (SyntaxError: Unexpected end of JSON input), which would 400
+      // every legitimately-signed empty-body request — e.g. this route,
+      // GET /risk/whitelist, GET /risk/blacklist — even though the
+      // signature check just above this already passed.
+      req.body = {};
+    } else {
+      try {
+        req.body = JSON.parse(req.body.toString('utf8'));
+      } catch (_) {
+        return res.status(400).json({ error: 'Invalid JSON body' });
+      }
     }
   }
 
