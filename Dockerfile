@@ -41,4 +41,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 CMD node -
 
 # تشغيل التطبيق (صيغة JSON array الصحيحة)
 # تشغيل مزامنة قاعدة البيانات ثم بدء التطبيق
-CMD ["node", "src/app.js"]
+CMD ["node", "src/server.js"]
