@@ -114,6 +114,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   const alreadySent = await prisma.alertLog.findFirst({
     where: {
       tenantId:  tenant.id,
+      storeId:   null, // tenant-wide row only — per-store rows (Step 8.5) must not affect this dedup check
       alertType: 'paypal_weekly_shield',
       sentAt:    { gte: currentWeekStart },
     },
@@ -194,6 +195,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   const historicalAgg = await prisma.alertLog.aggregate({
     where: {
       tenantId:  tenant.id,
+      storeId:   null, // tenant-wide row only — avoids double-counting against Step 8.5's per-store rows
       alertType: 'paypal_weekly_shield',
     },
     _sum: { attackCount: true },
@@ -203,15 +205,64 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
     count: (historicalAgg._sum.attackCount || 0) + thisWeekSuspicious,
   };
 
-  // ── Step 8: Write AlertLog BEFORE sending ─────────────────────────────────
+  // ── Step 8: Write AlertLog BEFORE sending — tenant-wide aggregate row ────
+  // storeId is explicitly null: this is the all-stores summary the email
+  // and the dashboard's default (unfiltered) view read. Must stay
+  // byte-for-byte identical to pre-change behavior.
   await prisma.alertLog.create({
     data: {
       tenantId:    tenant.id,
+      storeId:     null,
       alertType:   'paypal_weekly_shield',
       attackCount: thisWeekSuspicious,
       savedAmount,
     },
   });
+
+  // ── Step 8.5: Per-store breakdown rows (Agency, additive) ─────────────────
+  // Best-effort, dashboard-only — never blocks or alters the tenant-wide
+  // write above, and never triggers a separate email. Stores with zero
+  // PayPal orders this week are skipped (no zero-row spam). Orders whose
+  // storeId is null (never routed through a resolved Store — e.g. the
+  // tenant's own legacy allowedDomains site) are correctly excluded from
+  // every per-store row here and only ever counted in the tenant-wide row
+  // above, since a storeId: X filter never matches storeId: null.
+  try {
+    const activeStores = await prisma.store.findMany({
+      where:  { tenantId: tenant.id, isActive: true },
+      select: { id: true },
+    });
+
+    for (const store of activeStores) {
+      const storeOrders = await prisma.order.findMany({
+        where: {
+          merchantId:       tenant.id,
+          storeId:          store.id,
+          createdAt:        { gte: currentWeekStart },
+          enrichmentSource: 'paypal',
+        },
+        select: { decision: true },
+      });
+
+      if (storeOrders.length === 0) continue;
+
+      const storeSuspicious = storeOrders.filter(
+        o => o.decision === 'block' || o.decision === 'review'
+      ).length;
+
+      await prisma.alertLog.create({
+        data: {
+          tenantId:    tenant.id,
+          storeId:     store.id,
+          alertType:   'paypal_weekly_shield',
+          attackCount: storeSuspicious,
+          savedAmount: storeSuspicious * SAVINGS_PER_ATTACK,
+        },
+      });
+    }
+  } catch (err) {
+    console.error(`${label} ⚠️  ${tenant.email} — per-store PayPal breakdown failed:`, err.message);
+  }
 
   // ── Step 9: Send email ────────────────────────────────────────────────────
   sendPaypalWeeklyReportEmail({

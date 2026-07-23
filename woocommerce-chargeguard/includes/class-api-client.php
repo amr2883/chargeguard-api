@@ -136,9 +136,15 @@ class ChargeGuard_API_Client {
      */
     private function request_with_breaker($url, $args) {
         if ($this->is_circuit_open()) {
+            // NOTE: this error no longer implies "fail open" by itself.
+            // What happens next is decided by the caller — see
+            // ChargeGuard_Dynamic_Firewall::resolve_api_unavailable_decision()
+            // in class-dynamic-firewall.php, which applies the merchant's
+            // configured fallback behavior (block-all / local-checks /
+            // allow-all) instead of unconditionally approving.
             return new WP_Error(
                 'chargeguard_circuit_open',
-                'ChargeGuard API circuit breaker is open — skipping call and failing open.'
+                'ChargeGuard API circuit breaker is open — skipping call.'
             );
         }
 
@@ -198,6 +204,53 @@ class ChargeGuard_API_Client {
         } else {
             return new WP_Error('api_error', $body['error'] ?? 'Unknown error');
         }
+    }
+
+    /**
+     * Fetch the backend's cached Cloudflare IP ranges (GET
+     * /risk/cloudflare-ranges). The backend is now the single source of
+     * truth for Cloudflare's published ranges — see
+     * src/lib/cloudflareRanges.js and routes/risk.js on the backend side.
+     * Called from ChargeGuard_Trusted_Proxy::refresh_cf_ranges() instead
+     * of hitting cloudflare.com directly.
+     *
+     * @return array|WP_Error Decoded body (['ranges' => [...]]), or WP_Error.
+     */
+    public function get_cloudflare_ranges() {
+        $endpoint  = '/risk/cloudflare-ranges';
+        $url       = $this->base_url . $endpoint;
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac('', $timestamp, wp_parse_url( home_url(), PHP_URL_HOST ));
+
+        $args = [
+            'method'  => 'GET',
+            'headers' => [
+                // Required even for this bodyless GET — see whitelist_get()
+                // below for why (the backend's express.raw() body-capture
+                // middleware only runs, and thus only makes the signed
+                // empty-string body verifiable, when this header is set).
+                'Content-Type'            => 'application/json',
+                'X-API-Key'               => $this->api_key,
+                'X-Store-Domain'          => wp_parse_url( home_url(), PHP_URL_HOST ),
+                'X-ChargeGuard-Signature' => $signature,
+                'X-ChargeGuard-Timestamp' => $timestamp,
+            ],
+            'timeout' => 10,
+        ];
+
+        $response = $this->request_with_breaker($url, $args);
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+
+        if ($code >= 200 && $code < 300) {
+            return $body;
+        }
+        return new WP_Error('api_error', $body['error'] ?? 'Failed to fetch Cloudflare ranges.');
     }
 
     /**
@@ -341,6 +394,18 @@ class ChargeGuard_API_Client {
         $args = [
             'method'  => 'GET',
             'headers' => [
+                // Content-Type is required here even though there's no body:
+                // the backend's Express app registers express.raw({ type:
+                // 'application/json' }) on this exact path (app.js), and
+                // that middleware only captures the (empty) body into a
+                // Buffer when this header is present — which is what makes
+                // the signed-empty-string body below match what the
+                // backend's HMAC middleware computes. Without it, the
+                // backend sees no parsed body at all and cannot verify
+                // this signature. Mirrors whitelist_delete()/
+                // blacklist_delete(), which already send this header on
+                // their own bodyless requests for the identical reason.
+                'Content-Type'            => 'application/json',
                 'X-API-Key'               => $this->api_key,
                 'X-Store-Domain'          => wp_parse_url( home_url(), PHP_URL_HOST ),
                 'X-ChargeGuard-Signature' => $signature,
@@ -468,6 +533,9 @@ class ChargeGuard_API_Client {
         $args = [
             'method'  => 'GET',
             'headers' => [
+                // See whitelist_get() above for why this header is required
+                // on an otherwise-bodyless GET request.
+                'Content-Type'            => 'application/json',
                 'X-API-Key'               => $this->api_key,
                 'X-Store-Domain'          => wp_parse_url( home_url(), PHP_URL_HOST ),
                 'X-ChargeGuard-Signature' => $signature,
@@ -1001,6 +1069,59 @@ class ChargeGuard_API_Client {
     }
 
     /**
+     * Requests a server-signed device token from the backend
+     * (POST /risk/device-token). The plugin stores the returned value as
+     * an HttpOnly cookie (see class-dynamic-firewall.php
+     * maybe_issue_device_token()) — the client's own JavaScript can never
+     * read or overwrite it, which is the point: a fresh valid token
+     * requires this authenticated, signed round trip, not a console
+     * command against document.cookie.
+     *
+     * Goes through request_with_breaker() like every other call in this
+     * class — if the backend is unreachable, this simply fails (WP_Error)
+     * and the caller falls back to the existing unsigned chargeguard_fp
+     * flow, exactly as before this feature existed. No new fail-open
+     * surface is introduced.
+     *
+     * @param string $ip The visitor's resolved IP (ChargeGuard_Dynamic_Firewall::get_client_ip()).
+     * @return string|WP_Error The opaque token, or WP_Error on failure.
+     */
+    public function mint_device_token($ip = '') {
+        $endpoint  = '/risk/device-token';
+        $url       = $this->base_url . $endpoint;
+        $body      = json_encode(['ip' => $ip]);
+        $timestamp = (string) time();
+        $signature = $this->generate_hmac($body, $timestamp, wp_parse_url( home_url(), PHP_URL_HOST ));
+
+        $args = [
+            'method'  => 'POST',
+            'headers' => [
+                'Content-Type'              => 'application/json',
+                'X-API-Key'                 => $this->api_key,
+                'X-Store-Domain'            => wp_parse_url( home_url(), PHP_URL_HOST ),
+                'X-ChargeGuard-Signature'   => $signature,
+                'X-ChargeGuard-Timestamp'   => $timestamp,
+            ],
+            'body'    => $body,
+            'timeout' => 4,
+        ];
+
+        $response = $this->request_with_breaker($url, $args);
+
+        if (is_wp_error($response)) {
+            return $response;
+        }
+
+        $code         = wp_remote_retrieve_response_code($response);
+        $body_decoded = json_decode(wp_remote_retrieve_body($response), true);
+
+        if ($code >= 200 && $code < 300 && !empty($body_decoded['token'])) {
+            return $body_decoded['token'];
+        }
+        return new WP_Error('api_error', $body_decoded['error'] ?? 'Failed to mint device token');
+    }
+
+    /**
      * توليد توقيع HMAC-SHA256 مطابق لتوقيع WooCommerce webhook.
      *
      * @param string $raw_body الجسم الخام للطلب.
@@ -1203,14 +1324,23 @@ class ChargeGuard_API_Client {
         }
         $status = get_option(self::CIRCUIT_STATUS_OPTION, []);
         $reopens_in = isset($status['reopens_in']) ? (int) $status['reopens_in'] : CHARGEGUARD_CIRCUIT_OPEN_SECONDS;
+        $behavior = get_option('chargeguard_api_down_behavior', 'local_checks');
+        $mode_text = $behavior === 'block_all'
+            ? __('blocking all new orders until it recovers', 'chargeguard-woocommerce')
+            : ($behavior === 'allow_all'
+                ? __('approving all orders unscored — this store has opted out of the safer default; see Firewall Settings', 'chargeguard-woocommerce')
+                : __('using local fallback checks (device blacklist + a hard per-IP rate limit) instead of full scoring', 'chargeguard-woocommerce'));
         ?>
         <div class="notice notice-warning">
             <p>
                 <strong>ChargeGuard:</strong>
-                The fraud-scoring API is currently unreachable. Orders are being allowed through
-                without a risk check (fail-open) to avoid blocking your checkout. Protection will
-                resume automatically within <?php echo esc_html($reopens_in); ?> seconds of the API
-                becoming reachable again.
+                <?php
+                printf(
+                    esc_html__('The fraud-scoring API is currently unreachable. Your store is %1$s. Full protection resumes automatically within %2$s seconds of the API becoming reachable again. Configure this fallback behavior under ChargeGuard → Firewall Settings.', 'chargeguard-woocommerce'),
+                    esc_html($mode_text),
+                    esc_html($reopens_in)
+                );
+                ?>
             </p>
         </div>
         <?php

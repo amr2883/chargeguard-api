@@ -27,6 +27,12 @@ const logger = require('../lib/logger');
 // ─── Feature Flag ─────────────────────────────────────────────────────────
 const EMAIL_INTEL_ENABLED = process.env.ENABLE_EMAIL_INTEL !== "false";
 
+// Hard-block feature flag — independent of EMAIL_INTEL_ENABLED. This lets
+// you disable EMAIL_INTEL_ENABLED (the full external-lookup pipeline) while
+// keeping the cheap hard-block active, or vice versa, for gradual rollout /
+// emergency disable without redeploying.
+const EMAIL_HARD_BLOCK_ENABLED = process.env.ENABLE_EMAIL_HARD_BLOCK !== "false";
+
 // ─── Cache & State ────────────────────────────────────────────────────────
 const emailCache = new Map();    // LRU cache for email intelligence
 const inFlight   = new Map();    // In-flight deduplication
@@ -349,6 +355,61 @@ function calculateEntropy(str) {
   }, 0);
 }
 
+// ─── Cheap Hard-Block Check ────────────────────────────────────────────────
+// Deliberately independent of getEmailIntelligence()'s cache/rate-limit/
+// circuit-breaker machinery and of the emailRateLimiter sliding window, so
+// it is NEVER skipped by limitedScoring (quota exhaustion) or by the
+// per-merchant rate limiter — both of which exist to protect the *scoring*
+// pipeline's external-call budget, not this pipeline. This is intentionally
+// only two checks, both backed by data already resident in this module:
+//   1. Known disposable domain — O(1) Set lookup, zero I/O.
+//   2. No MX / domain doesn't resolve — a single DNS query, already
+//      wrapped by checkDomainDNS() with its own 400ms timeout and 24h LRU
+//      cache, so repeat lookups for the same domain are also zero-I/O.
+//
+// Domain-age (<24h) hard-blocking is NOT implemented here — this codebase
+// has no WHOIS/RDAP data source anywhere, and DNS resolution alone cannot
+// tell you when a domain was registered. See accompanying write-up.
+async function checkEmailHardBlock(email) {
+  if (!EMAIL_HARD_BLOCK_ENABLED) return { blocked: false, reason: null, domain: null };
+  if (!email) return { blocked: false, reason: null, domain: null };
+
+  const normalizedEmail = normalizeEmail(email);
+  if (!normalizedEmail) return { blocked: false, reason: null, domain: null };
+
+  const domain = normalizedEmail.split("@")[1]?.toLowerCase();
+  if (!domain) return { blocked: false, reason: null, domain: null };
+
+  // 1. Known disposable domain — checked first since it never needs DNS.
+  if (disposableDomains.has(domain)) {
+    return { blocked: true, reason: 'disposable_email_domain', domain };
+  }
+
+  // 2. MX / domain existence — fail OPEN on network uncertainty (timeouts,
+  // ECONNREFUSED, etc.) so a transient resolver hiccup never blocks a
+  // legitimate order. Only a definitive "domain does not exist" or
+  // "domain exists but accepts no mail" result blocks.
+  try {
+    const dnsResult = await checkDomainDNS(domain);
+
+    if (dnsResult.uncertain) {
+      return { blocked: false, reason: null, domain };
+    }
+    if (!dnsResult.exists) {
+      return { blocked: true, reason: 'no_mx_record', domain };
+    }
+    if (!dnsResult.hasMX) {
+      return { blocked: true, reason: 'no_mx_record', domain };
+    }
+  } catch (err) {
+    // checkDomainDNS() already catches internally and never rejects in
+    // practice, but fail open defensively in case that contract changes.
+    logger.error({ module: 'emailIntel', err: err.message, domain }, 'Hard-block DNS check error — failing open');
+  }
+
+  return { blocked: false, reason: null, domain };
+}
+
 // ─── Main: Get Email Intelligence ─────────────────────────────────────────
 // Returns full intelligence object with risk score + confidence + metadata
 
@@ -504,13 +565,13 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
   let domainPenalty = 0;
   if (!emailIntel.domainExists && !emailIntel.uncertain) {
     domainPenalty = 40;
-    flags.push({ severity: "critical", text: "Email domain does not exist — likely fake or throwaway email" });
+    flags.push({ severity: "critical", text: "email_domain_not_found" });
   } else if (!emailIntel.domainExists && emailIntel.uncertain) {
     domainPenalty = 5;
-    flags.push({ severity: "medium", text: "Email domain could not be verified — unconfirmed origin" });
+    flags.push({ severity: "medium", text: "email_domain_unverified" });
   } else if (!emailIntel.hasMX && !emailIntel.uncertain) {
     domainPenalty = 25;
-    flags.push({ severity: "high", text: "Email domain cannot receive emails — suspicious configuration" });
+    flags.push({ severity: "high", text: "email_domain_no_mx" });
   }
 
   // ── 2. Disposable Email ───────────────────────────────────────────────
@@ -518,7 +579,7 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
   // الـ penalty بيتضاف بس لو مفيش domain penalty (لمنع double counting)
   let disposablePenalty = 0;
   if (emailIntel.isDisposable) {
-    flags.push({ severity: "critical", text: `Disposable email domain (${emailIntel.domain}) — high fraud risk` });
+    flags.push({ severity: "critical", text: "disposable_email_domain" });
     if (domainPenalty === 0) {
       disposablePenalty = 35;
     }
@@ -533,12 +594,12 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
     if (topSignal) {
       const signalText =
         topSignal.type === "high_entropy_username"
-          ? `Username appears randomly generated (entropy: ${topSignal.entropy})`
+          ? "email_username_high_entropy"
           : topSignal.type === "high_risk_tld"
-          ? `High-risk email domain extension (.${topSignal.value})`
+          ? "email_high_risk_tld"
           : topSignal.type === "high_numeric_ratio"
-          ? `Email username is mostly numbers (${Math.round(parseFloat(topSignal.ratio) * 100)}%)`
-          : "Suspicious email pattern detected";
+          ? "email_high_numeric_ratio"
+          : "email_suspicious_pattern";
       flags.push({ severity: "medium", text: signalText });
     }
   }
@@ -551,7 +612,7 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
     freePenalty = 10;
     flags.push({
       severity: "medium",
-      text: `Free email provider with high-value first order ($${orderAmount.toFixed(0)}) — elevated risk`,
+      text: "free_provider_high_value_new_customer",
     });
   }
 
@@ -601,4 +662,5 @@ module.exports = {
   getEmailIntelligence,
   calculateEmailPenalty,
   invalidateEmailCache,
+  checkEmailHardBlock,
 };

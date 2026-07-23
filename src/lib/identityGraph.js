@@ -574,7 +574,18 @@ async function traverseFromDevice(deviceNode, maxDepth = MAX_DEPTH_MED) {
 // Called from riskScoring.js
 // Returns { connectedRisk, graphPath, hasConnections }
 
-async function getConnectedRisk(order, merchantId) {
+async function getConnectedRisk(order, merchantId, options = {}) {
+  // deviceTrustFactor (default 1.0 — fully backward compatible with every
+  // existing caller that doesn't pass options, e.g. risk.js's
+  // /check-device endpoint) dampens the FINAL propagated risk from this
+  // device's graph position when the fingerprint itself is unverified and
+  // uncorroborated by other signals. See riskScoring.js for how it's
+  // computed. Applied at the very end (alongside matchConfidence) rather
+  // than to individual node/edge weights, so it scales the same way a
+  // fuzzy hardware-tier match already does — a well-understood, already-
+  // reviewed dampening mechanism in this function, not a new concept.
+  const deviceTrustFactor = typeof options.deviceTrustFactor === 'number' ? options.deviceTrustFactor : 1.0;
+
   logger.debug(`[GRAPH] getConnectedRisk called. device: ${order?.deviceFingerprint || order?.deviceId}`);
   const deviceId = order.deviceFingerprint || order.deviceId;
 
@@ -834,7 +845,7 @@ async function getConnectedRisk(order, merchantId) {
     // hardware match (0.65) → 65% risk — نفس الـ hardware، مش متأكدين من الـ user
     // يمنع false positive: جهازين بنفس الـ hardware يعاقبوا بعض
     const rawRisk      = Math.min(connectedRisk + globalContribution, 100);
-    const adjustedRisk = Math.round(rawRisk * matchConfidence);
+    const adjustedRisk = Math.round(rawRisk * matchConfidence * deviceTrustFactor);
 
     if (matchTier !== "full") {
       logger.debug({ module: 'identityGraph', matchTier, matchConfidence, rawRisk, adjustedRisk }, 'Fuzzy match');

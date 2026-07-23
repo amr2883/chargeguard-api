@@ -5,7 +5,7 @@ const router  = express.Router();
 const db      = require('../lib/db');
 const logger  = require('../lib/logger');
 const { isAgency }       = require('../lib/planAccess');
-const { normalizeDomain, domainAuthMiddleware } = require('../lib/domainAuth');
+const { normalizeDomain, domainAuthMiddleware, domainAuthMiddlewareWithAutoRegister } = require('../lib/domainAuth');
 const { requireAuth }     = require('../middleware/authenticate');
 const verifyHmacSignature = require('../middleware/verifyHmac');
 
@@ -60,7 +60,7 @@ router.get('/', apiKeyAuth, domainAuthMiddleware, async (req, res) => {
 });
 
 // POST /api/stores — add (or reactivate) a store
-router.post('/', apiKeyAuth, requireAgency, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
+router.post('/', apiKeyAuth, requireAgency, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, async (req, res) => {
   try {
     const { storeUrl, label } = req.body;
     if (!storeUrl) {

@@ -64,6 +64,30 @@ class ChargeGuard_Dynamic_Firewall {
     const MAX_BLACKLIST_SIZE = 500;
 
     /**
+     * Merchant-configurable behavior when evaluate_risk() cannot reach the
+     * backend — whether because the circuit breaker is open, or because a
+     * single request failed/5xx'd (both mean "no authoritative decision is
+     * available" and are handled identically; see
+     * resolve_api_unavailable_decision()).
+     *
+     *   block_all    — fail-closed: no order proceeds while the API is down.
+     *   local_checks — semi-open (DEFAULT): local device blacklist + a hard
+     *                  per-IP rate limit that is only ever incremented while
+     *                  the API is unreachable. Anything that clears both is
+     *                  approved but flagged as degraded/unscored.
+     *   allow_all    — legacy behavior (approve everything). Only takes
+     *                  effect if API_DOWN_ALLOW_ALL_ACK_OPTION is also '1' —
+     *                  see resolve_api_unavailable_decision().
+     */
+    const API_DOWN_BEHAVIOR_OPTION      = 'chargeguard_api_down_behavior';
+    const API_DOWN_ALLOW_ALL_ACK_OPTION = 'chargeguard_api_down_allow_all_ack';
+    const API_DOWN_RATE_LIMIT_OPTION    = 'chargeguard_api_down_rate_limit';
+    const API_DOWN_RATE_LIMIT_TRANSIENT_PREFIX = 'cg_apidown_ip_';
+    const API_DOWN_RATE_LIMIT_WINDOW    = 300; // 5 minutes
+    const API_DOWN_RATE_LIMIT_DEFAULT_MAX = 3;
+    const API_DOWN_STATUS_OPTION        = 'chargeguard_api_down_status';
+
+    /**
      * Resolve the visitor's IP address.
      *
      * By default (chargeguard_trust_proxy_headers = 0) this ALWAYS returns
@@ -92,26 +116,58 @@ class ChargeGuard_Dynamic_Firewall {
      * @return string
      */
     public static function get_client_ip() {
-        if ( ! get_option( 'chargeguard_trust_proxy_headers', 0 ) ) {
-            return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
-        }
+    $mode = get_option( ChargeGuard_Trusted_Proxy::PROXY_MODE_OPTION, null );
 
-        if ( ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] ) ) {
-            $cf_ip = sanitize_text_field( wp_unslash( $_SERVER['HTTP_CF_CONNECTING_IP'] ) );
-            if ( rest_is_ip_address( $cf_ip ) ) {
-                return $cf_ip;
-            }
-        }
+    // Backward compat: existing installs have chargeguard_trust_proxy_headers
+    // but not the new mode option yet. Map the old boolean onto the new
+    // scheme ONCE via this fallback so already-configured stores keep
+    // working unchanged — they land in 'both' (the old behavior's superset)
+    // rather than being silently reset to 'off'.
+    if ( $mode === null ) {
+        $mode = get_option( 'chargeguard_trust_proxy_headers', 0 ) ? 'both' : 'off';
+    }
 
-        if ( class_exists( 'WC_Geolocation' ) ) {
+    $remote_addr = isset( $_SERVER['REMOTE_ADDR'] )
+        ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) )
+        : '';
+
+    if ( $mode === 'off' || $remote_addr === '' ) {
+        return $remote_addr;
+    }
+
+    // --- Cloudflare path: header is only trusted if REMOTE_ADDR (the
+    // actual TCP peer) is verified to be a Cloudflare edge IP. This is
+    // the fix for the toggle-on-but-unverified gap: presence/format of
+    // CF-Connecting-IP is no longer sufficient on its own. ---
+    if ( in_array( $mode, [ 'cloudflare', 'both' ], true )
+        && ! empty( $_SERVER['HTTP_CF_CONNECTING_IP'] )
+        && ChargeGuard_Trusted_Proxy::ip_in_any_cidr( $remote_addr, ChargeGuard_Trusted_Proxy::get_cf_ranges() )
+    ) {
+        $cf_ip = sanitize_text_field( wp_unslash( $_SERVER['HTTP_CF_CONNECTING_IP'] ) );
+        if ( rest_is_ip_address( $cf_ip ) ) {
+            return $cf_ip;
+        }
+    }
+
+    // --- Generic reverse proxy path: X-Forwarded-For (via WC_Geolocation's
+    // parser) is only trusted if REMOTE_ADDR is in the merchant's
+    // configured trusted-proxy CIDR list. No more "trust any hop simply
+    // because the toggle is on." ---
+    if ( in_array( $mode, [ 'custom', 'both' ], true ) ) {
+        $trusted_cidrs = ChargeGuard_Trusted_Proxy::get_custom_proxy_cidrs();
+        if ( ! empty( $trusted_cidrs )
+            && ChargeGuard_Trusted_Proxy::ip_in_any_cidr( $remote_addr, $trusted_cidrs )
+            && class_exists( 'WC_Geolocation' )
+        ) {
             $wc_ip = WC_Geolocation::get_ip_address();
             if ( ! empty( $wc_ip ) ) {
                 return $wc_ip;
             }
         }
-
-        return isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
     }
+
+    return $remote_addr;
+}
 
     
 
@@ -125,6 +181,32 @@ class ChargeGuard_Dynamic_Firewall {
      * @var string|null
      */
     private $pre_order_id = null;
+
+    /**
+     * The device fingerprint captured by intercept_checkout() for the
+     * current classic-checkout request, carried forward the same way as
+     * $pre_order_id so it can be persisted as order meta once the real
+     * order exists (see reconcile_pre_order_id()). This is what lets the
+     * Stripe/PayPal webhook handlers — which never see the checkout-time
+     * fingerprint cookie themselves — know which device to blacklist on a
+     * post-payment block or lost-dispute decision.
+     *
+     * @var string|null
+     */
+    private $pre_device_fp = null;
+
+    /**
+     * The server-signed device token (chargeguard_dt cookie) captured by
+     * intercept_checkout() for the current classic-checkout request,
+     * carried forward the same way as $pre_device_fp so it can be
+     * persisted as order meta once the real order exists (see
+     * reconcile_pre_order_id()). Blocks checkout doesn't need this — it
+     * persists the token directly in intercept_checkout_block() since it
+     * already has a real order at that point.
+     *
+     * @var string|null
+     */
+    private $pre_device_token = null;
 
     /**
      * تهيئة الخطافات المطلوبة.
@@ -154,6 +236,7 @@ class ChargeGuard_Dynamic_Firewall {
         // 4. خطاف لتسجيل بصمة ضارة
         add_action('chargeguard_mark_device_fraud', [$this, 'add_device_to_blacklist']);
         add_action('admin_notices', [$this, 'maybe_show_quota_exceeded_notice']);
+        add_action('admin_notices', [$this, 'maybe_show_api_down_notice']);
 
         // 4a. Webhook-path quota detection. The order.created webhook is
         // delivered by WooCommerce core's WC_Webhook::deliver() — not by
@@ -161,6 +244,11 @@ class ChargeGuard_Dynamic_Firewall {
         // never see its response. woocommerce_webhook_delivery is the only
         // point where this plugin's PHP can inspect that response body.
         add_action('woocommerce_webhook_delivery', [$this, 'maybe_flag_webhook_quota_exceeded'], 10, 5);
+
+        // 4b. Server-signed device token — issued as an HttpOnly cookie the
+        // client's own JavaScript cannot read or overwrite. See
+        // maybe_issue_device_token() below.
+        add_action('template_redirect', [$this, 'maybe_issue_device_token']);
 
         // 5. فحص المخاطر قبل معالجة الطلب
         add_action('woocommerce_checkout_process', [$this, 'intercept_checkout']);
@@ -209,7 +297,7 @@ class ChargeGuard_Dynamic_Firewall {
         } catch (ChargeGuard_Blocked_Exception $e) {
             wp_die(
                 $e->getMessage(),
-                esc_html__('تم تقييد الوصول', 'chargeguard-woocommerce'),
+                esc_html__('Access Restricted', 'chargeguard-woocommerce'),
                 ['response' => 403]
             );
         }
@@ -268,6 +356,74 @@ class ChargeGuard_Dynamic_Firewall {
     }
 
     /**
+     * Issues a server-signed device token (see
+     * ChargeGuard_API_Client::mint_device_token()) and stores it as an
+     * HttpOnly cookie, if the current visitor doesn't already have a
+     * valid one. Runs on template_redirect (before any output) rather
+     * than the later woocommerce_before_checkout_form hook used by
+     * check_device_blacklist(), because setcookie() must run before
+     * headers are sent.
+     *
+     * HttpOnly is the entire point: the browser will silently ignore any
+     * attempt by page JavaScript to set/overwrite a cookie of this name
+     * once it has been marked HttpOnly by the server, so a rotating
+     * attacker cannot simply replace this value the way chargeguard_fp
+     * can be replaced. A fresh token requires a new, authenticated,
+     * signed, rate-limited call to this method.
+     *
+     * Deliberately never blocks or delays checkout on failure — if the
+     * mint call fails (API unreachable, rate-limited, etc.), this
+     * silently no-ops and the existing unsigned chargeguard_fp signal is
+     * used exactly as before this feature existed. No new fail-open
+     * surface: the token is a corroborating signal that raises trust when
+     * present and valid, never a requirement whose absence lowers trust
+     * below today's baseline.
+     */
+    public function maybe_issue_device_token() {
+        if (!function_exists('is_checkout') || !is_checkout()) {
+            return;
+        }
+        if (!$this->api_client || !$this->api_client->get_api_key()) {
+            return;
+        }
+        if (!empty($_COOKIE['chargeguard_dt'])) {
+            return; // Already have one — not proactively rotated on every page view.
+        }
+
+        // Rate limit mint attempts per IP. A mint call is a signed,
+        // authenticated backend request — without this, repeatedly
+        // reloading checkout with cookies blocked/cleared could hammer
+        // the mint endpoint. This is a courtesy local limiter; the
+        // backend's own deviceTokenRateLimit (see risk.js) is the
+        // authoritative one.
+        $ip = self::get_client_ip();
+        $rl_key   = 'cg_dt_mint_rl_' . md5($ip !== '' ? $ip : 'unknown');
+        $rl_count = get_transient($rl_key);
+        if ($rl_count !== false && $rl_count >= 10) {
+            return; // Silently skip — falls back to the unsigned raw fingerprint only.
+        }
+        set_transient($rl_key, ($rl_count === false ? 1 : $rl_count + 1), 60);
+
+        $token = $this->api_client->mint_device_token($ip);
+        if (is_wp_error($token) || empty($token) || !is_string($token)) {
+            return; // Backend unreachable/failed — fall back to unsigned fp, unchanged behavior.
+        }
+
+        $secure = is_ssl();
+        setcookie('chargeguard_dt', $token, [
+            'expires'  => time() + (30 * DAY_IN_SECONDS),
+            'path'     => '/',
+            'secure'   => $secure,
+            'httponly' => true,
+            'samesite' => 'Lax',
+        ]);
+        // setcookie() only affects the NEXT request — make it available to
+        // the rest of THIS request too (mirrors PHP's own superglobal
+        // convention), in case a later hook in this same request wants it.
+        $_COOKIE['chargeguard_dt'] = $token;
+    }
+
+    /**
      * Log-only sanity check: does this fingerprint look like something
      * our own script actually generated (fp2_<64 hex chars> from
      * SHA-256, or fp1_<hex> from the legacy djb2 fallback), or does it
@@ -299,6 +455,15 @@ class ChargeGuard_Dynamic_Firewall {
      * @param string $fingerprint بصمة الجهاز.
      */
     public function add_device_to_blacklist($fingerprint) {
+        // Defense in depth: call sites already guard against empty/'unknown'
+        // fingerprints before firing chargeguard_mark_device_fraud, but this
+        // method is a public action callback — anything else that fires the
+        // action in the future must not be able to poison the blacklist with
+        // a junk key.
+        if (empty($fingerprint) || $fingerprint === 'unknown') {
+            return;
+        }
+
         $blacklist = get_option($this->blacklist_option, []);
         if (!is_array($blacklist)) {
             $blacklist = [];
@@ -349,6 +514,176 @@ class ChargeGuard_Dynamic_Firewall {
     }
 
     /**
+     * Central fallback decision, called by BOTH intercept_checkout() and
+     * intercept_checkout_block() whenever evaluate_risk() returns a
+     * WP_Error — whether that's because the circuit breaker is open
+     * (chargeguard_circuit_open) or a single request failed/5xx'd below
+     * the breaker's threshold. Both cases mean the same thing from a
+     * security standpoint — "no authoritative decision is available for
+     * this order" — and must never resolve to a silent, unconditional
+     * approval.
+     *
+     * @param string $device_fp Untrusted, client-supplied — see the
+     *                           trust-boundary warning at the top of this
+     *                           file. Used only as a cheap first-line
+     *                           heuristic here, exactly as elsewhere.
+     * @param string $ip
+     * @return array{decision:string, reason:string, local_block_type:?string}
+     *         decision is 'approve' or 'block'.
+     */
+    private function resolve_api_unavailable_decision($device_fp, $ip) {
+        $behavior = get_option(self::API_DOWN_BEHAVIOR_OPTION, 'local_checks');
+
+        // 'allow_all' requires a SEPARATE, explicit acknowledgment flag.
+        // Selecting it in the dropdown alone is not sufficient for a
+        // setting this dangerous — this also protects against the option
+        // being set directly via wp-cli/DB migration without ever going
+        // through the settings-page checkbox flow. Falls back to the safe
+        // default whenever the ack is missing.
+        if ($behavior === 'allow_all' && get_option(self::API_DOWN_ALLOW_ALL_ACK_OPTION, '0') !== '1') {
+            $behavior = 'local_checks';
+        }
+
+        if ($behavior === 'allow_all') {
+            return ['decision' => 'approve', 'reason' => 'api_unavailable_allow_all_configured', 'local_block_type' => null];
+        }
+
+        if ($behavior === 'block_all') {
+            return ['decision' => 'block', 'reason' => 'api_unavailable_fail_closed', 'local_block_type' => null];
+        }
+
+        // 'local_checks' — default / semi-open ------------------------------
+
+        // 1. Local device blacklist — cheap, already-loaded option, same
+        // data used by check_device_blacklist() / intercept_checkout_block().
+        if (!empty($device_fp)) {
+            $local_blacklist = get_option($this->blacklist_option, []);
+            if (is_array($local_blacklist) && isset($local_blacklist[$device_fp]) && $local_blacklist[$device_fp] > time()) {
+                return ['decision' => 'block', 'reason' => 'api_unavailable_local_blacklist', 'local_block_type' => 'blacklist'];
+            }
+        }
+
+        // 2. Hard per-IP rate limit. This counter is ONLY ever incremented
+        // from this method — i.e. only while the API is actually
+        // unreachable — so it specifically bounds how many unscored
+        // orders a single IP can push through during an outage or an
+        // attacker-forced breaker-open window, without adding any
+        // throttling to normal, healthy-API traffic.
+        if (!empty($ip)) {
+            $limit  = (int) apply_filters('chargeguard_api_down_rate_limit', (int) get_option(self::API_DOWN_RATE_LIMIT_OPTION, self::API_DOWN_RATE_LIMIT_DEFAULT_MAX));
+            $window = (int) apply_filters('chargeguard_api_down_rate_limit_window', self::API_DOWN_RATE_LIMIT_WINDOW);
+            $key    = self::API_DOWN_RATE_LIMIT_TRANSIENT_PREFIX . md5($ip);
+            $count  = (int) get_transient($key);
+            $count++;
+            set_transient($key, $count, $window);
+            if ($count > $limit) {
+                return ['decision' => 'block', 'reason' => 'api_unavailable_rate_limited', 'local_block_type' => 'velocity'];
+            }
+        }
+
+        // Neither local check tripped. The order proceeds, but the caller
+        // MUST still treat this as a degraded/unscored order — see
+        // notify_admin_api_unavailable() — so the merchant is never left
+        // unaware their store is running with reduced protection.
+        return ['decision' => 'approve', 'reason' => 'api_unavailable_local_checks_passed', 'local_block_type' => null];
+    }
+
+    /**
+     * Reports a block produced by resolve_api_unavailable_decision() to
+     * the backend's BlockedAttempt/dashboard reporting endpoint, so it
+     * counts toward attack alerts and reports exactly like a normal
+     * blacklist/velocity block. Fire-and-forget — see send_blocked_attempt().
+     *
+     * @param string $fingerprint
+     * @param string $ip
+     * @param string $type 'blacklist' or 'velocity' — matches
+     *                      resolve_api_unavailable_decision()'s
+     *                      local_block_type, mapped onto the backend's
+     *                      existing VALID_REASONS set (no new reason value
+     *                      is introduced server-side).
+     */
+    private function report_api_down_block($fingerprint, $ip, $type) {
+        if (!$this->api_client || !$this->api_client->get_api_key()) {
+            return;
+        }
+        if (!method_exists($this->api_client, 'send_blocked_attempt')) {
+            return;
+        }
+        $reason = ($type === 'blacklist') ? 'blacklist' : 'velocity';
+        $this->api_client->send_blocked_attempt([
+            'reason'            => $reason,
+            'ipHash'            => $ip !== '' ? hash('sha256', $ip) : null,
+            'deviceFingerprint' => $fingerprint,
+        ]);
+    }
+
+    /**
+     * Records that a fallback decision (block or degraded-approve) was
+     * applied because the API was unreachable, and throttles a
+     * merchant-visible admin notice about it. Mirrors the existing
+     * notify_admin_quota_exceeded() pattern — one option is the source of
+     * truth, read by maybe_show_api_down_notice() below, self-clearing
+     * after an hour of no further occurrences.
+     *
+     * @param string $reason One of resolve_api_unavailable_decision()'s reason strings.
+     */
+    private function notify_admin_api_unavailable($reason) {
+        $status = get_option(self::API_DOWN_STATUS_OPTION, []);
+        if (!is_array($status)) {
+            $status = [];
+        }
+        $window_start = isset($status['window_start']) ? (int) $status['window_start'] : 0;
+        $now = time();
+        if (!$window_start || ($now - $window_start) > HOUR_IN_SECONDS) {
+            $status = ['window_start' => $now, 'count' => 0];
+        }
+        $status['count']       = (isset($status['count']) ? (int) $status['count'] : 0) + 1;
+        $status['last_reason'] = $reason;
+        $status['last_at']     = $now;
+        update_option(self::API_DOWN_STATUS_OPTION, $status, false);
+
+        error_log('ChargeGuard: evaluate_risk unavailable — applied fallback decision (' . $reason . ').');
+    }
+
+    /**
+     * Admin-facing banner shown while (or shortly after) the store has
+     * been applying the API-unavailable fallback behavior, so the
+     * merchant always knows when and how their configured fallback mode
+     * has actually been exercised — not just that the circuit breaker
+     * exists in the abstract (see maybe_show_circuit_notice() in
+     * class-api-client.php for the breaker-state-specific notice).
+     */
+    public function maybe_show_api_down_notice() {
+        if (!is_admin() || !current_user_can('manage_woocommerce')) {
+            return;
+        }
+        $status = get_option(self::API_DOWN_STATUS_OPTION, []);
+        if (empty($status) || empty($status['last_at']) || (time() - (int) $status['last_at']) > HOUR_IN_SECONDS) {
+            return;
+        }
+        $behavior = get_option(self::API_DOWN_BEHAVIOR_OPTION, 'local_checks');
+        $mode_label = $behavior === 'block_all'
+            ? __('blocking all orders (fail-closed)', 'chargeguard-woocommerce')
+            : ($behavior === 'allow_all'
+                ? __('approving all orders unscored (fail-open — not recommended)', 'chargeguard-woocommerce')
+                : __('using local fallback checks (device blacklist + per-IP rate limit)', 'chargeguard-woocommerce'));
+        ?>
+        <div class="notice notice-warning">
+            <p>
+                <strong>ChargeGuard:</strong>
+                <?php
+                printf(
+                    esc_html__('The fraud-scoring API has been unreachable %1$d time(s) in the last hour. Your store is currently %2$s. Configure this under ChargeGuard → Firewall Settings.', 'chargeguard-woocommerce'),
+                    (int) ($status['count'] ?? 0),
+                    esc_html($mode_label)
+                );
+                ?>
+            </p>
+        </div>
+        <?php
+    }
+
+    /**
      * Detects quota exhaustion on the order.created webhook path. Unlike
      * intercept_checkout()/intercept_checkout_block(), this path has no
      * synchronous PHP hook — WooCommerce core is the HTTP client for
@@ -383,12 +718,17 @@ class ChargeGuard_Dynamic_Firewall {
         }
 
         $body = json_decode(wp_remote_retrieve_body($response), true);
-        if (!is_array($body) || empty($body['blocked_reason'])) {
+        if (!is_array($body)) {
             return;
         }
 
-        if ($body['blocked_reason'] === 'quota_exceeded' || $body['blocked_reason'] === 'pro_quota_exceeded') {
+        // Back-compat: older backend versions send 'blocked_reason' for a
+        // quota-exhausted evaluation; current versions send
+        // 'limitedScoring: true' instead, with no blocked_reason field.
+        if (!empty($body['blocked_reason']) && ($body['blocked_reason'] === 'quota_exceeded' || $body['blocked_reason'] === 'pro_quota_exceeded')) {
             $this->notify_admin_quota_exceeded($body['blocked_reason']);
+        } elseif (!empty($body['limitedScoring'])) {
+            $this->notify_admin_quota_exceeded('limited_scoring');
         }
     }
 
@@ -409,15 +749,23 @@ class ChargeGuard_Dynamic_Firewall {
         if ((time() - (int) $status['flagged_at']) > DAY_IN_SECONDS) {
             return;
         }
-        $reason = $status['reason'] ?? 'quota_exceeded';
-        $upgrade_hint = $reason === 'pro_quota_exceeded'
-            ? __('Your Pro plan\'s monthly protection limit (5,000 blocked attempts) has been reached — upgrade to Agency to restore protection.', 'chargeguard-woocommerce')
-            : __('Your Starter plan\'s monthly protection limit (500 blocked attempts) has been reached — upgrade to Pro to restore protection.', 'chargeguard-woocommerce');
+        $reason = $status['reason'] ?? 'limited_scoring';
+
+        if ($reason === 'pro_quota_exceeded') {
+            $upgrade_hint = __('Your Pro plan\'s monthly protection limit (5,000 blocked attempts) has been reached — upgrade to Agency to restore full protection.', 'chargeguard-woocommerce');
+        } elseif ($reason === 'quota_exceeded') {
+            $upgrade_hint = __('Your Starter plan\'s monthly protection limit (500 blocked attempts) has been reached — upgrade to Pro to restore full protection.', 'chargeguard-woocommerce');
+        } else {
+            // 'limited_scoring' — current backend versions no longer report
+            // which plan tier was exhausted in this signal, so the hint stays
+            // generic rather than guessing a plan name.
+            $upgrade_hint = __('Your ChargeGuard plan\'s monthly protection limit has been reached — upgrade your plan to restore full protection.', 'chargeguard-woocommerce');
+        }
         ?>
-        <div class="notice notice-error">
+        <div class="notice notice-warning">
             <p>
                 <strong>ChargeGuard:</strong>
-                <?php esc_html_e('Your store is currently UNPROTECTED — new orders are going through without fraud screening because your ChargeGuard plan limit was reached. This is not blocking checkouts, but it also means fraud will not be caught until you upgrade or your quota resets.', 'chargeguard-woocommerce'); ?>
+                <?php esc_html_e('Your fraud protection is currently running in a REDUCED mode. Device/IP blacklist checks, velocity limits, and card-testing (BIN sequence) detection are still active, but external IP, email, and BIN intelligence lookups are paused because your ChargeGuard plan limit was reached. Some fraud that only those deeper checks would catch may go through until you upgrade or your quota resets.', 'chargeguard-woocommerce'); ?>
                 <?php echo esc_html($upgrade_hint); ?>
             </p>
         </div>
@@ -451,6 +799,65 @@ class ChargeGuard_Dynamic_Firewall {
     }
 
     /**
+     * Canonical read accessor for an order's device fingerprint.
+     *
+     * `_chargeguard_device_fp` is the single canonical meta key going
+     * forward — written by intercept_checkout_block() (Blocks checkout)
+     * and reconcile_pre_order_id() (classic checkout), so it has full
+     * coverage of both checkout flows, unlike the now-removed
+     * `_chargeguard_device_fingerprint` (see chargeguard-woocommerce.php),
+     * which only ever populated for classic checkout since it relied on
+     * woocommerce_checkout_create_order — a hook Blocks/Store API
+     * checkout does not reliably fire.
+     *
+     * Falls back to the legacy key ONLY for orders created before this
+     * unification shipped. Nothing writes the legacy key anymore — this
+     * is a read-only, transitional compat shim, not an ongoing sync.
+     *
+     * @param int|WC_Order $order Order ID or object.
+     * @return string Empty string if neither key is populated.
+     */
+    public static function get_order_device_fp($order) {
+        $order = is_a($order, 'WC_Order') ? $order : wc_get_order($order);
+        if (!$order) {
+            return '';
+        }
+        $fp = $order->get_meta('_chargeguard_device_fp');
+        if (!empty($fp)) {
+            return $fp;
+        }
+        // Legacy fallback — pre-unification classic-checkout orders only.
+        return (string) $order->get_meta('_chargeguard_device_fingerprint');
+    }
+
+    /**
+     * Canonical read accessor for an order's server-signed device token.
+     *
+     * `_chargeguard_device_token` is written by intercept_checkout_block()
+     * (Blocks checkout) and reconcile_pre_order_id() (classic checkout) —
+     * same coverage pattern as get_order_device_fp() above. Unlike the
+     * fingerprint, there is no legacy predecessor key to fall back to:
+     * the device-token feature was introduced with this single key from
+     * the start, so this is a plain accessor, not a compat shim.
+     *
+     * Used by chargeguard_add_fingerprint_to_webhook_payload() (see
+     * chargeguard-woocommerce.php) to inject `device_token` into the
+     * WooCommerce REST webhook payload, so /woocommerce-webhook on the
+     * backend can verify it exactly as /evaluate and /enrich already do.
+     *
+     * @param int|WC_Order $order Order ID or object.
+     * @return string Empty string if no token was ever issued/persisted
+     *                for this order.
+     */
+    public static function get_order_device_token($order) {
+        $order = is_a($order, 'WC_Order') ? $order : wc_get_order($order);
+        if (!$order) {
+            return '';
+        }
+        return (string) $order->get_meta('_chargeguard_device_token');
+    }
+
+    /**
      * إيقاف عرض الصفحة مع رسالة شفافة.
      */
     private function block_access($fingerprint = '') {
@@ -459,7 +866,7 @@ class ChargeGuard_Dynamic_Firewall {
         }
 
         throw new ChargeGuard_Blocked_Exception(
-            esc_html__('نعتذر، لا يمكن معالجة طلبك في الوقت الحالي. يرجى التواصل مع الدعم.', 'chargeguard-woocommerce')
+            esc_html__('Sorry, we are unable to process your request at this time. Please contact support.', 'chargeguard-woocommerce')
         );
     }
 
@@ -582,6 +989,15 @@ class ChargeGuard_Dynamic_Firewall {
             }
         }
 
+        // Blocks checkout already has a real, persisted order at this point
+        // (unlike classic checkout, which needs reconcile_pre_order_id()).
+        // Persist the fingerprint now so post-payment webhook handlers can
+        // resolve it later regardless of what evaluate_risk() below decides.
+        if (!empty($device_fp) && $device_fp !== 'unknown') {
+            $order->update_meta_data('_chargeguard_device_fp', $device_fp);
+            $order->save_meta_data();
+        }
+
         if (!$this->api_client || !$this->api_client->get_api_key()) {
             return;
         }
@@ -598,11 +1014,28 @@ class ChargeGuard_Dynamic_Firewall {
         // never a throwaway one. Using it directly means this evaluation
         // is correlatable with later dispute/feedback events with no
         // separate reconciliation step needed.
+        // HttpOnly — never touched or overwritten by client JS, unlike
+        // chargeguard_fp. Absent for un-upgraded installs or visitors who
+        // loaded checkout before maybe_issue_device_token() could mint one
+        // (e.g. first request in a session) — the backend treats a missing
+        // token as 'unsigned', identical to today's behavior.
+        $device_token = isset($_COOKIE['chargeguard_dt']) ? sanitize_text_field(wp_unslash($_COOKIE['chargeguard_dt'])) : '';
+
+        // Persist the checkout-time device token onto the real order (Blocks
+        // checkout already has a real, persisted order at this point) so
+        // post-payment webhook handlers can thread it into /enrich the same
+        // way /evaluate already receives it above.
+        if (!empty($device_token)) {
+            $order->update_meta_data('_chargeguard_device_token', $device_token);
+            $order->save_meta_data();
+        }
+
         $order_data = [
             'orderId' => (string) $order->get_id(),
             'email' => $email,
             'ipAddress' => $ip,
             'deviceFingerprint' => $device_fp,
+            'deviceToken' => $device_token,
             'amount' => (float)$amount,
             'billingCountry' => $billing_country,
             'shippingCountry' => $shipping_country,
@@ -612,21 +1045,62 @@ class ChargeGuard_Dynamic_Firewall {
         $result = $this->api_client->evaluate_risk($order_data);
 
         if (is_wp_error($result)) {
+            // Was previously: `return;` — an unconditional, silent
+            // fail-open. This is the exploitable bypass: an attacker who
+            // forces the circuit breaker open (or even a single failed
+            // request) could walk through unscored. Both circuit-open and
+            // single-request-failure cases arrive here identically and are
+            // now routed through the merchant's configured fallback.
+            $fallback = $this->resolve_api_unavailable_decision($device_fp, $ip);
+            $this->notify_admin_api_unavailable($fallback['reason']);
+
+            if ($fallback['decision'] === 'block') {
+                if ($fallback['local_block_type']) {
+                    $this->report_api_down_block($device_fp, $ip, $fallback['local_block_type']);
+                }
+
+                $message = __('Sorry, your order cannot be processed at this time. Please try again shortly.', 'chargeguard-woocommerce');
+
+                if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                    throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                        'chargeguard_order_blocked_api_unavailable',
+                        $message,
+                        400
+                    );
+                }
+                throw new \Exception($message);
+            }
+
+            // Fallback resolved to 'approve' (local_checks mode, cleared
+            // both local checks; or allow_all, explicitly acknowledged).
+            // The order proceeds, already flagged above as degraded/unscored.
             return;
         }
 
         $decision = isset($result['decision']) ? $result['decision'] : '';
         $blocked_reason = isset($result['blocked_reason']) ? $result['blocked_reason'] : '';
+        $limited_scoring = !empty($result['limitedScoring']);
 
-        // Quota-exhausted orders now come back as decision: 'approve' with
-        // scored: false — the order is allowed through unscreened, not
-        // blocked. We never throw here; we only flag the admin that
-        // protection is currently degraded for this store.
+        // Quota-exhausted orders now come back as decision: 'approve' — the
+        // order is allowed through, and cheap detectors (blacklist,
+        // velocity, BIN-sequence) still ran; only external IP/email/BIN
+        // intelligence was skipped. We never throw here; we only flag the
+        // admin that protection is currently degraded for this store.
+        //
+        // Back-compat: older backend versions send 'blocked_reason' for
+        // this state; current versions send 'limitedScoring: true' with
+        // no blocked_reason at all. Check both.
         if ($blocked_reason === 'quota_exceeded' || $blocked_reason === 'pro_quota_exceeded') {
             $this->notify_admin_quota_exceeded($blocked_reason);
+        } elseif ($limited_scoring) {
+            $this->notify_admin_quota_exceeded('limited_scoring');
         }
 
         if ($decision === 'block') {
+            if (!empty($device_fp) && $device_fp !== 'unknown') {
+                do_action('chargeguard_mark_device_fraud', $device_fp, 'chargeguard_api_block');
+            }
+
             $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');
 
             if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
@@ -666,13 +1140,18 @@ class ChargeGuard_Dynamic_Firewall {
         // in the same request. Track this ID on the instance so
         // reconcile_pre_order_id() can send it to the backend once the real
         // order exists.
-        $this->pre_order_id = 'pre_' . uniqid('', true);
+        $this->pre_order_id  = 'pre_' . uniqid('', true);
+        $this->pre_device_fp = $device_fp;
+
+        $device_token = isset($_COOKIE['chargeguard_dt']) ? sanitize_text_field(wp_unslash($_COOKIE['chargeguard_dt'])) : '';
+        $this->pre_device_token = $device_token;
 
         $order_data = [
             'orderId'         => $this->pre_order_id,
             'email'           => $email,
             'ipAddress'       => $ip,
             'deviceFingerprint' => $device_fp,
+            'deviceToken'     => $device_token,
             'amount'          => (float)$amount,
             'billingCountry'  => $billing_country,
             'shippingCountry' => $shipping_country,
@@ -681,9 +1160,30 @@ class ChargeGuard_Dynamic_Firewall {
 
         $result = $this->api_client->evaluate_risk($order_data);
 
-        // إذا فشل الاتصال، نترك الطلب يمر لأسباب أمان
+        // Was previously: log and unconditionally let the order pass
+        // ("لأسباب أمان" / "for safety reasons") — that was the
+        // exploitable bypass. Now routed through the same fallback logic
+        // as Blocks checkout (see intercept_checkout_block()), so both
+        // checkout flows behave identically when the API is unreachable.
         if (is_wp_error($result)) {
             error_log('ChargeGuard API error: ' . $result->get_error_code());
+
+            $fallback = $this->resolve_api_unavailable_decision($device_fp, $ip);
+            $this->notify_admin_api_unavailable($fallback['reason']);
+
+            if ($fallback['decision'] === 'block') {
+                if ($fallback['local_block_type']) {
+                    $this->report_api_down_block($device_fp, $ip, $fallback['local_block_type']);
+                }
+                $message = __('Sorry, your order cannot be processed at this time. Please try again shortly.', 'chargeguard-woocommerce');
+                wc_add_notice($message, 'error');
+            }
+
+            // Whether blocked (wc_add_notice('error') above halts
+            // woocommerce_checkout_process the same way the existing
+            // decision === 'block' branch below does) or approved
+            // (local_checks/allow_all resolved to approve), there is
+            // nothing further to score for this request.
             return;
         }
 
@@ -693,18 +1193,36 @@ class ChargeGuard_Dynamic_Firewall {
 
         $decision = isset($result['decision']) ? $result['decision'] : '';
         $blocked_reason = isset($result['blocked_reason']) ? $result['blocked_reason'] : '';
+        $limited_scoring = !empty($result['limitedScoring']);
 
-        // Quota-exhausted orders come back as decision: 'approve',
-        // scored: false — the customer's checkout proceeds unscreened.
-        // We still flag the merchant that protection is degraded, but we
-        // do not add a customer-facing error notice for this case.
+        // Quota-exhausted orders come back as decision: 'approve' — the
+        // customer's checkout proceeds, and cheap detectors (blacklist,
+        // velocity, BIN-sequence) still ran; only external IP/email/BIN
+        // intelligence was skipped. We still flag the merchant that
+        // protection is degraded, but we do not add a customer-facing
+        // error notice for this case.
+        //
+        // Back-compat: older backend versions send 'blocked_reason' for
+        // this state; current versions send 'limitedScoring: true' with
+        // no blocked_reason at all. Check both.
         if ($blocked_reason === 'quota_exceeded' || $blocked_reason === 'pro_quota_exceeded') {
             $this->notify_admin_quota_exceeded($blocked_reason);
+        } elseif ($limited_scoring) {
+            $this->notify_admin_quota_exceeded('limited_scoring');
         }
 
         // حظر الطلب إذا كان القرار "block" لأسباب فعلية غير الكوتا
         if ($decision === 'block') {
-            $message = __('نعتذر، لا يمكن معالجة طلبك حاليًا. يرجى المحاولة لاحقًا.', 'chargeguard-woocommerce');
+            // Activate the local firewall: a confirmed block decision from
+            // the authoritative /risk/evaluate call is exactly the signal
+            // that should populate the local device blacklist, so this
+            // device is stopped at the PHP level on its next attempt
+            // without needing another API round-trip.
+            if (!empty($device_fp) && $device_fp !== 'unknown') {
+                do_action('chargeguard_mark_device_fraud', $device_fp, 'chargeguard_api_block');
+            }
+
+            $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');
             wc_add_notice($message, 'error');
         }
     }
@@ -733,6 +1251,23 @@ class ChargeGuard_Dynamic_Firewall {
         // original pre-order evaluation ID even if the reconciliation
         // call itself failed or the backend is unreachable.
         $order->update_meta_data('_chargeguard_pre_order_id', $this->pre_order_id);
+
+        // Persist the checkout-time device fingerprint onto the real order
+        // so post-payment webhook handlers (Stripe/PayPal), which never see
+        // the fingerprint cookie themselves, can still resolve which device
+        // to blacklist on a later block or dispute decision.
+        if (!empty($this->pre_device_fp) && $this->pre_device_fp !== 'unknown') {
+            $order->update_meta_data('_chargeguard_device_fp', $this->pre_device_fp);
+        }
+
+        // Same rationale as _chargeguard_device_fp above: post-payment
+        // webhook handlers (Stripe/PayPal) never see the chargeguard_dt
+        // cookie themselves, so it has to be persisted here to be usable
+        // by /enrich later.
+        if (!empty($this->pre_device_token)) {
+            $order->update_meta_data('_chargeguard_device_token', $this->pre_device_token);
+        }
+
         $order->save_meta_data();
 
         $this->api_client->reconcile_order($this->pre_order_id, $order->get_id());
@@ -741,6 +1276,8 @@ class ChargeGuard_Dynamic_Firewall {
         // instances across requests in some server configs (e.g. certain
         // persistent PHP setups), so this must not leak into an unrelated
         // later request.
-        $this->pre_order_id = null;
+        $this->pre_order_id     = null;
+        $this->pre_device_fp    = null;
+        $this->pre_device_token = null;
     }
 }
