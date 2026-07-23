@@ -54,12 +54,6 @@ app.use(morgan('dev', {
 }));
 
 const path = require('path');
-app.use(express.static(path.join(__dirname, 'public')));
-
-// Periodic replay of PayPal/Stripe post-payment enrichments that arrived
-// before their backend Order row existed — see jobs/replayPendingEnrichments.js.
-require('./jobs/replayPendingEnrichments').start();
-
 const riskRoutes      = require('./routes/risk');
 const authRoutes      = require('./routes/auth');
 const adminRoutes     = require('./routes/admin');
@@ -80,6 +74,7 @@ app.use('/admin', (req, res, next) => {
   next();
 }, adminRoutes);
 
+app.use(express.static(path.join(__dirname, 'public')));
 // ?? Global error handler ? MUST be after all routes ??????????
 app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
