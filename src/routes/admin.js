@@ -154,71 +154,28 @@ const authAdmin = (req, res, next) => {
 
   if (!secret) {
     recordFailedAttempt(ip);
-    return setTimeout(() => res.status(401).send('Unauthorized'), 200);
+    return res.status(401).send('Unauthorized');
   }
 
-  (async () => {
-    try {
-      // 1. Per-agent key lookup — the new multi-key path.
-      const keyHash = hashAdminKey(secret);
-      const adminUser = keyHash ? await db.adminUser.findUnique({ where: { keyHash } }) : null;
+  if (!expected) {
+    console.error('[Admin] ADMIN_SECRET is not set in environment variables');
+    return res.status(503).send('Service Unavailable');
+  }
 
-      if (adminUser) {
-        if (!adminUser.isActive) {
-          recordFailedAttempt(ip);
-          console.warn(`[Admin] deactivated admin user attempted access: ${adminUser.id} (${adminUser.name})`);
-          return setTimeout(() => res.status(401).send('Unauthorized'), 200);
-        }
+  const a = Buffer.from(secret, 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  const valid = a.length === b.length && crypto.timingSafeEqual(a, b);
 
-        // Readonly enforcement at the middleware level: readonly users may
-        // only reach GET routes (dashboard, orders, config, audit log).
-        if (adminUser.role === 'readonly' && req.method !== 'GET') {
-          return res.status(403).json({
-            success: false,
-            code: 'READONLY_FORBIDDEN',
-            message: 'Read-only admin users cannot perform this action',
-          });
-        }
+  if (!valid) {
+    recordFailedAttempt(ip);
+    const rec = attempts.get(ip);
+    console.warn(`[Admin] failed access attempt from ${ip} (${rec.count}/${MAX_TRIES})`);
+    return res.status(401).send('Unauthorized');
+  }
 
-        attempts.delete(ip);
-        req.adminUser = { id: adminUser.id, name: adminUser.name, role: adminUser.role };
-
-        // Best-effort — never blocks the request on failure.
-        db.adminUser
-          .update({ where: { id: adminUser.id }, data: { lastUsedAt: new Date() } })
-          .catch((err) => console.error('[Admin] lastUsedAt update failed:', err.message));
-
-        return next();
-      }
-
-      // 2. Bootstrap fallback — the original shared-secret comparison.
-      // Kept working indefinitely per requirements, but logged so reliance
-      // on it stays visible as the team migrates to personal keys.
-      if (!expected) {
-        console.error('[Admin] ADMIN_SECRET غير مضبوط في متغيرات البيئة');
-        return res.status(503).send('Service Unavailable');
-      }
-
-      const a = Buffer.from(secret ?? '', 'utf8');
-      const b = Buffer.from(expected, 'utf8');
-      const valid = a.length === b.length && crypto.timingSafeEqual(a, b);
-
-      if (!valid) {
-        recordFailedAttempt(ip);
-        const rec = attempts.get(ip);
-        console.warn(`[Admin] محاولة وصول فاشلة من ${ip} (${rec.count}/${MAX_TRIES})`);
-        return setTimeout(() => res.status(401).send('Unauthorized'), 200);
-      }
-
-      console.warn(`[Admin] bootstrap ADMIN_SECRET used from ${ip} — did not match any AdminUser. Consider issuing this caller a personal key via scripts/manage-admins.js.`);
-      attempts.delete(ip);
-      req.adminUser = null; // no per-agent identity — logAdminAction records adminUserId = null
-      next();
-    } catch (err) {
-      console.error('[Admin] auth error:', err.message);
-      res.status(500).send('Internal Server Error');
-    }
-  })();
+  attempts.delete(ip);
+  req.adminUser = null;
+  next();
 };
 
 // ── بناء صفحة HTML ───────────────────────────────────────────
