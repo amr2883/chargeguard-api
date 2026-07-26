@@ -1,4 +1,4 @@
-﻿<?php
+<?php
 /**
  * Plugin Name: ChargeGuard for WooCommerce
  * Description: Advanced Card Testing prevention powered by ChargeGuard intelligence.
@@ -71,7 +71,7 @@ require_once __DIR__ . '/includes/class-stripe-webhook.php';
 require_once __DIR__ . '/includes/class-paypal-webhook.php';
 require_once __DIR__ . '/includes/class-trusted-proxy.php';
 require_once __DIR__ . '/includes/class-dynamic-firewall.php';
-require_once __DIR__ . '/includes/class-remote-config.php';
+
 require_once __DIR__ . '/includes/class-privacy.php';
 require_once __DIR__ . '/includes/class-plugin-updater.php';
 
@@ -211,7 +211,7 @@ function chargeguard_init() {
     new ChargeGuard_Stripe_Webhook();
 new ChargeGuard_PayPal_Webhook();
     new ChargeGuard_Dynamic_Firewall();
-    new ChargeGuard_Remote_Config();
+    
     new ChargeGuard_Privacy();
     // Device-fingerprint order meta is now written solely by
     // ChargeGuard_Dynamic_Firewall (intercept_checkout_block() /
