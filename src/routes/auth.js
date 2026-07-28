@@ -26,15 +26,7 @@ const connectKeyAuth = requireAuth({
 // Used only by POST /connect-with-key below — needs storeUrl/allowedDomains
 // in addition to apiKeyAuth's fields, to support that route's domain-binding
 // logic on a successful connect.
-const connectKeyAuth = requireAuth({
-  id: true,
-  email: true,
-  isActive: true,
-  emailVerified: true,
-  storeUrl: true,
-  allowedDomains: true,
-  webhookSecret: true,
-});
+
 
 // ── IP Hashing (GDPR-safe) — same construction as routes/risk.js ────────────
 // M3 fix: fail closed, not open. A missing SECRET_SALT previously
