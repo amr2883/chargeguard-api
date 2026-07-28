@@ -10,6 +10,32 @@ const { requireAuth } = require('../middleware/authenticate');
 
 const apiKeyAuth = requireAuth({ id: true, email: true, isActive: true, emailVerified: true, webhookSecret: true });
 
+// Used only by POST /connect-with-key below — needs storeUrl/allowedDomains
+// in addition to apiKeyAuth's fields, to support that route's domain-binding
+// logic on a successful connect.
+const connectKeyAuth = requireAuth({
+  id: true,
+  email: true,
+  isActive: true,
+  emailVerified: true,
+  storeUrl: true,
+  allowedDomains: true,
+  webhookSecret: true,
+});
+
+// Used only by POST /connect-with-key below — needs storeUrl/allowedDomains
+// in addition to apiKeyAuth's fields, to support that route's domain-binding
+// logic on a successful connect.
+const connectKeyAuth = requireAuth({
+  id: true,
+  email: true,
+  isActive: true,
+  emailVerified: true,
+  storeUrl: true,
+  allowedDomains: true,
+  webhookSecret: true,
+});
+
 // ── IP Hashing (GDPR-safe) — same construction as routes/risk.js ────────────
 // M3 fix: fail closed, not open. A missing SECRET_SALT previously
 // silently degraded to a hardcoded, publicly-known salt, making hashed
@@ -459,6 +485,92 @@ router.get('/connect/status', connectStatusRateLimit, async (req, res) => {
   } catch (err) {
     logger.error({ module: 'auth', error: err.message }, 'Connect status poll error');
     return res.status(200).json({ status: 'pending' });
+  }
+});
+
+/**
+ * POST /api/auth/connect-with-key
+ *
+ * Primary connect path for the WooCommerce plugin's settings page,
+ * replacing the emailed-confirmation-link UI for that specific screen.
+ * The merchant already holds a live API key — delivered by email only
+ * after verifying their address on the Landing Page (see /verify-email
+ * below) — and enters it directly here alongside their account email.
+ *
+ * Trust model: possession of the 256-bit API key is itself the proof of
+ * ownership. It is at least as strong a credential as clicking the
+ * emailed link /connect/confirm relies on, so no separate email round
+ * trip is required — connectKeyAuth (requireAuth) is the exact same
+ * centralized authentication check every other authenticated endpoint in
+ * this codebase already relies on (OWASP ASVS V4.1.1). This mirrors the
+ * H1 fix's underlying principle in /connect/confirm: domain binding
+ * (storeUrl/allowedDomains) is only ever written once real proof of
+ * possession has been established — here, that proof is authenticating
+ * successfully via connectKeyAuth below.
+ *
+ * SANCTIONED EXCEPTION (same category as GET /verify below): no
+ * verifyHmacSignature on this route. The plugin cannot compute an HMAC
+ * signature before this call succeeds — it does not have webhookSecret
+ * yet. Same chicken-and-egg constraint already documented above /verify.
+ *
+ * connectRateLimit is reused unchanged, sharing its per-IP attempt
+ * budget with the email-based /connect endpoint above — both are
+ * "connect family" actions, and one shared budget prevents an attacker
+ * from doubling their attempt allowance by switching endpoints.
+ *
+ * The email the merchant typed is NOT used for authentication and is
+ * never compared against tenant.email — a second, lower-entropy check
+ * would add no real security (the key alone is definitive) while
+ * creating a new enumeration oracle, conflicting with the
+ * anti-enumeration design already applied consistently elsewhere in this
+ * file. The authoritative tenant.email is returned instead, so the
+ * plugin always displays the real connected account regardless of what
+ * was typed.
+ */
+router.post('/connect-with-key', connectRateLimit, connectKeyAuth, async (req, res) => {
+  try {
+    const tenant = req.tenant;
+    const { siteUrl } = req.body || {};
+
+    let webhookSecret = tenant.webhookSecret;
+    if (!webhookSecret) {
+      webhookSecret = crypto.randomBytes(32).toString('hex');
+    }
+
+    // Same conditional-update shape as /connect's pendingStoreUrl staging
+    // above (see the H1 fix comment in /connect/confirm) — only touch
+    // storeUrl/allowedDomains if the merchant's current site actually
+    // differs from what's on file (first connect, or a site migration).
+    const domainUpdate = {};
+    if (siteUrl && siteUrl !== tenant.storeUrl) {
+      const { normalizeDomain } = require('../lib/domainAuth');
+      const normalized = normalizeDomain(siteUrl);
+      domainUpdate.storeUrl = siteUrl;
+      if (normalized) {
+        domainUpdate.allowedDomains = [normalized];
+      }
+    }
+
+    await db.tenant.update({
+      where: { id: tenant.id },
+      data: {
+        webhookSecret,
+        lastConnectVerifiedAt: new Date(),
+        ...domainUpdate,
+      },
+    });
+
+    logger.info({ module: 'auth', tenantId: tenant.id }, 'Store connected via direct API-key connect');
+
+    return res.status(200).json({
+      status:        'active',
+      merchantId:    tenant.id,
+      email:         tenant.email,
+      webhookSecret,
+    });
+  } catch (err) {
+    logger.error({ module: 'auth', error: err.message }, 'connect-with-key error');
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
