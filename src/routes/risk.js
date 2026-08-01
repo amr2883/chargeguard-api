@@ -433,23 +433,26 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
 
     // 0b. Blacklist Check
-    const blacklistCheck = await db.blacklistEntry.findFirst({
-      where: {
-        merchantId,
-        ...storeScope,
-        OR: [
-          { type: 'EMAIL', value: email },
-          { type: 'IP', value: ipAddress },
-          { type: 'DEVICE_FINGERPRINT', value: deviceFingerprint }
-        ],
-        AND: [
-          { OR: [
-            { expiresAt: null },
-            { expiresAt: { gt: new Date() } }
-          ] }
-        ]
-      }
-    });
+    const blacklistConditions = [];
+    if (email)             blacklistConditions.push({ type: 'EMAIL', value: email });
+    if (ipAddress)         blacklistConditions.push({ type: 'IP', value: ipAddress });
+    if (deviceFingerprint) blacklistConditions.push({ type: 'DEVICE_FINGERPRINT', value: deviceFingerprint });
+
+    const blacklistCheck = blacklistConditions.length > 0
+      ? await db.blacklistEntry.findFirst({
+          where: {
+            merchantId,
+            ...storeScope,
+            OR: blacklistConditions,
+            AND: [
+              { OR: [
+                { expiresAt: null },
+                { expiresAt: { gt: new Date() } }
+              ] }
+            ]
+          }
+        })
+      : null;
     if (blacklistCheck) {
       prometheus.recordBlacklistHit(blacklistCheck.type);
 
