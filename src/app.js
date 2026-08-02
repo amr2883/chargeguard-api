@@ -16,7 +16,16 @@ app.set('trust proxy', true);
 
 
 // Middlewares
-app.use(helmet());
+app.use((req, res, next) => {
+  if (req.path.startsWith('/admin')) {
+    // CSP disabled here only — the admin panel's inline <script> predates
+    // helmet's default policy, and this route is already protected by the
+    // x-admin-key header auth + per-IP rate limiting in routes/admin.js.
+    // Every other route keeps the full default helmet() policy unchanged.
+    return helmet({ contentSecurityPolicy: false })(req, res, next);
+  }
+  return helmet()(req, res, next);
+});
 app.use(cors());
 app.use(prometheus.httpMetricsMiddleware);
 let swaggerUi, swaggerSpec;
