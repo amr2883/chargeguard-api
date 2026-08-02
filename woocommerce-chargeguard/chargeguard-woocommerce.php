@@ -26,28 +26,14 @@ if (!defined('CHARGEGUARD_VERSION')) {
     unset($chargeguard_plugin_data);
 }
 
-/**
- * Cloudflare Turnstile site key used on the Connect flow (see
- * ChargeGuard_Admin_Settings::settings_page()). This is a PUBLIC value â€”
- * safe to ship in HTML â€” unlike chargeguard_api_key / webhook/signing
- * secrets, which are encrypted at rest via ChargeGuard_Secret_Crypto.
- *
- * It is intentionally NOT hardcoded here: Cloudflare issues a distinct
- * site key per registered site/environment (local, staging, production),
- * so the value must be overridable without touching plugin source.
- *
- * Override by adding this line to wp-config.php (above the
- * "That's all, stop editing!" comment):
- *   define('CHARGEGUARD_TURNSTILE_SITE_KEY', 'your_real_site_key_here');
- *
- * The default below is Cloudflare's published "always passes" test key,
- * so the Connect flow still functions on a fresh install before an
- * environment-specific key is configured. Replace it before go-live.
- * https://developers.cloudflare.com/turnstile/troubleshooting/testing/
- */
-if (!defined('CHARGEGUARD_TURNSTILE_SITE_KEY')) {
-    define('CHARGEGUARD_TURNSTILE_SITE_KEY', apply_filters('chargeguard_turnstile_site_key', '1x00000000000000000000AA'));
-}
+// Turnstile removed (2024 review): the plugin's Connect flow now
+// authenticates via a directly-entered API key (see
+// ChargeGuard_Admin_Settings::ajax_connect()), which is proof-of-possession
+// on its own — bot mitigation via Turnstile has no security value here.
+// Turnstile is still enforced server-side on the backend's email-based
+// /api/auth/connect endpoint (unused by this plugin now, kept for
+// possible future "forgot my key" recovery flows), so no security
+// coverage is lost anywhere by removing it from this file.
 
 /**
  * Optional: a dedicated encryption key for ChargeGuard's at-rest secret
