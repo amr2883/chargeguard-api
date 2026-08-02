@@ -1,4 +1,4 @@
-// @ts-nocheck
+﻿// @ts-nocheck
 'use strict';
 
 const express = require('express');
@@ -708,7 +708,7 @@ const buildHtml = (tenants, total, summary, activityMap, pauseInfo = { global: n
             const setKeyBtn = document.getElementById('setKeyBtn');
             if (setKeyBtn) {
               setKeyBtn.addEventListener('click', async () => {
-                const key = prompt('Paste the Remote Config Key from the merchant\'s ChargeGuard settings page:');
+                const key = prompt('Paste the Remote Config Key from the merchant\\'s ChargeGuard settings page:');
                 if (!key) return;
                 const res2 = await fetch('/admin/tenants/' + btn.dataset.id + '/config-key', {
                   method: 'POST',
