@@ -40,10 +40,7 @@ const { safeErrorPayload }                       = require('../lib/errorResponse
 // 3 months of Shield Pro at no cost." Applied at registration time only —
 // see /tenants/register below. EARLY_ACCESS_END_DATE is optional; if unset,
 // the promo has no cutoff and applies to every new registration.
-const EARLY_ACCESS_PROMO_DAYS = 90;
-const EARLY_ACCESS_END_DATE = process.env.EARLY_ACCESS_END_DATE
-  ? new Date(process.env.EARLY_ACCESS_END_DATE)
-  : null;
+// Early Access promo removed — every new registration starts free.
 
 // ── BIN Sequence Alert Persistence ───────────────────────────────────────
 const persistBinSequenceAlert = async (tenantId, bin, binSeq, storeId = null) => {
@@ -2603,21 +2600,12 @@ router.post('/tenants/register', async (req, res) => {
     // this registration is eligible for "3 months of Shield Pro at no
     // cost." Ineligible registrations (after the cutoff) fall back to the
     // pre-existing free early_access behavior — unchanged from today.
-    const isEarlyAccessEligible = !EARLY_ACCESS_END_DATE || new Date() <= EARLY_ACCESS_END_DATE;
-
-    const earlyAccessGrant = isEarlyAccessEligible
-      ? {
-          plan:                'pro',
-          subscriptionStatus:  'active',
-          subscriptionEndDate: new Date(Date.now() + EARLY_ACCESS_PROMO_DAYS * 24 * 60 * 60 * 1000),
-          billingCycle:        'early_access_promo',
-        }
-      : {
-          plan:                'early_access',
-          subscriptionStatus:  'free',
-          subscriptionEndDate: null,
-          billingCycle:        null,
-        };
+    const earlyAccessGrant = {
+      plan:                'starter',
+      subscriptionStatus:  'free',
+      subscriptionEndDate: null,
+      billingCycle:        null,
+    };
 
    const tenant = await db.tenant.create({
       data: {
