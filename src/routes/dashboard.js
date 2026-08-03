@@ -2538,7 +2538,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           '<div style="background:#1c0202;border:1px solid #ef4444;border-radius:var(--radius);padding:1.25rem 1.5rem;">' +
           '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.875rem;">' +
           '<span style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:#ef4444;">🚨 BIN Sequence Attack — Active</span>' +
-          '<span id="cg-bin-timer" style="font-size:.7rem;font-family:\'DM Mono\',monospace;color:#ef4444;background:#7f1d1d22;border:1px solid #7f1d1d;border-radius:20px;padding:.2rem .6rem;"></span>' +
+          '<span id="cg-bin-timer" style="font-size:.7rem;font-family:"DM Mono",monospace;color:#ef4444;background:#7f1d1d22;border:1px solid #7f1d1d;border-radius:20px;padding:.2rem .6rem;"></span>' +
           '</div>' +
           '<div style="font-size:.82rem;color:#fca5a5;line-height:1.6;margin-bottom:.875rem;">' +
           '<strong style="color:#fff;">BIN Prefix ' + escHtml(active.binPrefix) + 'xx</strong> — ' +
