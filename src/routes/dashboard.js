@@ -514,7 +514,7 @@ const riskBadge = (score) => {
               : score >= 60 ? 'High'
               : score >= 40 ? 'Medium'
               :               'Low';
-  return `<span style="background:${color}18;color:${color};border:1px solid ${color}44;border-radius:6px;padding:.2rem .55rem;font-size:.7rem;font-weight:600;font-family:'DM Mono',monospace;white-space:nowrap;" title="Risk Score: ${score}/100 — ${label}">${score} · ${label}</span>`;
+  return `<span style="background:${color}18;color:${color};border:1px solid ${color}44;border-radius:6px;padding:.2rem .55rem;font-size:.7rem;font-weight:600;font-family:"DM Mono",monospace;white-space:nowrap;" title="Risk Score: ${score}/100 — ${label}">${score} · ${label}</span>`;
 };
 
 const statusColor = { green: '#22c55e', yellow: '#f59e0b', gray: '#64748b', red: '#ef4444' };
@@ -889,7 +889,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       font-size: .62rem;
       color: var(--text-sub);
       height: 14px;
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
     }
     .bar-label {
       font-size: .6rem;
@@ -930,7 +930,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       border: 1px solid var(--border);
       border-radius: 20px;
       padding: .15rem .55rem;
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
     }
     table {
       width: 100%;
@@ -956,8 +956,8 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: rgba(255,255,255,.018); }
     .td-time   { color: var(--text-sub); font-size: .75rem; white-space: nowrap; }
-    .td-mono   { font-family: 'DM Mono', monospace; font-size: .75rem; color: var(--text-sub); }
-    .td-amount { font-family: 'DM Mono', monospace; font-size: .78rem; color: #4ade80; font-weight: 500; }
+    .td-mono   { font-family: "DM Mono", monospace; font-size: .75rem; color: var(--text-sub); }
+    .td-amount { font-family: "DM Mono", monospace; font-size: .78rem; color: #4ade80; font-weight: 500; }
 
     .badge {
       display: inline-flex;
@@ -1146,7 +1146,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       font-size: .88rem;
       font-weight: 700;
       color: var(--text);
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1200,7 +1200,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       font-size: .72rem;
       font-weight: 600;
       color: var(--text-sub);
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
     }
 
     /* ── Intelligence Feed ───────────────────────────────────── */
@@ -1261,7 +1261,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       font-size: .65rem;
       color: var(--text-dim);
       margin-top: .15rem;
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
     }
 
     /* ── BIN Panel ───────────────────────────────────────────── */
@@ -1440,7 +1440,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
     }
     .origin-count {
       font-size: .7rem;
-      font-family: 'DM Mono', monospace;
+      font-family: "DM Mono", monospace;
       color: var(--text-dim);
       flex-shrink: 0;
       width: 28px;
@@ -1768,7 +1768,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           border:1px solid #1e2d45;
           border-radius:20px;
           padding:.2rem .65rem;
-          font-family:'DM Mono',monospace;
+          font-family:"DM Mono",monospace;
         ">Last alert: ${escapeHtml(lastAlertStr)}</div>
       </div>
 
@@ -1868,7 +1868,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
         </span>
         <span style="
           font-size:.65rem;color:#1e3a5f;
-          font-family:'DM Mono',monospace;
+          font-family:"DM Mono",monospace;
         ">${pp.reportCount} weekly report${pp.reportCount !== 1 ? 's' : ''} generated</span>
       </div>
 
@@ -2473,7 +2473,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
     </div>
     <div style="padding:1.25rem 1.5rem;">
       <div style="display:flex;align-items:center;gap:.75rem;margin-bottom:1rem;">
-        <code id="apiKeyDisplay" style="font-family:'DM Mono',monospace;font-size:.8rem;color:var(--text-sub);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.5rem .875rem;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+        <code id="apiKeyDisplay" style="font-family:"DM Mono",monospace;font-size:.8rem;color:var(--text-sub);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.5rem .875rem;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
           ••••••••••••••••••••••••••••••••••••••••••••
         </code>
         <button onclick="toggleKey()" id="toggleBtn" style="padding:.45rem .9rem;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text-sub);font-size:.75rem;cursor:pointer;">Show</button>
@@ -2758,15 +2758,15 @@ async function buildReportsArchiveSection(tenantId, plan) {
         <div style="flex:1;display:grid;grid-template-columns:repeat(3,1fr);gap:.5rem;">
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Attacks</div>
-            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:'DM Mono',monospace;">${isLocked ? '•••' : r.totalAttacks.toLocaleString('en-US')}</div>
+            <div style="font-size:.85rem;font-weight:700;color:var(--text);font-family:"DM Mono",monospace;">${isLocked ? '•••' : r.totalAttacks.toLocaleString('en-US')}</div>
           </div>
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Protected</div>
-            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:'DM Mono',monospace;">${isLocked ? '•••' : fmtUsd(r.totalProtected)}</div>
+            <div style="font-size:.85rem;font-weight:700;color:#4ade80;font-family:"DM Mono",monospace;">${isLocked ? '•••' : fmtUsd(r.totalProtected)}</div>
           </div>
           <div>
             <div style="font-size:.6rem;color:var(--text-dim);text-transform:uppercase;letter-spacing:.06em;">Fees Saved</div>
-            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:'DM Mono',monospace;">${isLocked ? '•••' : fmtUsd(r.totalFeesSaved)}</div>
+            <div style="font-size:.85rem;font-weight:700;color:#60a5fa;font-family:"DM Mono",monospace;">${isLocked ? '•••' : fmtUsd(r.totalFeesSaved)}</div>
           </div>
         </div>
 
