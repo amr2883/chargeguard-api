@@ -2068,13 +2068,12 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           if (!data.orders.length) {
             rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">No orders found</div>';
           } else {
-            rowsEl.innerHTML = data.orders.map(o => `
-              <div class="feed-item" style="padding:.6rem 0;">
-                <div class="feed-body">
-                  <div class="feed-text"><strong>#${o.orderId}</strong> — ${o.email || '—'} — $${o.amount.toFixed(2)} — ${o.decision || '—'}</div>
-                  <div class="feed-meta">${new Date(o.createdAt).toLocaleString()}</div>
-                </div>
-              </div>`).join('');
+            rowsEl.innerHTML = data.orders.map(function(o) { return '<div class="feed-item" style="padding:.6rem 0;">' +
+                '<div class="feed-body">' +
+                  '<div class="feed-text"><strong>#' + o.orderId + '</strong> — ' + (o.email || '—') + ' — $' + o.amount.toFixed(2) + ' — ' + (o.decision || '—') + '</div>' +
+                  '<div class="feed-meta">' + new Date(o.createdAt).toLocaleString() + '</div>' +
+                '</div>' +
+              '</div>'; }).join('');
           }
           document.getElementById('cg-orders-count').textContent = data.total + ' total';
           document.getElementById('cg-orders-page-info').textContent =
