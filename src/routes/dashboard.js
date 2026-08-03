@@ -2122,6 +2122,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
         }
       }
 
+      window._loadOrders = loadOrders;
       loadOrders();
     })();
   </script>
@@ -2659,6 +2660,9 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
         if (res.ok) {
           showMsg('✅ ' + data.message, '#16a34a');
           _key = data.newApiKey;
+          if (typeof window._loadOrders === 'function') {
+            window._loadOrders();
+          }
           document.getElementById('apiKeyDisplay').textContent = data.newApiKey;
           _visible = true;
           document.getElementById('toggleBtn').textContent = 'Hide';
