@@ -2046,7 +2046,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
       async function loadOrders() {
         const rowsEl = document.getElementById('cg-orders-rows');
-        if (!_key) {
+        if (typeof _key === 'undefined' || !_key) {
           rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">Click "Rotate Key" above to load live order data for this session.</div>';
           return;
         }
@@ -2092,7 +2092,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
         const exportBtn = document.getElementById('cg-orders-export');
         if (exportBtn) {
           exportBtn.addEventListener('click', () => {
-            if (!_key) {
+            if (typeof _key === 'undefined' || !_key) {
               showMsg('⚠️ Rotate your key first to enable export this session.', '#f59e0b');
               return;
             }
