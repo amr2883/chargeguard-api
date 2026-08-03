@@ -2057,7 +2057,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           orderId: document.getElementById('cg-orders-id').value || '',
         });
         try {
-          const res = await fetch('/api/dashboard/orders?' + params.toString(), {
+          const res = await fetch(API_BASE + '/api/dashboard/orders?' + params.toString(), {
             headers: { 'X-Api-Key': _key }
           });
           const data = await res.json();
@@ -2100,7 +2100,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
               email: document.getElementById('cg-orders-email').value || '',
               orderId: document.getElementById('cg-orders-id').value || '',
             });
-            fetch('/api/dashboard/orders/export.csv?' + params.toString(), {
+            fetch(API_BASE + '/api/dashboard/orders/export.csv?' + params.toString(), {
               headers: { 'X-Api-Key': _key }
             }).then(async (res) => {
               if (!res.ok) {
@@ -2498,6 +2498,12 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
     // successful rotation response below, and is discarded on page reload.
     let _key = null;
     let _visible = false;
+    // Dashboard HTML is served through WordPress admin-post.php, so the
+    // page's origin is the merchant's WP site — NOT this API. Every fetch()
+    // below must therefore target the API's absolute origin explicitly,
+    // otherwise the browser resolves the relative path against WordPress
+    // and gets a 404 from WP, not from this server.
+    const API_BASE = 'https://chargeguard-api.onrender.com';
 
     // ── BIN Sequence Polling ──────────────────────────────────────────
     let _binPollingId   = null;
@@ -2595,7 +2601,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
     async function fetchBINAlerts() {
       try {
-        const res  = await fetch('/api/dashboard/bin-sequence-alerts', {
+        const res  = await fetch(API_BASE + '/api/dashboard/bin-sequence-alerts', {
           headers: { 'X-Api-Key': _key }
         });
         const data = await res.json();
@@ -2652,7 +2658,7 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       btn.disabled = true;
       btn.textContent = 'Rotating...';
       try {
-        const res = await fetch('/api/dashboard/rotate-key', {
+        const res = await fetch(API_BASE + '/api/dashboard/rotate-key', {
           method: 'POST',
           headers: { 'X-Api-Key': _key }
         });
