@@ -2018,6 +2018,115 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
     </div>`;
   })()}
 
+  <!-- ── Orders Panel ── -->
+  <div id="cg-orders-panel" style="margin-bottom:1.5rem;">
+    <div class="tbl-wrap">
+      <div class="tbl-header">
+        <span class="tbl-title">📋 Orders</span>
+        <span class="tbl-count" id="cg-orders-count">—</span>
+        ${isProOrAbove(tenant.plan) ? `<button id="cg-orders-export" style="margin-left:auto;padding:.35rem .75rem;background:var(--surface2);border:1px solid var(--border);border-radius:6px;color:var(--text-sub);font-size:.7rem;cursor:pointer;">⬇ Export CSV</button>` : ''}
+      </div>
+      <div style="padding:.75rem 1.25rem;display:flex;gap:.5rem;flex-wrap:wrap;">
+        <input type="text" id="cg-orders-email" placeholder="Search by email..." style="flex:1;min-width:160px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;color:var(--text);font-size:.78rem;"/>
+        <input type="text" id="cg-orders-id" placeholder="Order ID" style="width:120px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:.4rem .6rem;color:var(--text);font-size:.78rem;"/>
+        <button id="cg-orders-filter-btn" style="padding:.4rem .9rem;background:var(--accent-dim);border:1px solid var(--accent);border-radius:6px;color:#93c5fd;font-size:.78rem;cursor:pointer;">Filter</button>
+      </div>
+      <div id="cg-orders-rows" class="feed-list" style="padding:0 1.25rem 1rem;">
+        <div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">Loading…</div>
+      </div>
+      <div id="cg-orders-page-info" style="padding:.5rem 1.25rem 1rem;font-size:.7rem;color:var(--text-dim);"></div>
+      ${!isProOrAbove(tenant.plan) ? `<div style="padding:.75rem 1.25rem;border-top:1px solid var(--border2);font-size:.75rem;color:var(--text-sub);">Showing last 7 days only. <a href="mailto:support@chargeguard.io?subject=Upgrade to Pro" style="color:#93c5fd;">Upgrade to Pro</a> for a 90-day searchable history + CSV export.</div>` : ''}
+    </div>
+  </div>
+
+  <script>
+    (function() {
+      const CG_IS_PRO = ${isProOrAbove(tenant.plan) ? 'true' : 'false'};
+      let ordersState = { page: 1, limit: CG_IS_PRO ? 20 : 10 };
+
+      async function loadOrders() {
+        const rowsEl = document.getElementById('cg-orders-rows');
+        if (!_key) {
+          rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">Click "Rotate Key" above to load live order data for this session.</div>';
+          return;
+        }
+        const params = new URLSearchParams({
+          page: ordersState.page,
+          limit: ordersState.limit,
+          email: document.getElementById('cg-orders-email').value || '',
+          orderId: document.getElementById('cg-orders-id').value || '',
+        });
+        try {
+          const res = await fetch('/api/dashboard/orders?' + params.toString(), {
+            headers: { 'X-Api-Key': _key }
+          });
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            rowsEl.innerHTML = '<div style="text-align:center;color:var(--red);font-size:.78rem;padding:1rem;">' + (data.message || 'Failed to load orders') + '</div>';
+            return;
+          }
+          if (!data.orders.length) {
+            rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">No orders found</div>';
+          } else {
+            rowsEl.innerHTML = data.orders.map(o => `
+              <div class="feed-item" style="padding:.6rem 0;">
+                <div class="feed-body">
+                  <div class="feed-text"><strong>#${o.orderId}</strong> — ${o.email || '—'} — $${o.amount.toFixed(2)} — ${o.decision || '—'}</div>
+                  <div class="feed-meta">${new Date(o.createdAt).toLocaleString()}</div>
+                </div>
+              </div>`).join('');
+          }
+          document.getElementById('cg-orders-count').textContent = data.total + ' total';
+          document.getElementById('cg-orders-page-info').textContent =
+            'Page ' + data.page + ' · showing last ' + data.windowDays + ' days';
+        } catch (e) {
+          rowsEl.innerHTML = '<div style="text-align:center;color:var(--red);font-size:.78rem;padding:1rem;">Network error</div>';
+        }
+      }
+
+      document.getElementById('cg-orders-filter-btn').addEventListener('click', () => {
+        ordersState.page = 1;
+        loadOrders();
+      });
+
+      if (CG_IS_PRO) {
+        const exportBtn = document.getElementById('cg-orders-export');
+        if (exportBtn) {
+          exportBtn.addEventListener('click', () => {
+            if (!_key) {
+              showMsg('⚠️ Rotate your key first to enable export this session.', '#f59e0b');
+              return;
+            }
+            const params = new URLSearchParams({
+              email: document.getElementById('cg-orders-email').value || '',
+              orderId: document.getElementById('cg-orders-id').value || '',
+            });
+            fetch('/api/dashboard/orders/export.csv?' + params.toString(), {
+              headers: { 'X-Api-Key': _key }
+            }).then(async (res) => {
+              if (!res.ok) {
+                const data = await res.json().catch(() => ({}));
+                showMsg('❌ ' + (data.message || 'Export failed'), '#ef4444');
+                return;
+              }
+              const blob = await res.blob();
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = 'chargeguard-orders.csv';
+              document.body.appendChild(a);
+              a.click();
+              a.remove();
+              URL.revokeObjectURL(url);
+            });
+          });
+        }
+      }
+
+      loadOrders();
+    })();
+  </script>
+
   <!-- ── BIN Sequence Alert Panel ── -->
   <div id="cg-bin-seq-panel" style="margin-bottom:1.5rem;">
     ${(() => {
@@ -2999,5 +3108,159 @@ const LAYER_NAMES = {
   2: 'Sequential Card Scan — Brute Force',
   3: 'Distributed Multi-Source Attack',
 };
+
+// ── Layer 3: dedicated limiter for the CSV export specifically ──────────
+const EXPORT_MAX_REQ = 5;
+const exportRateLimit = makeRateLimiter((req) => req.tenant?.id ?? req.ip ?? 'unknown', EXPORT_MAX_REQ);
+
+// ── GET /dashboard/orders — merchant-facing paginated order log ──────────
+router.get('/orders', tenantRateLimit, authByApiKey, async (req, res) => {
+  try {
+    const tenant = req.tenant;
+    const isPro = isProOrAbove(tenant.plan);
+
+    const { storeId, invalid } = await resolveRequestedStoreId(req);
+    if (invalid) {
+      return res.status(400).json({ success: false, code: 'INVALID_STORE', message: 'Invalid storeId' });
+    }
+    const storeScope = storeId ? { storeId } : {};
+
+    const FREE_WINDOW_DAYS = 7;
+    const PRO_WINDOW_DAYS  = 90;
+    const FREE_MAX_LIMIT   = 20;
+    const PRO_MAX_LIMIT    = 100;
+
+    const windowDays = isPro ? PRO_WINDOW_DAYS : FREE_WINDOW_DAYS;
+    const maxLimit   = isPro ? PRO_MAX_LIMIT   : FREE_MAX_LIMIT;
+
+    const page   = Math.max(1, parseInt(req.query.page, 10) || 1);
+    const limit  = Math.min(maxLimit, Math.max(1, parseInt(req.query.limit, 10) || 20));
+    const offset = (page - 1) * limit;
+
+    const earliestAllowed = new Date(Date.now() - windowDays * 24 * 60 * 60 * 1000);
+
+    const where = {
+      merchantId: tenant.id,
+      ...storeScope,
+      createdAt: { gte: earliestAllowed },
+    };
+
+    if (req.query.email) {
+      where.email = { contains: String(req.query.email).trim(), mode: 'insensitive' };
+    }
+    if (req.query.orderId) {
+      where.orderId = { contains: String(req.query.orderId).trim() };
+    }
+    if (req.query.decision && ['approve', 'review', 'block'].includes(req.query.decision)) {
+      where.decision = req.query.decision;
+    }
+
+    const [orders, total] = await Promise.all([
+      prisma.order.findMany({
+        where,
+        orderBy: { createdAt: 'desc' },
+        skip: offset,
+        take: limit,
+        select: {
+          orderId:   true,
+          email:     true,
+          amount:    true,
+          currency:  true,
+          riskScore: true,
+          riskLevel: true,
+          decision:  true,
+          createdAt: true,
+        },
+      }),
+      prisma.order.count({ where }),
+    ]);
+
+    res.setHeader('Cache-Control', 'no-store');
+    res.json({
+      success: true,
+      plan: tenant.plan,
+      windowDays,
+      total,
+      page,
+      limit,
+      orders,
+      ...(isPro ? {} : {
+        upgradeHint: `Free plan shows the last ${FREE_WINDOW_DAYS} days. Upgrade to Pro for a searchable ${PRO_WINDOW_DAYS}-day history and CSV export.`,
+      }),
+    });
+  } catch (err) {
+    logger.error?.({ module: 'dashboard', endpoint: 'orders', error: err.message }, 'Orders fetch failed');
+    res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
+  }
+});
+
+// ── GET /dashboard/orders/export.csv — Pro-only CSV export ───────────────
+router.get('/orders/export.csv', authByApiKey, exportRateLimit, async (req, res) => {
+  try {
+    const tenant = req.tenant;
+    if (!isProOrAbove(tenant.plan)) {
+      return res.status(403).json({
+        success: false,
+        code: 'PRO_REQUIRED',
+        message: 'CSV export is a Pro feature. Upgrade to export your order history.',
+      });
+    }
+
+    const { storeId, invalid } = await resolveRequestedStoreId(req);
+    if (invalid) {
+      return res.status(400).json({ success: false, code: 'INVALID_STORE', message: 'Invalid storeId' });
+    }
+    const storeScope = storeId ? { storeId } : {};
+
+    const PRO_WINDOW_DAYS = 90;
+    const earliestAllowed = new Date(Date.now() - PRO_WINDOW_DAYS * 24 * 60 * 60 * 1000);
+
+    const where = {
+      merchantId: tenant.id,
+      ...storeScope,
+      createdAt: { gte: earliestAllowed },
+    };
+    if (req.query.email)   where.email   = { contains: String(req.query.email).trim(), mode: 'insensitive' };
+    if (req.query.orderId) where.orderId = { contains: String(req.query.orderId).trim() };
+    if (req.query.decision && ['approve', 'review', 'block'].includes(req.query.decision)) {
+      where.decision = req.query.decision;
+    }
+
+    const MAX_EXPORT_ROWS = 5000;
+
+    const orders = await prisma.order.findMany({
+      where,
+      orderBy: { createdAt: 'desc' },
+      take: MAX_EXPORT_ROWS,
+      select: {
+        orderId: true, email: true, amount: true, currency: true,
+        riskScore: true, riskLevel: true, decision: true, createdAt: true,
+      },
+    });
+
+    const escapeCsv = (val) => {
+      if (val === null || val === undefined) return '';
+      const s = String(val);
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+    };
+
+    const header = ['Order ID', 'Email', 'Amount', 'Currency', 'Risk Score', 'Risk Level', 'Decision', 'Created At (UTC)'];
+    const rows = orders.map(o => [
+      o.orderId, o.email ?? '', o.amount, o.currency,
+      o.riskScore ?? '', o.riskLevel ?? '', o.decision ?? '',
+      o.createdAt.toISOString(),
+    ].map(escapeCsv).join(','));
+
+    const csv = [header.join(','), ...rows].join('\n');
+
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="chargeguard-orders-${new Date().toISOString().slice(0,10)}.csv"`);
+    res.setHeader('Cache-Control', 'no-store');
+    res.status(200).send(csv);
+  } catch (err) {
+    logger.error?.({ module: 'dashboard', endpoint: 'orders-export', error: err.message }, 'CSV export failed');
+    res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
+  }
+});
 
 module.exports = router;
