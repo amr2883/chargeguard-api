@@ -393,6 +393,19 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
     logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
 
+    // ── زيادة العداد الشهري لكل طلب تقييم جديد (بدون الطلبات المخبأة) ──
+    try {
+      await db.tenant.update({
+        where: { id: merchantId },
+        data:  { monthlyBlockedCount: { increment: 1 } },
+      });
+    } catch (counterErr) {
+      logger.error(
+        { module: 'risk', endpoint: 'evaluate', tenantId: merchantId, error: counterErr.message },
+        'Failed to increment monthlyBlockedCount'
+      );
+    }  
+
     // 0a. Whitelist Check — bypass all checks for trusted entities
     const whitelistConditions = [];
     if (email)             whitelistConditions.push({ type: 'EMAIL', value: email });
