@@ -2046,7 +2046,8 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
       async function loadOrders() {
         const rowsEl = document.getElementById('cg-orders-rows');
-        if (typeof _key === 'undefined' || !_key) {
+        const useProxy = typeof window.cgWP !== 'undefined';
+        if (!useProxy && (typeof _key === 'undefined' || !_key)) {
           rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">Click "Rotate Key" above to load live order data for this session.</div>';
           return;
         }
@@ -2057,8 +2058,11 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           orderId: document.getElementById('cg-orders-id').value || '',
         });
         try {
-          const res = await fetch(API_BASE + '/api/dashboard/orders?' + params.toString(), {
-            headers: { 'X-Api-Key': _key }
+          const url = useProxy
+            ? window.cgWP.ajaxUrl + '?action=chargeguard_dashboard_read&endpoint=orders&' + params.toString() + '&nonce=' + window.cgWP.nonce
+            : API_BASE + '/api/dashboard/orders?' + params.toString();
+          const res = await fetch(url, {
+            headers: useProxy ? {} : { 'X-Api-Key': _key }
           });
           const data = await res.json();
           if (!res.ok || !data.success) {
@@ -2092,7 +2096,8 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
         const exportBtn = document.getElementById('cg-orders-export');
         if (exportBtn) {
           exportBtn.addEventListener('click', () => {
-            if (typeof _key === 'undefined' || !_key) {
+            const useProxy = typeof window.cgWP !== 'undefined';
+            if (!useProxy && (typeof _key === 'undefined' || !_key)) {
               showMsg('⚠️ Rotate your key first to enable export this session.', '#f59e0b');
               return;
             }
@@ -2100,8 +2105,11 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
               email: document.getElementById('cg-orders-email').value || '',
               orderId: document.getElementById('cg-orders-id').value || '',
             });
-            fetch(API_BASE + '/api/dashboard/orders/export.csv?' + params.toString(), {
-              headers: { 'X-Api-Key': _key }
+            const exportUrl = useProxy
+              ? window.cgWP.ajaxUrl + '?action=chargeguard_dashboard_read&endpoint=orders/export.csv&' + params.toString() + '&nonce=' + window.cgWP.nonce
+              : API_BASE + '/api/dashboard/orders/export.csv?' + params.toString();
+            fetch(exportUrl, {
+              headers: useProxy ? {} : { 'X-Api-Key': _key }
             }).then(async (res) => {
               if (!res.ok) {
                 const data = await res.json().catch(() => ({}));
@@ -2601,8 +2609,12 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
     async function fetchBINAlerts() {
       try {
-        const res  = await fetch(API_BASE + '/api/dashboard/bin-sequence-alerts', {
-          headers: { 'X-Api-Key': _key }
+        const useProxy = typeof window.cgWP !== 'undefined';
+        const url = useProxy
+          ? window.cgWP.ajaxUrl + '?action=chargeguard_dashboard_read&endpoint=bin-sequence-alerts&nonce=' + window.cgWP.nonce
+          : API_BASE + '/api/dashboard/bin-sequence-alerts';
+        const res  = await fetch(url, {
+          headers: useProxy ? {} : { 'X-Api-Key': _key }
         });
         const data = await res.json();
         if (data.success) {
@@ -2658,12 +2670,17 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       btn.disabled = true;
       btn.textContent = 'Rotating...';
       try {
-        const res = await fetch(API_BASE + '/api/dashboard/rotate-key', {
+        const useProxy = typeof window.cgWP !== 'undefined';
+        const url = useProxy
+          ? window.cgWP.ajaxUrl + '?action=chargeguard_rotate_key&nonce=' + window.cgWP.nonce
+          : API_BASE + '/api/dashboard/rotate-key';
+        const res = await fetch(url, {
           method: 'POST',
-          headers: { 'X-Api-Key': _key }
+          headers: useProxy ? {} : { 'X-Api-Key': _key }
         });
-        const data = await res.json();
-        if (res.ok) {
+        const raw = await res.json();
+        const data = useProxy ? (raw.data || raw) : raw;
+        if (res.ok && (useProxy ? raw.success !== false : true)) {
           showMsg('✅ ' + data.message, '#16a34a');
           _key = data.newApiKey;
           if (typeof window._loadOrders === 'function') {
