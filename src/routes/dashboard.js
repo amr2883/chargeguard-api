@@ -2072,12 +2072,21 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
           if (!data.orders.length) {
             rowsEl.innerHTML = '<div style="text-align:center;color:var(--text-dim);font-size:.78rem;padding:1rem;">No orders found</div>';
           } else {
-            rowsEl.innerHTML = data.orders.map(function(o) { return '<div class="feed-item" style="padding:.6rem 0;">' +
+            var cgDecisionMeta = {
+              approve: { icon: '✅', label: 'Fraud Check Passed', color: '#4ade80' },
+              review:  { icon: '🔍', label: 'Manual Review',      color: '#fbbf24' },
+              block:   { icon: '🚫', label: 'Blocked',            color: '#f87171' }
+            };
+            rowsEl.innerHTML = data.orders.map(function(o) {
+              var dm = cgDecisionMeta[o.decision] || { icon: '—', label: o.decision || '—', color: 'var(--text-sub)' };
+              var decisionHtml = '<span style="color:' + dm.color + ';font-weight:600;">' + dm.icon + ' ' + dm.label + '</span>';
+              return '<div class="feed-item" style="padding:.6rem 0;">' +
                 '<div class="feed-body">' +
-                  '<div class="feed-text"><strong>#' + o.orderId + '</strong> — ' + (o.email || '—') + ' — $' + o.amount.toFixed(2) + ' — ' + (o.decision || '—') + '</div>' +
+                  '<div class="feed-text"><strong>#' + o.orderId + '</strong> — ' + (o.email || '—') + ' — $' + o.amount.toFixed(2) + ' — ' + decisionHtml + '</div>' +
                   '<div class="feed-meta">' + new Date(o.createdAt).toLocaleString() + '</div>' +
                 '</div>' +
-              '</div>'; }).join('');
+              '</div>';
+            }).join('');
           }
           document.getElementById('cg-orders-count').textContent = data.total + ' total';
           document.getElementById('cg-orders-page-info').textContent =
