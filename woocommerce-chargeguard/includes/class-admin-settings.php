@@ -464,6 +464,8 @@ class ChargeGuard_Admin_Settings {
         add_action('wp_ajax_chargeguard_store_deactivate',      [$this, 'ajax_store_deactivate']);
         add_action('wp_ajax_chargeguard_store_reactivate',      [$this, 'ajax_store_reactivate']);
         add_action('wp_ajax_chargeguard_check_for_updates',     [$this, 'ajax_check_for_updates']);
+        add_action('wp_ajax_chargeguard_rotate_key',            [$this, 'ajax_rotate_key']);
+        add_action('wp_ajax_chargeguard_dashboard_read',        [$this, 'ajax_dashboard_read']);
         add_action('admin_post_chargeguard_view_dashboard',     [$this, 'render_dashboard_page']);
 
         // Align the Settings API's save-time capability check with the
@@ -705,6 +707,95 @@ class ChargeGuard_Admin_Settings {
      * own <html>/<head>) meant to render standalone, exactly like it does
      * when accessed directly on the backend.
      */
+    public function ajax_rotate_key() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+        $response = wp_remote_post('https://chargeguard-api.onrender.com/api/dashboard/rotate-key', [
+            'timeout' => 20,
+            'headers' => ['X-Api-Key' => $api_key],
+        ]);
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+        $code = wp_remote_retrieve_response_code($response);
+        $body = json_decode(wp_remote_retrieve_body($response), true);
+        if ($code !== 200) {
+            wp_send_json_error(['message' => $body['error'] ?? 'Rotation failed.']);
+        }
+        update_option('chargeguard_api_key', sanitize_text_field($body['newApiKey']));
+        wp_send_json_success([
+            'newApiKey' => $body['newApiKey'],
+            'message'   => $body['message'] ?? 'API key rotated successfully.',
+        ]);
+    }
+
+    /**
+     * Generic read-only proxy for bin-sequence-alerts / orders /
+     * orders/export.csv — same rationale as ajax_rotate_key(): the
+     * merchant's browser never needs the raw X-Api-Key. Shares the
+     * read-only chargeguard_connect_nonce since every endpoint here is a
+     * side-effect-free GET.
+     */
+    public function ajax_dashboard_read() {
+        check_ajax_referer('chargeguard_connect_nonce', 'nonce');
+        if (!current_user_can('manage_woocommerce')) {
+            wp_send_json_error(['message' => 'Unauthorized'], 403);
+        }
+
+        $allowed  = ['bin-sequence-alerts', 'orders', 'orders/export.csv'];
+        $endpoint = isset($_GET['endpoint']) ? sanitize_text_field(wp_unslash($_GET['endpoint'])) : '';
+        if (!in_array($endpoint, $allowed, true)) {
+            wp_send_json_error(['message' => 'Invalid endpoint'], 400);
+        }
+
+        $api_key = chargeguard_get_secret_option('chargeguard_api_key');
+        if (!$api_key) {
+            wp_send_json_error(['message' => 'Store not connected.']);
+        }
+
+        $qs = [];
+        foreach (['page', 'limit', 'email', 'orderId', 'storeId'] as $p) {
+            if (isset($_GET[$p])) {
+                $qs[$p] = sanitize_text_field(wp_unslash($_GET[$p]));
+            }
+        }
+        $url = 'https://chargeguard-api.onrender.com/api/dashboard/' . $endpoint;
+        if ($qs) {
+            $url .= '?' . http_build_query($qs);
+        }
+
+        $response = wp_remote_get($url, [
+            'timeout' => 20,
+            'headers' => ['X-Api-Key' => $api_key],
+        ]);
+
+        if (is_wp_error($response)) {
+            wp_send_json_error(['message' => 'Could not reach ChargeGuard server.']);
+        }
+
+        $code = wp_remote_retrieve_response_code($response);
+        $body = wp_remote_retrieve_body($response);
+
+        if ($endpoint === 'orders/export.csv') {
+            status_header($code ?: 500);
+            header('Content-Type: text/csv; charset=utf-8');
+            header('Content-Disposition: attachment; filename="chargeguard-orders.csv"');
+            echo $body;
+            exit;
+        }
+
+        status_header($code ?: 500);
+        header('Content-Type: application/json');
+        echo $body;
+        exit;
+    }
+
     public function render_dashboard_page() {
         if (!current_user_can('manage_woocommerce')) {
             wp_die(esc_html__('Unauthorized', 'chargeguard-woocommerce'), '', ['response' => 403]);
@@ -740,6 +831,12 @@ class ChargeGuard_Admin_Settings {
         header('Content-Type: text/html; charset=utf-8');
         header('Cache-Control: no-store');
         header('X-Robots-Tag: noindex, nofollow');
+        $injected = '<script>window.cgWP = ' . wp_json_encode([
+            'ajaxUrl' => admin_url('admin-ajax.php'),
+            'nonce'   => wp_create_nonce('chargeguard_connect_nonce'),
+        ]) . ';</script></head>';
+        $body = str_replace('</head>', $injected, $body);
+
         // phpcs:ignore WordPress.Security.EscapeOutput -- trusted same-account
         // ChargeGuard backend response; user-controlled fields inside it are
         // already HTML-escaped server-side (see escapeHtml() in dashboard.js).
