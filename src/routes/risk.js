@@ -393,18 +393,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
     logger.debug({ module: 'risk', orderId, bin, deviceFingerprint, merchantId }, 'Received evaluate request');
 
-    // ── زيادة العداد الشهري لكل طلب تقييم جديد (بدون الطلبات المخبأة) ──
-    try {
-      await db.tenant.update({
-        where: { id: merchantId },
-        data:  { monthlyBlockedCount: { increment: 1 } },
-      });
-    } catch (counterErr) {
-      logger.error(
-        { module: 'risk', endpoint: 'evaluate', tenantId: merchantId, error: counterErr.message },
-        'Failed to increment monthlyBlockedCount'
-      );
-    }  
+      
 
     // 0a. Whitelist Check — bypass all checks for trusted entities
     const whitelistConditions = [];
@@ -964,10 +953,21 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
     // ������� connectedRisk ������ �� ����� Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
-   // تسجيل المحاولة الفاشلة عند block
-    if (response.decision === 'block') {
+   // تسجيل المحاولة لتغذية checkVelocity() لاحقًا — على أي قرار مش approve
+    // (يعني review أو block)، مش block بس. لو سجّلنا بس لما القرار يبقى
+    // 'block'، أي نمط هجوم بيفضل عالق عند 'review' (بالظبط زي هجوم
+    // الاختبار الحقيقي) مش هيغذي CardTestAttempt أبداً، وcheckVelocity()
+    // تفضل عمياء عنه للأبد. التوسيع لـ 'review' يقفل الحلقة الدائرية من
+    // غير ما نسجل كل أوردر approve عادي (الأغلبية الساحقة من الترافيك)،
+    // فحجم الجدول يفضل متحكم فيه ومناسب لمدة الاحتفاظ 60 يوم.
+    if (response.decision !== 'approve') {
       recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, storeId: storeScope.storeId ?? null, amount: amount || 0 });
+    }
 
+    // تسجيل الـ BlockedAttempt/quota — يفضل مربوط بـ block فقط عمدًا (مش
+    // review)، لأنه عداد فوترة/تقرير فعلي لعدد "الهجمات المحجوبة"، ومش
+    // المفروض يتوسع زي تسجيل الـ velocity فوق.
+    if (response.decision === 'block') {
       // ── Quota Counter: coupled to the enforcement decision ─────────────
       // BlockedAttempt logging + monthlyBlockedCount increment happen here,
       // atomically, because this is the authoritative point where the block

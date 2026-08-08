@@ -635,6 +635,25 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     topSignals.push({ type: "IP_VELOCITY", value: ipVelocityCount, contribution: -ipVelocityPenalty });
   }
 
+  // ─── Sustained IP Burst — Critical Override ───────────────────────────
+  // ip_velocity_high above is capped at "high" severity no matter how
+  // large ipVelocityCount gets, and the Risk Floor further below caps the
+  // score at 55/70 whenever ANY "high" flag is present — meaning a
+  // sustained burst from one IP can never, on its own, cross into "Block"
+  // as long as the attacker rotates deviceFingerprint/email per attempt
+  // (exactly what device_velocity_blocked's own critical threshold of
+  // devVelocityCount >= 3 otherwise incentivizes an attacker to do).
+  // IP address is the hardest of the three identifiers (device, email, IP)
+  // for an attacker to rotate on every single attempt — it requires a new
+  // proxy/exit node, not just a new cookie or random string — so once the
+  // count is high enough, it is treated as a definitive signal on its own,
+  // independent of whether device/email signals were successfully evaded.
+  if (ipVelocityCount >= 10) {
+    score -= 50;
+    flags.push({ severity: "critical", text: "sustained_ip_burst" });
+    topSignals.push({ type: "IP_BURST", value: ipVelocityCount, contribution: -50 });
+  }
+
   // Email velocity penalty
   if (emailVelocityCount >= 3) {
     const emailVelocityPenalty = Math.min(Math.round(12 * Math.log2(emailVelocityCount + 1)), 30);
