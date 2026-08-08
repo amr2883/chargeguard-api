@@ -2964,6 +2964,29 @@ router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthM
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+// ── TEMP DEBUG — احذف هذا البلوك بالكامل بعد الانتهاء من الاختبار ──
+router.get('/debug-quota/:tenantId', async (req, res) => {
+  if (req.query.secret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const tenant = await db.tenant.findUnique({
+    where: { id: req.params.tenantId },
+    select: { email: true, monthlyBlockedCount: true, quotaResetDate: true },
+  });
+  res.json(tenant);
+});
+
+router.post('/debug-reset-quota/:tenantId', async (req, res) => {
+  if (req.query.secret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'forbidden' });
+  }
+  const updated = await db.tenant.update({
+    where: { id: req.params.tenantId },
+    data: { monthlyBlockedCount: 0 },
+  });
+  res.json(updated);
+});
+// ── END TEMP DEBUG ──
 
 module.exports = router;
 
