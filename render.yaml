@@ -6,7 +6,7 @@ services:
     branch: master
     dockerContext: .
     dockerfilePath: ./Dockerfile
-    dockerCommand: "node src/app.js"
+    dockerCommand: "node src/server.js"
     envVars:
       - key: DATABASE_URL
         sync: false
