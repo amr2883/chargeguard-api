@@ -133,9 +133,11 @@ app.get('/api/cleanup-now', async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-});
-
+// app.js intentionally does NOT call app.listen(). This file only builds
+// and exports the configured Express app. The single, authoritative entry
+// point that starts the HTTP server AND registers every scheduler
+// (monthlyReportScheduler, subscriptionScheduler, etc.) is src/server.js.
+// Calling listen() here too previously caused a duplicate bind attempt on
+// the same port within the same process — visible in production logs as
+// the "Server running" line printing twice.
 module.exports = app;
