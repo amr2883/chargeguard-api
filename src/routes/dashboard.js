@@ -4,6 +4,7 @@ const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
+const { getProtectionStatus } = require('../lib/protectionStatus');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
 const { isProOrAbove, isAgency } = require('../lib/planAccess');
@@ -143,6 +144,11 @@ const { requireAuth } = require('../middleware/authenticate');
 const authByApiKey = requireAuth({
   id: true, email: true, plan: true, isActive: true, emailVerified: true,
   createdAt: true, keyRotatedAt: true,
+  // Added for getProtectionStatus()'s read-only quota mirror — see
+  // protectionStatus.js's getQuotaStatusReadOnly(). Never used to write
+  // or reset quota from this file; that remains checkQuotaGate()'s job
+  // exclusively, on the real traffic path.
+  monthlyBlockedCount: true, quotaResetDate: true,
 });
 
 // ── Connection status ─────────────────────────────────────────
@@ -168,7 +174,12 @@ const calculateSecurityScore = (attacks24h, weekTotal, uniqueReasonCount, daysSi
 };
 
 // ── Dashboard queries ─────────────────────────────────────────
-const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null) => {
+// tenantForStatus (optional, 4th param): the subset of Tenant fields
+// getProtectionStatus() needs (plan, monthlyBlockedCount, quotaResetDate).
+// Deliberately a separate object rather than reusing tenantId/tenantCreatedAt
+// above, since those two are scalars threaded through dozens of existing
+// Prisma queries in this function and must not change shape.
+const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null, tenantForStatus = null) => {
   const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
   const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
@@ -349,10 +360,20 @@ const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null) => {
     lastAlertAt:         lastPaypalAlertAt,
   };
 
+  // Computed after every other section above — cheap (in-memory pause
+  // check + one Redis/memory BIN-stats read), no new DB round trip beyond
+  // what getBINStats() above may already have needed elsewhere. Null only
+  // if the caller didn't pass tenantForStatus (defensive — every real
+  // caller below does).
+  const protectionStatus = tenantForStatus
+    ? await getProtectionStatus(tenantForStatus)
+    : null;
+
   return {
     totalBlocked,
     feesSaved:        (totalBlocked * FEES_PER_ATTEMPT).toFixed(2),
     amountProtected:  amountProtected.toFixed(2),
+    protectionStatus,
     reasonBreakdown,
     attacks24h,
     securityScore,
@@ -392,7 +413,7 @@ router.get('/', rateLimit, authByApiKey, async (req, res) => {
       });
     }
 
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId);
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId, req.tenant);
 
     // Broken Object Level Authorization fix (OWASP API1:2023): the HTML
     // renderer (buildDashboardHtml) already soft-locks BIN intelligence
@@ -442,7 +463,7 @@ router.get('/page', rateLimit, authByApiKey, async (req, res) => {
       logger.warn?.({ module: 'dashboard', tenantId: req.tenant.id, storeId: req.query.storeId }, 'Invalid storeId in dashboard page — falling back to All Stores');
     }
 
-    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId);
+    const data = await getDashboardData(req.tenant.id, req.tenant.createdAt, storeId, req.tenant);
 
     // Consistency fix: GET /api/dashboard (JSON) already replaces
     // binActivity/binSequenceStats/threatOrigins with a locked stub for
