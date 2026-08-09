@@ -67,6 +67,11 @@ storeUrl      String?
   lastRenewalReminderSentAt   DateTime?
   lastGracePeriodNoticeSentAt DateTime?
   lastDowngradeNoticeSentAt   DateTime?
+  // Cooldown gate for sendQuotaExceededEmail — same pattern as the four
+  // lastXNoticeSentAt fields above. Reset to null by checkQuotaGate()'s
+  // lazy monthly reset alongside monthlyBlockedCount, so a tenant who
+  // exceeds quota again in a later cycle gets notified again.
+  lastQuotaExceededNoticeSentAt DateTime?
   countryOverrides            Json?     @default("{}")
   countryOverridesUpdatedAt   DateTime?
   webhookUrl                  String?
@@ -87,6 +92,7 @@ storeUrl      String?
   payments          Payment[]          @relation("TenantPayments")
   stores            Store[]            @relation("TenantStores")
   adminActions      AdminAction[]      @relation("TenantAdminActions")
+  protectionEvents  ProtectionEvent[]  @relation("TenantProtectionEvents")
 }
 
 // ========== Merchant Profile ==========
@@ -574,7 +580,9 @@ model MonthlyReport {
   totalAttacks       Int?
   totalProtected     Float?   // sum(amountAttempted) — القيمة الفعلية المحمية
   totalFeesSaved     Float?   // attacks × SAVINGS_PER_ATTACK
-  securityScore      Int?
+  securityScore      Int?     // DEPRECATED — legacy composite score, read-only for historical reports. Never written by new report-generation code; see coreLayersActive/advancedLayersAvailable below.
+  coreLayersActive        Int?     // count of core detection layers (blacklist/velocity/BIN-sequence/identity-graph) active during this report period
+  advancedLayersAvailable Int?     // count of Pro-tier layers the tenant did NOT have active (null for Pro/Agency tenants — nothing to show)
   topCountry         String?
   topReason          String?
   prevMonthAttacks   Int?    // للمقارنة الشهرية
@@ -803,4 +811,26 @@ model UpdateDownloadToken {
   usedAt     DateTime?
 
   @@index([expiresAt])
+}
+
+// ========== Protection Event (historical degradation log) ==========
+// General-purpose log of any period during which a tenant's protection
+// depth was reduced — used to power the Monthly Report's honest
+// retrospective disclosure section. Deliberately generic (type field),
+// not quota-specific: designed to also absorb subscription-grace-period
+// events in a later phase without another migration.
+model ProtectionEvent {
+  id        String    @id @default(cuid())
+  tenantId  String
+  tenant    Tenant    @relation("TenantProtectionEvents", fields: [tenantId], references: [id], onDelete: Cascade)
+
+  type      String    // 'quota_exceeded' | (future: 'subscription_grace')
+  startedAt DateTime  @default(now())
+  endedAt   DateTime? // null = still ongoing
+
+  // Free-form context, e.g. { "limit": 500, "monthlyCountAtTrigger": 500 }
+  metadata  Json?
+
+  @@index([tenantId, startedAt])
+  @@index([tenantId, type, startedAt])
 }

@@ -632,7 +632,13 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       // binSequenceDetector.js — without it, attacks against one tenant
       // could false-block a different tenant's legitimate customers (CWE-653).
       const binSeq = await checkBINSequence({ tenantId: req.tenant.id, bin, ipAddress, deviceFingerprint });
-      if (binSeq.blocked || binSeq.riskAddition > 0) {
+      // L-fix: layer 0 means an existing active block is still rejecting
+      // requests — not a newly detected BIN pattern. Persisting here on
+      // every layer-0 hit inflated cardsCount with repeat rejections during
+      // the block window instead of genuine distinct BINs. The real alert
+      // was already created/incremented at the moment the actual trigger
+      // (layer 1/2/3) fired — skip persistence for layer 0.
+      if (binSeq.layer !== 0 && (binSeq.blocked || binSeq.riskAddition > 0)) {
         persistBinSequenceAlert(req.tenant.id, bin, binSeq, req.storeId ?? null)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
       }
@@ -1944,7 +1950,11 @@ router.post('/woocommerce-webhook', async (req, res) => {
       // previously hardcoded to null, which meant BinSequenceAlert rows from
       // this path had no tenant association and were invisible to the
       // dashboard and to notifyBINSequenceAlert's tenant lookup.
-      if (binSeq.blocked || binSeq.riskAddition > 0) {
+      // L-fix: same rationale as /evaluate above — layer 0 is a repeat
+      // rejection from an existing active block, not a new BIN detection.
+      // Skip persistence to avoid inflating cardsCount with block-window
+      // traffic instead of genuine distinct BINs.
+      if (binSeq.layer !== 0 && (binSeq.blocked || binSeq.riskAddition > 0)) {
         persistBinSequenceAlert(merchantId, extracted.bin, binSeq, req.storeId ?? null)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
       }
