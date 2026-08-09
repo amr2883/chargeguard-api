@@ -1576,6 +1576,37 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
   <!-- ── Hero Section ── -->
   ${(() => {
+    // ── Unified Protection Status wins outright over the score gauge for
+    // any non-healthy state. A numeric score ("92 · Secure") next to
+    // "Protection is paused" is exactly the contradictory, trust-breaking
+    // signal this redesign exists to eliminate — so degraded states never
+    // reach the gauge-rendering code below at all.
+    const ps = data.protectionStatus;
+    if (ps && ps.severity !== 'healthy') {
+      const sevKey = ps.severity === 'critical' ? 'red' : 'yellow';
+      const color  = statusColor[sevKey];
+      const bg     = statusBg[sevKey];
+      const border = statusBorder[sevKey];
+      const icon   = ps.severity === 'critical' ? '🚨' : '⚠️';
+
+      let expiryLine = '';
+      if (ps.expiresAt) {
+        const mins = Math.max(0, Math.round((new Date(ps.expiresAt).getTime() - Date.now()) / 60000));
+        expiryLine = `<div style="font-size:.72rem;font-weight:600;color:${color};margin-top:.6rem;">Resumes automatically in ~${mins} minute${mins !== 1 ? 's' : ''}</div>`;
+      }
+
+      return `<div class="hero" style="background:${bg};border-color:${border};align-items:flex-start;">
+        <div style="flex-shrink:0;font-size:2.25rem;line-height:1;padding-top:.1rem;">${icon}</div>
+        <div class="hero-right">
+          <div class="hero-title" style="color:${color};">
+            ${escapeHtml(ps.title)}
+            <span>${escapeHtml(ps.detail)}</span>
+          </div>
+          ${expiryLine}
+        </div>
+      </div>`;
+    }
+
     const score = data.securityScore;
     const a24   = data.attacks24h || 0;
 
