@@ -302,7 +302,7 @@ const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null, tenan
   // aggregated attack telemetry across every tenant on the platform,
   // meaning every merchant's dashboard showed platform-wide data instead
   // of their own store's data.
-  const binSequenceStats = getBINStats(tenantId);
+  const binSequenceStats = await getBINStats(tenantId);
   // ── PayPal Shield Stats (from AlertLog) ───────────────────────────────
   const sevenDaysAgoPaypal = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
