@@ -13,6 +13,7 @@
 const db = require('./db');
 const { SAVINGS_PER_ATTACK } = require('./constants');
 const { RETENTION } = require('./retention');
+const { getAdvancedLayersSnapshotForPeriod } = require('./protectionStatus');
 
 /**
  * @param {import('@prisma/client').PrismaClient} prisma
@@ -173,13 +174,23 @@ async function buildMonthlyReportData(prisma, tenantId, month, year, storeId = n
 
   const topCountry = threatOrigins[0]?.country ?? null;
 
-  // ── Security Score (نفس خوارزمية dashboard.js) ──────────────────────────
-  const attacks24h        = 0; // لا نحسب 24h في التقرير الشهري — نستخدم الشهر كله
-  const uniqueReasonCount = Object.keys(reasonCounts).length;
-  const daysSinceJoined   = tenant?.createdAt
-    ? Math.floor((Date.now() - new Date(tenant.createdAt).getTime()) / 86400000)
-    : 0;
-  const securityScore = _calculateSecurityScore(totalAttacks, uniqueReasonCount, daysSinceJoined);
+  // ── Protection Layers (replaces the old fake "security score") ─────────
+  // coreLayersActive: the four always-on detector groups — Blacklist/Email
+  // hard-block, Velocity+Device Rotation, BIN Sequence, Identity Graph —
+  // which run for every active tenant regardless of plan or quota (traced
+  // through risk.js's /evaluate handler). Constant within this report's
+  // scope; not a live per-tenant check.
+  // advancedLayersAvailable: external intelligence (IP/Email/BIN) — gated
+  // by monthly quota only, not plan. See getAdvancedLayersSnapshot()'s doc
+  // comment in protectionStatus.js for why this is a snapshot, and the
+  // plan to make it historically accurate later.
+  const CORE_LAYERS_TOTAL = 4;
+  const coreLayersActive        = CORE_LAYERS_TOTAL;
+  // Period-based, not live-snapshot — see getAdvancedLayersSnapshotForPeriod()'s
+  // doc comment in protectionStatus.js for why this must read totalAttacks
+  // (this period's historical BlockedAttempt count) rather than the tenant's
+  // live monthlyBlockedCount counter.
+  const advancedLayersAvailable = getAdvancedLayersSnapshotForPeriod(tenant.plan, totalAttacks);
 
   // ── بيانات المقارنة الشهرية ──────────────────────────────────────────────
   const prevMonthAttacks = prevMonthAlerts._sum.attackCount ?? null;
@@ -207,7 +218,8 @@ async function buildMonthlyReportData(prisma, tenantId, month, year, storeId = n
     totalAttacks,
     totalProtected,
     totalFeesSaved,
-    securityScore,
+    coreLayersActive,
+    advancedLayersAvailable,
     topReason,
     topCountry,
     reasonBreakdown,
@@ -251,14 +263,6 @@ function _buildWeeklyChart(attempts, monthStart, monthEnd) {
   return weeks.map((count, i) => ({ week: `Week ${i + 1}`, count }));
 }
 
-function _calculateSecurityScore(monthlyAttacks, uniqueReasonCount, daysSinceJoined) {
-  // نفس خوارزمية dashboard.js لكن بمعاملات شهرية
-  const base         = 100;
-  const intensity    = Math.min(monthlyAttacks * 0.05, 30);
-  const diversity    = uniqueReasonCount >= 3 ? 8 : uniqueReasonCount >= 2 ? 4 : 0;
-  const longevity    = Math.min(daysSinceJoined * 0.04, 8);
-  const raw          = base - intensity - diversity + longevity;
-  return Math.max(52, Math.min(100, Math.round(raw)));
-}
+
 
 module.exports = { buildMonthlyReportData };

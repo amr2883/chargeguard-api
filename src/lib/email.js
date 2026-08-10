@@ -2,6 +2,7 @@ const nodemailer = require('nodemailer');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
 const { isProOrAbove } = require('./planAccess');
+const { CORE_LAYER_NAMES, ADVANCED_LAYER_NAMES } = require('./protectionStatus');
 const oauth2Client = new google.auth.OAuth2(
   process.env.GMAIL_OAUTH_CLIENT_ID,
   process.env.GMAIL_OAUTH_CLIENT_SECRET,
@@ -714,7 +715,7 @@ async function sendConfirmationEmail(email, confirmUrl) {
 async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
   const {
     monthName, year, totalAttacks, totalProtected, totalFeesSaved,
-    securityScore, reasonBreakdown, threatOrigins,
+    coreLayersActive, advancedLayersAvailable, reasonBreakdown, threatOrigins,
     prevMonthAttacks, monthOverMonthPct, historicalProtected,
     totalTenants, biggestBINAttack,
   } = reportData;
@@ -778,6 +779,70 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
   const countriesHtml = threatOrigins.slice(0, 3).map(o =>
     `<span style="margin-right:8px;">${flagEmoji(o.country)} ${escapeHtml(o.country)} (${o.count})</span>`
   ).join('');
+
+  // ── Protection Layers Checklist ─────────────────────────────────────
+  // Table-based (no flexbox/grid — Outlook/Gmail compatibility, same
+  // constraint as every other section in this file). Layer names come
+  // from protectionStatus.js's CORE_LAYER_NAMES/ADVANCED_LAYER_NAMES —
+  // the same canonical list the dashboard Hero checklist uses — never
+  // duplicated here, so a renamed layer can't drift between the two
+  // surfaces (CWE-1059 pattern used throughout this codebase).
+  //
+  // coreLayersActive/advancedLayersAvailable are period counts, not a
+  // per-layer breakdown (MonthlyReport.coreLayersActive is a single Int
+  // column — see schema). Until ProtectionEvent-backed per-layer history
+  // exists, this renders all-or-nothing per group: every core name is
+  // marked active when coreLayersActive === CORE_LAYER_NAMES.length,
+  // every advanced name active when advancedLayersAvailable ===
+  // ADVANCED_LAYER_NAMES.length. This is the same approximation already
+  // documented in getAdvancedLayersSnapshotForPeriod()'s doc comment.
+  const layersRowPair = (items) => {
+    const cell = (item) => item ? `
+        <td style="width:50%;padding:6px 8px;vertical-align:top;">
+          <table cellpadding="0" cellspacing="0"><tr>
+            <td style="width:18px;vertical-align:top;padding-top:1px;">
+              <span style="font-size:13px;color:${item.active ? '#16a34a' : '#94a3b8'};">${item.active ? '✓' : '–'}</span>
+            </td>
+            <td style="font-size:13px;color:${item.active ? '#334155' : '#94a3b8'};line-height:1.4;">
+              ${escapeHtml(item.name)}
+            </td>
+          </tr></table>
+        </td>` : `<td style="width:50%;"></td>`;
+    return `<tr>${cell(items[0])}${cell(items[1])}</tr>`;
+  };
+
+  const buildLayerRows = (names, activeCount) => {
+    const items = names.map(name => ({ name, active: activeCount === names.length }));
+    const rows = [];
+    for (let i = 0; i < items.length; i += 2) {
+      rows.push(layersRowPair([items[i], items[i + 1]]));
+    }
+    return rows.join('');
+  };
+
+  const coreAllActive     = coreLayersActive === CORE_LAYER_NAMES.length;
+  const advancedAllActive = advancedLayersAvailable === ADVANCED_LAYER_NAMES.length;
+
+  const layersHtml = `
+    <h3 style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 4px;letter-spacing:.04em;text-transform:uppercase;">
+      Protection Layers
+    </h3>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:6px;"><tr>
+      <td style="font-size:11px;color:${coreAllActive ? '#16a34a' : '#d97706'};font-weight:600;padding:4px 0;">
+        Core Protection — ${coreLayersActive}/${CORE_LAYER_NAMES.length} active
+      </td>
+    </tr></table>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:14px;">
+      ${buildLayerRows(CORE_LAYER_NAMES, coreLayersActive)}
+    </table>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:6px;"><tr>
+      <td style="font-size:11px;color:${advancedAllActive ? '#16a34a' : '#d97706'};font-weight:600;padding:4px 0;">
+        Advanced Intelligence — ${advancedLayersAvailable}/${ADVANCED_LAYER_NAMES.length} active
+      </td>
+    </tr></table>
+    <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:20px;">
+      ${buildLayerRows(ADVANCED_LAYER_NAMES, advancedLayersAvailable)}
+    </table>`;
 
   // ── BIN Attack Highlight ──────────────────────────────────────────────
   const binHighlight = biggestBINAttack ? `
@@ -877,8 +942,8 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
           </td>
           <td style="width:33%;padding-left:8px;">
             <div style="background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:16px;">
-              <p style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Security Score</p>
-              <p style="font-size:26px;font-weight:800;color:#3b82f6;margin:0;line-height:1;">${securityScore}<span style="font-size:14px;color:#94a3b8;">/100</span></p>
+              <p style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#94a3b8;margin:0 0 4px;">Protection Coverage</p>
+              <p style="font-size:26px;font-weight:800;color:#3b82f6;margin:0;line-height:1;">${coreLayersActive + advancedLayersAvailable}<span style="font-size:14px;color:#94a3b8;">/7 layers</span></p>
             </div>
           </td>
         </tr></table>
@@ -894,6 +959,8 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
           Attack Breakdown
         </h3>
         <table cellpadding="0" cellspacing="0" style="width:100%;margin-bottom:20px;">${barsHtml}</table>` : ''}
+
+        ${layersHtml}
 
         ${countriesHtml ? `
         <h3 style="font-size:13px;font-weight:600;color:#0f172a;margin:0 0 10px;letter-spacing:.04em;text-transform:uppercase;">
@@ -1427,6 +1494,122 @@ async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, gracePerio
   throw lastError;
 }
 
+// ══════════════════════════════════════════════════════════════════════════════
+// sendQuotaExceededEmail — إشعار فوري "تخطيت الحد الشهري — الحماية المتقدمة متوقفة"
+// يُرسل من: quotaGate.js عند أول تخطي للحد الشهري في كل دورة فوترة فقط
+// (atomic claim على lastQuotaExceededNoticeSentAt — انظر التعليق هناك)
+// ══════════════════════════════════════════════════════════════════════════════
+async function sendQuotaExceededEmail(tenant, { limit, monthlyCount, quotaResetDate }) {
+  const storeDisplay = tenant.storeUrl
+    ? tenant.storeUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    : 'your store';
+  const storeDisplaySafe = escapeHtml(storeDisplay);
+
+  const resetDateStr = quotaResetDate
+    ? new Date(quotaResetDate).toLocaleString('en-US', { month: 'long', day: 'numeric', year: 'numeric', timeZone: 'UTC' })
+    : 'the start of next month';
+
+  const html = `
+    <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+      <!-- Header -->
+      <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+        <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+          <td style="vertical-align:middle;">
+            <table cellpadding="0" cellspacing="0"><tr>
+              <td style="padding-right:10px;vertical-align:middle;">
+                <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                    <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                  </svg>
+                </div>
+              </td>
+              <td style="vertical-align:middle;">
+                <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+              </td>
+            </tr></table>
+          </td>
+          <td style="text-align:right;vertical-align:middle;">
+            <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Quota Alert</span>
+          </td>
+        </tr></table>
+      </div>
+
+      <!-- Banner -->
+      <div style="background:#fffbeb;padding:28px 32px;border-left:1px solid #fde68a;border-right:1px solid #fde68a;">
+        <p style="font-size:12px;letter-spacing:0.1em;text-transform:uppercase;color:#92400e;margin:0 0 8px;font-weight:600;">⚠️ Monthly Limit Reached</p>
+        <h1 style="font-size:24px;font-weight:800;color:#92400e;margin:0 0 8px;line-height:1.2;">
+          Running on basic protection
+        </h1>
+        <p style="font-size:15px;color:#78350f;margin:0;">
+          <strong>${storeDisplaySafe}</strong> reached its monthly limit of ${limit.toLocaleString('en-US')} blocked attempts (${monthlyCount.toLocaleString('en-US')}/${limit.toLocaleString('en-US')}).
+        </p>
+      </div>
+
+      <!-- What's still active vs paused -->
+      <div style="padding:28px 32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;">
+        <h3 style="font-size:15px;font-weight:600;color:#0f172a;margin:0 0 16px;">What this means for your store</h3>
+
+        <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:14px 18px;margin-bottom:14px;">
+          <p style="font-size:13px;color:#166534;margin:0;line-height:1.6;">✅ <strong>Still fully active:</strong> device/IP blacklist, velocity checks, card-testing (BIN sequence) detection, and identity graph — these never pause, regardless of quota.</p>
+        </div>
+
+        <div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:14px 18px;margin-bottom:20px;">
+          <p style="font-size:13px;color:#92400e;margin:0;line-height:1.6;">⏸️ <strong>Paused until reset:</strong> IP reputation lookup, email intelligence, and BIN issuer lookup — deeper, external checks that consume the monthly quota.</p>
+        </div>
+
+        <p style="font-size:14px;color:#475569;margin:0;line-height:1.6;">
+          Protection automatically resumes at full depth on <strong>${resetDateStr}</strong> — no action needed if you'd rather wait for the reset.
+        </p>
+      </div>
+
+      <!-- CTA -->
+      <div style="padding:24px 32px 28px;background:#f8fafc;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+        <p style="font-size:14px;color:#334155;margin:0 0 16px;font-weight:600;">
+          Need deeper protection sooner? Upgrade for a 10x higher monthly limit.
+        </p>
+        <a href="mailto:support@chargeguard.io?subject=Upgrade to Pro"
+           style="display:inline-block;background:linear-gradient(135deg,#f97316,#ea580c);color:#ffffff;font-size:15px;font-weight:700;padding:14px 36px;border-radius:8px;text-decoration:none;letter-spacing:0.01em;">
+          Upgrade to Pro →
+        </a>
+      </div>
+
+      <!-- Footer -->
+      <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+        <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">
+          You're receiving this because your store reached its monthly blocked-attempt limit. This notice is sent once per billing cycle.
+        </p>
+      </div>
+    </div>`;
+
+  const RETRIES = 3;
+  const RETRY_DELAY_MS = 5000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[QuotaExceeded] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: tenant.email,
+        subject: `⚠️ ${storeDisplay} reached its monthly protection limit`,
+        html,
+      });
+      console.log(`[QuotaExceeded] ✅ Sent to ${tenant.email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[QuotaExceeded] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[QuotaExceeded] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
 async function sendWelcomeWithKeyEmail(email, apiKey) {
   console.log('[Email] Sending welcome+key email after verification to:', email);
   await sendApiKeyEmail(email, apiKey);
@@ -1928,4 +2111,4 @@ async function sendDowngradeEmail(tenant, { previousPlanLabel, renewUrl }) {
   throw lastError;
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail, sendDowngradeEmail };
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail, sendDowngradeEmail, sendQuotaExceededEmail };

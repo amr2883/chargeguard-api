@@ -4,7 +4,7 @@ const express = require('express');
 const router  = express.Router();
 const { PrismaClient } = require('@prisma/client');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
-const { getProtectionStatus } = require('../lib/protectionStatus');
+const { getProtectionStatus, getProtectionLayers } = require('../lib/protectionStatus');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 const { hashApiKey } = require('../lib/apiKeyHash');
 const { isProOrAbove, isAgency } = require('../lib/planAccess');
@@ -162,16 +162,7 @@ const getConnectionStatus = (lastActivityAt) => {
   return                     { label: `${Math.floor(minutes / 1440)}d ago`, color: 'red',  minutes };
 };
 
-// ── Security Score Calculator ─────────────────────────────────
-const calculateSecurityScore = (attacks24h, weekTotal, uniqueReasonCount, daysSinceJoined) => {
-  const base         = 100;
-  const intensity    = Math.min(attacks24h  * 0.8, 30);
-  const weekPressure = Math.min(weekTotal   * 0.15, 15);
-  const diversity    = uniqueReasonCount >= 3 ? 8 : uniqueReasonCount >= 2 ? 4 : 0;
-  const longevity    = Math.min(daysSinceJoined * 0.04, 8);
-  const raw          = base - intensity - weekPressure - diversity + longevity;
-  return Math.max(52, Math.min(100, Math.round(raw)));
-};
+
 
 // ── Dashboard queries ─────────────────────────────────────────
 // tenantForStatus (optional, 4th param): the subset of Tenant fields
@@ -254,12 +245,7 @@ const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null, tenan
   const reasonBreakdown = Object.fromEntries(
     reasonData.map(r => [r.reason, r._count.reason])
   );
-  const uniqueReasonCount = reasonData.length;
-
-  const daysSinceJoined = tenantCreatedAt
-    ? Math.floor((Date.now() - new Date(tenantCreatedAt).getTime()) / 86400000)
-    : 0;
-  const securityScore = calculateSecurityScore(attacks24h, weekTotal, uniqueReasonCount, daysSinceJoined);
+  
 
   // ── BIN Activity Analysis ──────────────────────────────────
   const activeBinAttack = binAttackData.find(b => b._count.cardBin >= 3) ?? null;
@@ -369,11 +355,29 @@ const getDashboardData = async (tenantId, tenantCreatedAt, storeId = null, tenan
     ? await getProtectionStatus(tenantForStatus)
     : null;
 
+  // Protection Layers checklist — derived from the SAME protectionStatus
+  // computed above, not a second independent Redis/memory read (see
+  // protectionStatus.js's getProtectionLayers() doc comment). Null only
+  // when tenantForStatus wasn't passed (defensive — every real caller
+  // below does pass it).
+  const protectionLayers = protectionStatus
+    ? getProtectionLayers(protectionStatus)
+    : null;
+
+  // securityScore: kept for JSON API backward compatibility, now derived
+  // honestly from the same layers checklist (70% weight on the always-on
+  // core layers, 30% on quota-gated advanced intelligence) instead of the
+  // old attack-volume/diversity formula. Null when protectionLayers is null.
+  const securityScore = protectionLayers
+    ? Math.round((protectionLayers.coreActiveCount / 4) * 70 + (protectionLayers.advancedActiveCount / 3) * 30)
+    : null;
+
   return {
     totalBlocked,
     feesSaved:        (totalBlocked * FEES_PER_ATTEMPT).toFixed(2),
     amountProtected:  amountProtected.toFixed(2),
     protectionStatus,
+    protectionLayers,
     reasonBreakdown,
     attacks24h,
     securityScore,
@@ -1089,8 +1093,8 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       padding: 1.75rem 1.5rem 1.5rem;
       margin-bottom: 1.5rem;
       display: flex;
-      align-items: center;
-      gap: 2rem;
+      flex-direction: column;
+      gap: 1.5rem;
       position: relative;
       overflow: hidden;
     }
@@ -1171,6 +1175,60 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+    }
+
+    /* ── Protection Layers Checklist ─────────────────────────── */
+    .layers-wrap {
+      display: flex;
+      flex-direction: column;
+      gap: .9rem;
+    }
+    .layers-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: .5rem;
+    }
+    .layers-group-title {
+      font-size: .68rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: .07em;
+      color: var(--text-dim);
+    }
+    .layers-group-count {
+      font-size: .65rem;
+      font-weight: 600;
+      font-family: "DM Mono", monospace;
+    }
+    .layers-grid {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: .5rem;
+    }
+    .layer-item {
+      display: flex;
+      align-items: center;
+      gap: .5rem;
+      background: var(--bg);
+      border: 1px solid var(--border2);
+      border-radius: var(--radius-sm);
+      padding: .5rem .7rem;
+    }
+    .layer-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .layer-name {
+      font-size: .74rem;
+      font-weight: 500;
+      color: var(--text-sub);
+      line-height: 1.3;
+    }
+    .layer-item.active .layer-name { color: var(--text); }
+    @media (max-width: 480px) {
+      .layers-grid { grid-template-columns: 1fr; }
     }
 
     /* ── Value Card ──────────────────────────────────────────── */
@@ -1576,129 +1634,103 @@ const buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n
 
   <!-- ── Hero Section ── -->
   ${(() => {
-    // ── Unified Protection Status wins outright over the score gauge for
-    // any non-healthy state. A numeric score ("92 · Secure") next to
-    // "Protection is paused" is exactly the contradictory, trust-breaking
-    // signal this redesign exists to eliminate — so degraded states never
-    // reach the gauge-rendering code below at all.
-    const ps = data.protectionStatus;
+    const ps     = data.protectionStatus;
+    const layers = data.protectionLayers;
+    const isFirstDay = data.totalBlocked === 0;
+
+    // ── Banner copy + color, derived from protectionStatus (single source
+    // of truth — the Monthly Report will eventually read a historical
+    // equivalent of the same `.state`). Healthy state gets warmer,
+    // context-aware copy; every degraded state uses ps.title/ps.detail
+    // verbatim so the dashboard always says exactly what the backend
+    // computed, never a re-derived paraphrase.
+    let sevKey, icon, heroTitle, heroSub;
     if (ps && ps.severity !== 'healthy') {
-      const sevKey = ps.severity === 'critical' ? 'red' : 'yellow';
-      const color  = statusColor[sevKey];
-      const bg     = statusBg[sevKey];
-      const border = statusBorder[sevKey];
-      const icon   = ps.severity === 'critical' ? '🚨' : '⚠️';
+      sevKey    = ps.severity === 'critical' ? 'red' : 'yellow';
+      icon      = ps.severity === 'critical' ? '🚨' : '⚠️';
+      heroTitle = ps.title;
+      heroSub   = ps.detail;
+    } else {
+      sevKey    = 'green';
+      icon      = isFirstDay ? '🛡️' : '✅';
+      heroTitle = isFirstDay
+        ? 'Protection is active — scanning every checkout'
+        : 'Your store is fully protected';
+      heroSub   = isFirstDay
+        ? 'ChargeGuard is live and learning your store\'s patterns · First attack report will appear here'
+        : 'All detection layers are active and running normally';
+    }
+    const color  = statusColor[sevKey];
+    const bg     = statusBg[sevKey];
+    const border = statusBorder[sevKey];
 
-      let expiryLine = '';
-      if (ps.expiresAt) {
-        const mins = Math.max(0, Math.round((new Date(ps.expiresAt).getTime() - Date.now()) / 60000));
-        expiryLine = `<div style="font-size:.72rem;font-weight:600;color:${color};margin-top:.6rem;">Resumes automatically in ~${mins} minute${mins !== 1 ? 's' : ''}</div>`;
-      }
-
-      return `<div class="hero" style="background:${bg};border-color:${border};align-items:flex-start;">
-        <div style="flex-shrink:0;font-size:2.25rem;line-height:1;padding-top:.1rem;">${icon}</div>
-        <div class="hero-right">
-          <div class="hero-title" style="color:${color};">
-            ${escapeHtml(ps.title)}
-            <span>${escapeHtml(ps.detail)}</span>
-          </div>
-          ${expiryLine}
-        </div>
-      </div>`;
+    let expiryLine = '';
+    if (ps?.expiresAt) {
+      const mins = Math.max(0, Math.round((new Date(ps.expiresAt).getTime() - Date.now()) / 60000));
+      expiryLine = `<div style="font-size:.72rem;font-weight:600;color:${color};margin-top:.5rem;">Resumes automatically in ~${mins} minute${mins !== 1 ? 's' : ''}</div>`;
     }
 
-    const score = data.securityScore;
-    const a24   = data.attacks24h || 0;
+    // ── Protection Layers checklist ─────────────────────────────────
+    const layerItem = (l) => `
+      <div class="layer-item${l.active ? ' active' : ''}">
+        <div class="layer-dot" style="background:${l.active ? '#4ade80' : '#475569'};${l.active ? 'box-shadow:0 0 6px #4ade8066;' : ''}"></div>
+        <div class="layer-name">${escapeHtml(l.name)}</div>
+      </div>`;
 
-    const isFirstDay  = data.totalBlocked === 0;
-    const scoreColor  = isFirstDay    ? '#3b82f6'
-                      : score >= 85   ? '#22c55e'
-                      : score >= 70   ? '#3b82f6'
-                      :                 '#f59e0b';
-    const scoreLabel  = isFirstDay   ? 'Ready'
-                      : score >= 85  ? 'Secure'
-                      : score >= 70  ? 'Protected'
-                      :                'Active Defense';
-    const heroTitle   = isFirstDay
-      ? 'Protection is active — scanning every checkout'
-      : score >= 85
-      ? 'Your store is fully protected'
-      : score >= 70
-      ? 'Active protection in place'
-      : 'Defense systems engaged';
-    const heroSub     = isFirstDay
-      ? 'ChargeGuard is live and learning your store\'s patterns · First attack report will appear here'
-      : score >= 85
-      ? 'All systems operational · No active threats detected'
-      : score >= 70
-      ? 'Monitoring elevated activity · All threats contained'
-      : 'High threat volume · Every attempt blocked';
+    const layersHtml = layers ? `
+      <div class="layers-wrap">
+        <div>
+          <div class="layers-group-header">
+            <span class="layers-group-title">Core Protection</span>
+            <span class="layers-group-count" style="color:${layers.coreActiveCount === 4 ? '#4ade80' : '#f59e0b'};">${layers.coreActiveCount}/4 active</span>
+          </div>
+          <div class="layers-grid">${layers.core.map(layerItem).join('')}</div>
+        </div>
+        <div>
+          <div class="layers-group-header">
+            <span class="layers-group-title">Advanced Intelligence</span>
+            <span class="layers-group-count" style="color:${layers.advancedActiveCount === 3 ? '#4ade80' : '#f59e0b'};">${layers.advancedActiveCount}/3 active</span>
+          </div>
+          <div class="layers-grid">${layers.advanced.map(layerItem).join('')}</div>
+        </div>
+      </div>` : '';
 
-    // Gauge arc math (270° sweep, starts at 135°)
-    const R       = 54;
-    const CX      = 64, CY = 72;
-    const totalArc = 270;
-    const filledArc = (score / 100) * totalArc;
-    const toRad    = (deg) => (deg - 90) * Math.PI / 180;
-    const startDeg = 135, endDeg = 135 + totalArc;
-    const filledEnd = 135 + filledArc;
-
-    const arcPath = (fromDeg, toDeg, r) => {
-      const x1 = CX + r * Math.cos(toRad(fromDeg));
-      const y1 = CY + r * Math.sin(toRad(fromDeg));
-      const x2 = CX + r * Math.cos(toRad(toDeg));
-      const y2 = CY + r * Math.sin(toRad(toDeg));
-      const large = (toDeg - fromDeg) > 180 ? 1 : 0;
-      return `M ${x1.toFixed(2)} ${y1.toFixed(2)} A ${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}`;
-    };
-
+    // ── Descriptive stats — always shown regardless of protection state,
+    // since these describe history/metadata (when things happened), not
+    // current protection depth. Previously these vanished entirely on any
+    // non-healthy state, which had no real justification.
     const daysSince = Math.floor((Date.now() - new Date(tenant.createdAt).getTime()) / 86400000);
     const streakLabel = daysSince >= 1 ? `${daysSince}d` : 'Today';
     const lastStopLabel = connectionStatus.label;
+    const a24 = data.attacks24h || 0;
     const threatsTodayLabel = a24 === 0 ? 'None' : `${a24}`;
 
-    return `<div class="hero">
-      <div class="gauge-wrap">
-        <svg class="gauge-svg" width="128" height="100" viewBox="0 0 128 100">
-          <path d="${arcPath(startDeg, endDeg, R)}"
-            fill="none" stroke="${scoreColor}18" stroke-width="10" stroke-linecap="round"/>
-          <path d="${arcPath(startDeg, filledEnd, R)}"
-            fill="none" stroke="${scoreColor}" stroke-width="10" stroke-linecap="round"
-            filter="url(#glow)"/>
-          <defs>
-            <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
-              <feGaussianBlur stdDeviation="2.5" result="blur"/>
-              <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
-            </filter>
-          </defs>
-          <text x="${CX}" y="${CY - 4}" text-anchor="middle"
-            fill="${scoreColor}" font-family="DM Sans, sans-serif"
-            font-size="22" font-weight="700" letter-spacing="-1">${score}</text>
-          <text x="${CX}" y="${CY + 13}" text-anchor="middle"
-            fill="${scoreColor}" font-family="DM Sans, sans-serif"
-            font-size="8" font-weight="600" opacity=".75"
-            letter-spacing="1.5" text-transform="uppercase">${scoreLabel.toUpperCase()}</text>
-        </svg>
-        <div style="font-size:.6rem;color:var(--text-dim);font-weight:500;letter-spacing:.05em;margin-top:-.25rem;">SECURITY SCORE</div>
-      </div>
-      <div class="hero-right">
-        <div class="hero-title">
-          ${escapeHtml(heroTitle)}
-          <span>${escapeHtml(heroSub)}</span>
+    return `<div class="hero" style="background:${bg};border-color:${border};">
+      <div style="display:flex;align-items:flex-start;gap:1rem;">
+        <div style="flex-shrink:0;font-size:2rem;line-height:1;">${icon}</div>
+        <div style="flex:1;">
+          <div class="hero-title" style="color:${color};">
+            ${escapeHtml(heroTitle)}
+            <span>${escapeHtml(heroSub)}</span>
+          </div>
+          ${expiryLine}
         </div>
-        <div class="hero-stats">
-          <div class="hero-stat">
-            <div class="hero-stat-label">Last Stopped</div>
-            <div class="hero-stat-val" style="color:${scoreColor};">${escapeHtml(lastStopLabel)}</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-label">Protected Since</div>
-            <div class="hero-stat-val">${escapeHtml(streakLabel)}</div>
-          </div>
-          <div class="hero-stat">
-            <div class="hero-stat-label">Threats Today</div>
-            <div class="hero-stat-val" style="color:${a24 > 0 ? '#fb923c' : 'var(--text-sub)'};">${escapeHtml(threatsTodayLabel)}</div>
-          </div>
+      </div>
+
+      ${layersHtml}
+
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <div class="hero-stat-label">Last Stopped</div>
+          <div class="hero-stat-val" style="color:${color};">${escapeHtml(lastStopLabel)}</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-label">Protected Since</div>
+          <div class="hero-stat-val">${escapeHtml(streakLabel)}</div>
+        </div>
+        <div class="hero-stat">
+          <div class="hero-stat-label">Threats Today</div>
+          <div class="hero-stat-val" style="color:${a24 > 0 ? '#fb923c' : 'var(--text-sub)'};">${escapeHtml(threatsTodayLabel)}</div>
         </div>
       </div>
     </div>`;

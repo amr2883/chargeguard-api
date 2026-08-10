@@ -209,14 +209,15 @@ async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportY
     await prisma.monthlyReport.update({
       where: { id: reportRecord.id },
       data: {
-        status:           'ready',
-        totalAttacks:     reportData.totalAttacks,
-        totalProtected:   reportData.totalProtected,
-        totalFeesSaved:   reportData.totalFeesSaved,
-        securityScore:    reportData.securityScore,
-        topCountry:       reportData.topCountry      ?? null,
-        topReason:        reportData.topReason       ?? null,
-        prevMonthAttacks: reportData.prevMonthAttacks ?? null,
+        status:                  'ready',
+        totalAttacks:            reportData.totalAttacks,
+        totalProtected:          reportData.totalProtected,
+        totalFeesSaved:          reportData.totalFeesSaved,
+        coreLayersActive:        reportData.coreLayersActive,
+        advancedLayersAvailable: reportData.advancedLayersAvailable,
+        topCountry:              reportData.topCountry      ?? null,
+        topReason:               reportData.topReason       ?? null,
+        prevMonthAttacks:        reportData.prevMonthAttacks ?? null,
       },
     });
 
