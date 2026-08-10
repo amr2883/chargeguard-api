@@ -126,4 +126,122 @@ async function getProtectionStatus(tenant) {
   };
 }
 
-module.exports = { getProtectionStatus, getQuotaStatusReadOnly };
+// ── Advanced Layers Snapshot (used by the Monthly Report) ─────────────────
+// Point-in-time snapshot of how many "advanced" (external-intelligence)
+// layers are currently available for a tenant. Deliberately reuses the
+// exact same quota_exhausted condition as getProtectionStatus() above —
+// single source of truth, not a second independent calculation. IP/Email/
+// BIN intelligence in riskScoring.js are gated by monthly quota only
+// (checkQuotaGate), identically across every plan — see limitedScoring in
+// risk.js's /evaluate — never by plan directly.
+//
+// NOTE: this is a snapshot at call time, not a historical record for a
+// whole reporting period. Once ProtectionEvent rows are being written
+// (see that model's schema comment), monthly reports should switch to
+// reading actual historical degradation windows from there. Swap the
+// implementation inside this one function only when that happens —
+// callers (reportDataService.js) do not need to change.
+const ADVANCED_LAYERS_TOTAL = 3; // IP Intelligence, Email Intelligence, BIN Intelligence
+
+function getAdvancedLayersSnapshot(tenant) {
+  const quota = getQuotaStatusReadOnly(tenant);
+  return quota.exceeded ? 0 : ADVANCED_LAYERS_TOTAL;
+}
+
+// ── Advanced Layers Snapshot for a historical period (Monthly Report) ─────
+// getAdvancedLayersSnapshot() above reads the tenant's LIVE counter — correct
+// for "what's the status right now" (dashboard Hero), wrong for "what was
+// the status during month X", because quotaGate.js's reset is lazy: it only
+// fires on a real request after quotaResetDate has passed. A tenant with
+// even one order early in the new month resets the counter to 0 BEFORE the
+// scheduler generates last month's report (scheduler runs on the 1st at
+// 10:xx UTC) — reading the live counter at that point would silently show
+// "fully protected" for a month that may have actually hit its quota.
+//
+// This variant instead uses totalAttacks — the actual BlockedAttempt count
+// for that specific reporting period, which is immune to the live-counter
+// reset because it's a historical query, not a live counter read. This can
+// run slightly high vs. the true monthlyBlockedCount (dedup logic in
+// shouldIncrementQuota(), and /blocked-attempt writes BlockedAttempt rows
+// without incrementing the quota) — an acceptable, safety-conservative
+// direction for a security product: worst case this under-reports advanced
+// protection for a month that was actually fine, never the reverse.
+//
+// TODO: once ProtectionEvent rows are being written (quota_exceeded type),
+// switch this to read actual start/end degradation windows for the period
+// instead of this attacks-vs-limit approximation. Swap inside this function
+// only — reportDataService.js's call site does not need to change.
+function getAdvancedLayersSnapshotForPeriod(plan, totalAttacksInPeriod) {
+  if (isAgency(plan)) return ADVANCED_LAYERS_TOTAL; // unlimited quota — never exceeded
+  const limit = PLAN_QUOTA_LIMITS[plan] !== undefined ? PLAN_QUOTA_LIMITS[plan] : STARTER_FALLBACK_LIMIT;
+  return totalAttacksInPeriod >= limit ? 0 : ADVANCED_LAYERS_TOTAL;
+}
+
+// ── Protection Layers Checklist (used by the Dashboard Hero) ──────────────
+// Single canonical list of layer names + active/inactive state, derived
+// PURELY from an already-computed protectionStatus object (see
+// getProtectionStatus() above) — never re-touches emergencyPause or
+// getBINStats itself, so a caller that already computed protectionStatus
+// once per request never pays for a second Redis/memory round trip by
+// also asking for the layers breakdown.
+//
+// Names are the same 4 core / 3 advanced conceptual buckets used by the
+// Monthly Report (reportDataService.js's local CORE_LAYERS_TOTAL and this
+// file's ADVANCED_LAYERS_TOTAL) — kept here as the one place both the
+// live dashboard and (eventually) historical reporting can import from,
+// so a renamed layer never drifts between the two surfaces.
+const CORE_LAYERS_TOTAL = 4;
+const CORE_LAYER_NAMES = [
+  'Blacklist & Email Verification',
+  'Velocity & Device Fingerprinting',
+  'BIN Sequence Detection',
+  'Identity Graph',
+];
+const ADVANCED_LAYER_NAMES = [
+  'IP Intelligence',
+  'Email Intelligence',
+  'BIN Intelligence',
+];
+
+/**
+ * @param {{state: string}} protectionStatus - result of getProtectionStatus()
+ *   (or, in the future, an equivalent historical-state object built from
+ *   ProtectionEvent rows for a past reporting period — only `.state` is
+ *   read here, so either shape works without this function changing).
+ * @returns {{
+ *   core: {name: string, active: boolean}[],
+ *   advanced: {name: string, active: boolean}[],
+ *   coreActiveCount: number,
+ *   advancedActiveCount: number,
+ * }}
+ */
+function getProtectionLayers(protectionStatus) {
+  const isPaused = protectionStatus.state === 'emergency_pause_global'
+    || protectionStatus.state === 'emergency_pause_tenant';
+  const isQuotaExhausted = protectionStatus.state === 'quota_exhausted';
+
+  const core = CORE_LAYER_NAMES.map(name => ({ name, active: !isPaused }));
+  const advanced = ADVANCED_LAYER_NAMES.map(name => ({
+    name,
+    active: !isPaused && !isQuotaExhausted,
+  }));
+
+  return {
+    core,
+    advanced,
+    coreActiveCount: core.filter(l => l.active).length,
+    advancedActiveCount: advanced.filter(l => l.active).length,
+  };
+}
+
+module.exports = {
+  getProtectionStatus,
+  getQuotaStatusReadOnly,
+  getAdvancedLayersSnapshot,
+  getAdvancedLayersSnapshotForPeriod,
+  getProtectionLayers,
+  ADVANCED_LAYERS_TOTAL,
+  CORE_LAYERS_TOTAL,
+  CORE_LAYER_NAMES,
+  ADVANCED_LAYER_NAMES,
+};
