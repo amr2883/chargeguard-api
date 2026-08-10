@@ -1,0 +1,26 @@
+[1mdiff --git a/src/routes/dashboard.js b/src/routes/dashboard.js[m
+[1mindex a993312..d836323 100644[m
+[1m--- a/src/routes/dashboard.js[m
+[1m+++ b/src/routes/dashboard.js[m
+[36m@@ -2658,12 +2658,17 @@[m [mconst buildDashboardHtml = async (tenant, data, stores = [], selectedStoreId = n[m
+       btn.disabled = true;[m
+       btn.textContent = 'Rotating...';[m
+       try {[m
+[31m-        const res = await fetch(API_BASE + '/api/dashboard/rotate-key', {[m
+[32m+[m[32m        const useProxy = typeof window.cgWP !== 'undefined';[m
+[32m+[m[32m        const url = useProxy[m
+[32m+[m[32m          ? window.cgWP.ajaxUrl + '?action=chargeguard_rotate_key&nonce=' + window.cgWP.nonce[m
+[32m+[m[32m          : API_BASE + '/api/dashboard/rotate-key';[m
+[32m+[m[32m        const res = await fetch(url, {[m
+           method: 'POST',[m
+[31m-          headers: { 'X-Api-Key': _key }[m
+[32m+[m[32m          headers: useProxy ? {} : { 'X-Api-Key': _key }[m
+         });[m
+[31m-        const data = await res.json();[m
+[31m-        if (res.ok) {[m
+[32m+[m[32m        const raw = await res.json();[m
+[32m+[m[32m        const data = useProxy ? (raw.data || raw) : raw;[m
+[32m+[m[32m        if (res.ok && (useProxy ? raw.success !== false : true)) {[m
+           showMsg('✅ ' + data.message, '#16a34a');[m
+           _key = data.newApiKey;[m
+           if (typeof window._loadOrders === 'function') {[m
