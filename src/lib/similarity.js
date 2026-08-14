@@ -12,7 +12,7 @@
 // - Used to augment exact matching, not replace it
 
 const { normalizeIP } = require('./ipIntelligence');
-const { maskValue } = require('./utils');
+const { maskValue, normalizeEmail } = require('./utils');
 const logger = require('./logger');
 
 // ─── Levenshtein Distance ─────────────────────────────────────────────────
@@ -49,106 +49,10 @@ function levenshtein(a, b) {
   return prev[n];
 }
 
-// ─── Unicode Homoglyph Map ────────────────────────────────────────────────
-// [FIX #1] Explicit mapping للأحرف التي تبدو مطابقة بصريًا لأحرف Latin
-//
-// NFKC normalization وحدها لا تكفي — Cyrillic "а" (U+0430) ليست
-// compatibility equivalent لـ Latin "a" في معيار Unicode.
-// المهاجمون يستخدمون هذه الأحرف بشكل شائع في email fraud.
-//
-// المصدر: Unicode Confusables (https://unicode.org/reports/tr39/#Confusable_Detection)
-const HOMOGLYPH_MAP = {
-  // Cyrillic lowercase → Latin
-  "\u0430": "a", // а → a
-  "\u0435": "e", // е → e
-  "\u043E": "o", // о → o
-  "\u0440": "r", // р → r
-  "\u0441": "c", // с → c
-  "\u0445": "x", // х → x
-  "\u0443": "y", // у → y
-  "\u0456": "i", // і → i  (Ukrainian)
-  "\u0454": "e", // є → e  (Ukrainian)
-  // Cyrillic uppercase → Latin
-  "\u0410": "a", // А → a  (نحوّل لـ lowercase لأننا نطبق بعد toLowerCase)
-  "\u0412": "b", // В → b
-  "\u0415": "e", // Е → e
-  "\u041A": "k", // К → k
-  "\u041C": "m", // М → m
-  "\u041D": "h", // Н → h
-  "\u041E": "o", // О → o
-  "\u0420": "r", // Р → r
-  "\u0421": "c", // С → c
-  "\u0422": "t", // Т → t
-  "\u0425": "x", // Х → x
-  // Greek confusables
-  "\u03BF": "o", // ο (omicron) → o
-  "\u03B1": "a", // α → a
-  "\u03B5": "e", // ε → e
-  "\u03BD": "v", // ν → v
-  // Latin look-alikes (IPA / phonetic chars used in fraud)
-  "\u0251": "a", // ɑ (latin alpha) → a
-  "\u0261": "g", // ɡ (script g)   → g
-  "\u0269": "i", // ɩ (iota)       → i
-  "\u026A": "i", // ɪ (small i)    → i
-  "\u006C": "l", // l already Latin but ℓ below
-  "\u2113": "l", // ℓ (script l)   → l
-  "\u0277": "o", // ɷ (omega)      → o
-  "\u028C": "v", // ʌ (caret)      → v
-  // Arabic-Indic digits → ASCII digits (١٢٣ → 123)
-  "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
-  "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
-};
-
-function applyHomoglyphMap(str) {
-  return [...str].map(c => HOMOGLYPH_MAP[c] ?? c).join("");
-}
-
-// Module-level constants — defined once, not recreated on every normalizeEmail call.
-const DOMAIN_ALIASES = {
-  "googlemail.com": "gmail.com",
-};
-const DOTLESS_DOMAINS = new Set(["gmail.com"]);
-
 // ─── Email Normalization ──────────────────────────────────────────────────
-// بينظف الـ email قبل المقارنة
-// يمنع bypass بـ:
-//   - dots أو plus tags (gmail trick)
-//   - Unicode homoglyphs (Cyrillic/Greek/Fullwidth look-alike chars)
-//   - alias domains (googlemail.com ≡ gmail.com)
-//
-// exported: مفيدة في onboarding وdeduplication خارج هذا الملف
-
-function normalizeEmail(email) {
-  if (!email || typeof email !== "string") return "";
-
-  // [FIX #1] Pipeline:
-  //   1. NFKC → يحول Fullwidth "Ａ"→"A"، combining characters، إلخ
-  //   2. toLowerCase + trim
-  //   3. Homoglyph map → يحول Cyrillic/Greek look-alikes لـ Latin
-  const normalized = applyHomoglyphMap(
-    email.normalize("NFKC").toLowerCase().trim()
-  );
-
-  const atIdx = normalized.lastIndexOf("@");
-  if (atIdx === -1) return normalized;
-
-  const local  = normalized.slice(0, atIdx);
-  const domain = normalized.slice(atIdx + 1);
-  if (!local || !domain) return normalized;
-
- // [FIX #2] Domain canonicalization
-  // googlemail.com هو alias رسمي لـ gmail.com — يجب توحيدهما
-  const canonicalDomain = DOMAIN_ALIASES[domain] ?? domain;
-  // شيل الـ plus tag: ahmed+spam@gmail.com → ahmed@gmail.com
-  const localNoPlusTag = local.split("+")[0];
-  // شيل الـ dots في Gmail فقط: a.h.m.e.d@gmail.com → ahmed@gmail.com
-  // ملاحظة: "googlemail.com" محذوف — canonicalDomain يكون "gmail.com" دائمًا هنا
-  const localFinal = DOTLESS_DOMAINS.has(canonicalDomain)
-    ? localNoPlusTag.replace(/\./g, "")
-    : localNoPlusTag;
-
-  return `${localFinal}@${canonicalDomain}`;
-}
+// [Bug #7 fix] normalizeEmail() (بما فيها الـ homoglyph map) اتنقلت لـ
+// utils.js عشان تبقى المصدر الوحيد للحقيقة — مستوردة فوق في require().
+// كل الدوال تحت (areEmailsSimilar, findSimilarDisputes) بتستخدمها زي ما هي.
 
 // ─── Email Similarity ─────────────────────────────────────────────────────
 // Checks if two emails are suspiciously similar

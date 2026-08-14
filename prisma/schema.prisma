@@ -121,11 +121,21 @@ model MerchantProfile {
 // ========== Signal Statistics ==========
 model SignalStat {
   id          String    @id @default(cuid())
-  merchantId  String? // null = global
+  merchantId  String?
   signalType  String
   signalValue String
-  rawWins     Int       @default(0)
-  rawLosses   Int       @default(0)
+  // [lastDecayAt fix] كانت Int — الفيكس الجديد في feedbackLoop.js's
+  // updateSignalStat() بيطبّق decay كسري (exp(-λ×days)) على القيمة
+  // القديمة وقت كل كتابة (decay-then-accumulate)، فالنتيجة قيمة عشرية
+  // مش صحيحة. لو العمود فضل Int، Postgres كان هيقرّب القيمة لأقرب عدد
+  // صحيح في *كل* استدعاء (assignment cast ضمني، من غير أي error ظاهر)
+  // — تراكم تقريب صامت بيفسد دقة الـ decay تدريجيًا، وأخطر ما يكون في
+  // الإشارات النشطة بكثرة (IP_TOR, DEVICE_VELOCITY, BIN_PREPAID) وهي
+  // بالتحديد أهم إشارات مشروع الكارد تيستنج. التحويل لـ Float widening
+  // آمن 100% على البيانات الموجودة (INTEGER → DOUBLE PRECISION يحافظ
+  // على القيمة تمامًا، بدون أي fractional loss أو حاجة لـ backfill).
+  rawWins     Float     @default(0)
+  rawLosses   Float     @default(0)
   totalEvents Int       @default(0)
   confidence  Float     @default(0.5)
   lastDecayAt DateTime?
@@ -145,6 +155,7 @@ model Order {
   amount             Float
   currency           String  @default("USD")
   email              String?
+  normalizedEmail    String? // normalizeEmail(email) — للمطابقة الأمنية فقط. email الخام يفضل كما هو للعرض/الـ audit trail.
   ipAddress          String?
   customerLoginId    String?
   deviceFingerprint  String?
@@ -155,6 +166,13 @@ model Order {
   decision           String? // approve, review, block
   connectedRisk      Int?    @default(0)
   cardHash           String? // optional reference to CardHash.cardHash
+  // [BIN Velocity fix] أول 6 أرقام من الـ BIN، مخزّنة وقت الكتابة عشان
+  // تبقى قابلة للاستعلام المباشر. قبل كده الـ BIN كان موجود فقط جوه
+  // signalsSnapshot (JSON نصي)، فـ riskScoring.js's BIN-velocity block كان
+  // بيقارن allOrders.filter(o => o.payment_details?.card_bin...) وهو تعبير
+  // كان بيرجع undefined دايمًا — allOrders (formattedOrders) ما كانتش
+  // بتحمل payment_details أصلاً في أي من الأماكن الثلاثة اللي بتبنيها.
+  cardBinPrefix      String?
 
   // لقطة من الإشارات المستخرجة وقت التقييم (JSON)
   signalsSnapshot String?
@@ -180,6 +198,7 @@ model Order {
   // علاقات (اختيارية لكن مفيدة)
   riskEvaluations RiskEvaluation[]
   disputeOutcomes DisputeOutcome[]
+  disputeEvidence DisputeEvidence[]
 
   // Composite indexes for the four hot-path query patterns run on every
   // /evaluate, /woocommerce-webhook, and /enrich request (merchant-scoped
@@ -189,6 +208,7 @@ model Order {
   @@index([merchantId, deviceFingerprint, createdAt])
   @@index([merchantId, ipAddress, createdAt])
   @@index([merchantId, email, createdAt])
+  @@index([merchantId, normalizedEmail, createdAt])
   // Matches the weekly PayPal scheduler's exact predicate shape:
   // WHERE merchantId = ? AND enrichmentSource = ? AND createdAt >= ?
   @@index([merchantId, enrichmentSource, createdAt])
@@ -196,10 +216,12 @@ model Order {
   // merchantId-only indexes above with storeId inserted before the
   // time/velocity predicate, so per_store tenants get an index range scan
   // instead of a sequential scan filtered post-hoc.
+  @@index([merchantId, cardBinPrefix, createdAt])
   @@index([merchantId, storeId, createdAt])
   @@index([merchantId, storeId, deviceFingerprint, createdAt])
   @@index([merchantId, storeId, ipAddress, createdAt])
   @@index([merchantId, storeId, email, createdAt])
+  @@index([merchantId, storeId, cardBinPrefix, createdAt])
 
   // CRITICAL FIX (C3): orderId alone was globally @unique, meaning two
   // different merchants could never both have an order with the same
@@ -252,6 +274,41 @@ model DisputeOutcome {
   signalsPresent String   @default("[]")
   caseScore      Int?
   resolvedAt     DateTime @default(now())
+}
+
+// ========== Dispute Evidence (Post-Purchase Signals) ==========
+// جدول موحّد لكل دليل بيتجمّع على مدار عمر الـ dispute (من لحظة فتحه لحد
+// إغلاقه won/lost) — بغض النظر عن مصدره (نظام تلقائي، Stripe/PayPal
+// webhook، أو إدخال يدوي من التاجر). processFeedbackSimplified() في
+// feedbackLoop.js بتقرا كل الصفوف المرتبطة بالأوردر وقت إغلاق الـ dispute
+// وتدمجها مع الإشارات المُشتقة من signalsSnapshot — مفيش مسار "rescore"
+// منفصل؛ هذا الجدول هو نقطة التجميع الوحيدة.
+model DisputeEvidence {
+  id          String   @id @default(cuid())
+  merchantId  String
+  orderId     String   // Order.id (الـ cuid الداخلي، مش orderId التجاري)
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  evidenceType String  // TRACKING | DELIVERY_PROOF | LOGIN | CTA | PRE_CHARGE |
+                        // USAGE_LOGS | NO_CANCEL_REQUEST | CE30 | REFUND
+  value        String  // القيمة المطابقة لـ VALID_SIGNAL_VALUES في feedbackLoop.js
+                        // (مثال: "CONFIRMED", "PRESENT", "ELIGIBLE")
+
+  source       String  // 'system_derived' | 'processor_webhook' | 'manual'
+  confidence   Float   @default(1.0) // 1.0 = مؤكد (system/webhook)، أقل للإدخال اليدوي غير المُتحقق منه
+
+  // بيانات خام اختيارية للتتبع/التدقيق (مثال: رقم تتبع الشحنة نفسه،
+  // معرّف الـ evidence على Stripe) — غير مُستخدمة في منطق التسجيل، لعرض
+  // التاجر/التصحيح فقط.
+  metadata     Json?
+
+  submittedAt  DateTime @default(now())
+  submittedBy  String?  // 'system' أو معرّف المستخدم لو إدخال يدوي
+
+  // idempotency: نفس نوع الدليل لنفس الأوردر ميتكررش (upsert بدل create)
+  @@unique([orderId, evidenceType])
+  @@index([merchantId, orderId])
+  @@index([orderId, evidenceType])
 }
 
 // ========== Pattern Sharing (Cross-Merchant Learning) ==========
@@ -486,7 +543,8 @@ model BlacklistEntry {
   merchantId String
   storeId    String?   // Agency isolation (opt-in) — null for pooled/legacy entries; nullable so uniqueness below is unaffected for existing rows.
   type       String // EMAIL, IP, DEVICE_FINGERPRINT, BIN
-  value      String // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة)
+  value      String // القيمة الأصلية (غير مشفرة، لأنها قائمة سوداء صريحة) — تفضل كما هي دائمًا، للعرض والـ audit trail فقط
+  normalizedValue String? // للـ EMAIL: normalizeEmail(value) (homoglyph/case/plus-tag aware). للـ IP/DEVICE_FINGERPRINT: value.trim(). للـ BIN: نفس القيمة (already normalized at write time). NULL = صف قديم لسه محتاج backfill.
   reason     String? // سبب الإضافة
   expiresAt  DateTime? // تاريخ انتهاء الحظر (اختياري)
   createdAt  DateTime  @default(now())
@@ -495,6 +553,7 @@ model BlacklistEntry {
   @@unique([merchantId, storeId, type, value])
   @@index([merchantId, type, expiresAt])
   @@index([merchantId, storeId, type, expiresAt])
+  @@index([merchantId, storeId, type, normalizedValue])
 }
 
 // ========== Whitelist (per merchant) ==========
@@ -504,6 +563,7 @@ model WhitelistEntry {
   storeId    String?   // Agency isolation (opt-in) — null for pooled/legacy entries.
   type       String    // EMAIL, IP, BIN
   value      String
+  normalizedValue String? // نفس منطق BlacklistEntry.normalizedValue أعلاه
   reason     String?
   expiresAt  DateTime?
   createdAt  DateTime  @default(now())
@@ -512,6 +572,7 @@ model WhitelistEntry {
   @@unique([merchantId, storeId, type, value])
   @@index([merchantId, type, expiresAt])
   @@index([merchantId, storeId, type, expiresAt])
+  @@index([merchantId, storeId, type, normalizedValue])
 }
 
 // ========== Registration Rate Limiting ==========

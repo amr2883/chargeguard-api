@@ -7,16 +7,25 @@ async function upsertCustomerRiskProfile(order, merchantId, result, db) {
 }
 
 
+const crypto = require('crypto');
 const db = require('./db');
 const logger = require('../lib/logger');
 // const { upsertCustomerRiskProfile } = require('./customerRiskProfile'); // معطل مؤقتًا
-const { getWeightsForMerchant } = require('./signalWeights');
+const { getWeightsForMerchant, DECAY_LAMBDA } = require('./signalWeights');
 const { markOrderAsFraud } = require('./identityGraph');
 const { markPatternAsFraud } = require('./patternSharing');
 
 
 // ─── Constants ────────────────────────────────────────────────────────────
 const SCORING_VERSION = "v1.0-logodds-confidence";
+
+// [Global-tier NULL bug fix] Sentinel value لتمثيل "الإحصائية العامة
+// (غير مرتبطة بتاجر معيّن)" بدل SQL NULL. مستخدمة في updateSignalStat()
+// هنا، ولازم تطابق نفس القيمة بالحرف في signalWeights.js's
+// getWeightsForMerchant() (القراءة). مستحيل تتصادم مع أي merchantId
+// حقيقي — الـ Tenant.id بيتولّد بـ cuid() وصيغته مختلفة تمامًا
+// (زي "clx4k2j8a0000...").
+const GLOBAL_MERCHANT_ID = '__global__';
 
 // Bayesian priors — neutral start (50% win rate assumption)
 const BAYESIAN_ALPHA = 5; // prior wins
@@ -125,12 +134,61 @@ const VALID_SIGNAL_VALUES = {
   NO_CANCEL_REQUEST: ["CONFIRMED"],
   CE30:              ["ELIGIBLE"],
   REFUND:            ["PROCESSED"],
-  DEVICE_VELOCITY:   ["high", "medium"],
-  IP_VELOCITY:       ["high", "medium"],
-  EMAIL_VELOCITY:    ["high"],
-  SHIPPING_BILLING_MISMATCH: ["true"],
-  BIN_ISSUER_MISMATCH: ["true"],
-  AMOUNT_ANOMALY:    ["true"],};
+  // [Case-normalization fix — اكتشاف الجلسة] updateSignalStat() تحت
+  // بتعمل .toUpperCase() على أي signalValue بلا شرط، لكل الإشارات، قبل
+  // ما تقارنها بالقايمة دي وقبل ما تخزّنها في DB. القيم هنا كانت
+  // lowercase ("high"/"medium"/"true") فكانت بترفض بصمت (log.warn
+  // 'Rejected invalid signal') من غير ما تتسجل في SignalStat خالص، من
+  // أول يوم اتضافت فيه — .includes() على array lowercase مقابل قيمة
+  // uppercase ترجع false دايمًا. صُححت لتطابق فعليًا القيمة بعد التطبيع.
+  // "critical" أُضيفت لـ DEVICE_VELOCITY (تدريج count=3+ كان مفقود
+  // بالكامل — راجع فيكس extractSignalsFromSnapshot تحت). IP_BURST مفتاح
+  // جديد بالكامل — نفس السبب.
+  DEVICE_VELOCITY:   ["HIGH", "MEDIUM", "CRITICAL"],
+  IP_VELOCITY:       ["HIGH", "MEDIUM"],
+  IP_BURST:          ["TRUE"],
+  EMAIL_VELOCITY:    ["HIGH"],
+  SHIPPING_BILLING_MISMATCH: ["TRUE"],
+  // [Case-normalization fix] راجع نفس الشرح فوق — كانت مرفوضة بصمت.
+  BIN_ISSUER_MISMATCH: ["TRUE"],
+  AMOUNT_ANOMALY:    ["TRUE"],
+  // [BIN Velocity learning-loop wiring — أهم إشارة كارد تيستنج في
+  // المشروع كله] الثلاث تدريجات دي if/else-if في riskScoring.js — أوردر
+  // واحد بيطلق واحدة بس منهم كحد أقصى، فمعاملتهم كإشارات boolean مستقلة
+  // (نفس نمط IP_BURST) صحيحة، مش تدريج متعدد المستويات زي DEVICE_VELOCITY.
+  BIN_VELOCITY_10MIN: ["TRUE"],
+  BIN_VELOCITY_1H:    ["TRUE"],
+  BIN_VELOCITY_24H:   ["TRUE"],
+  // [SignalStat cardinality fix] كانت غايبة تمامًا من هذا الـ whitelist —
+  // extractSignalsFromSnapshot() بتستخرج IP_COUNTRY (أي كود دولة موجود
+  // في العالم)، BIN_COUNTRY، وBIN_BRAND، وبتتكتب في SignalStat بلا أي
+  // قيد (الشرط `VALID_SIGNAL_VALUES[signalType] && !...includes()` كان
+  // بيرجع false تلقائيًا لغياب المفتاح، يعني مفيش رفض خالص). ده تضخم
+  // cardinality بلا حدود شغال في الإنتاج دلوقتي، مستقل تمامًا عن أي قرار
+  // getW(). القوائم هنا مطابقة لنفس الدول/البراندات المُعرّفة فعليًا في
+  // STATIC_WEIGHTS (signalWeights.js) وCOUNTRY_RISK_TIERS (countryRisk.js)
+  // — أي دولة/براند غير موجود هنا بيتم رفضه بصمت (log.warn) بدل ما يتكتب.
+  // [BIN_COUNTRY completeness fix] أضيفت RO/UA — راجع التعليق المقابل في
+  // signalWeights.js.
+  BIN_COUNTRY:       ["NG", "CM", "GH", "PK", "BD", "VN", "ID", "PH", "RO", "UA"],
+  BIN_BRAND:         ["VISA", "MASTERCARD", "AMEX", "DISCOVER"],
+  IP_COUNTRY:        ["NG", "CM", "GH", "PK", "BD", "VN", "ID", "PH", "RO", "UA"],
+  // [Case-normalization fix — Card Testing scope] نفس علة DEVICE_VELOCITY/
+  // IP_VELOCITY المُصلَّحة قبل كده بالحرف: updateSignalStat() تحت بتعمل
+  // .toUpperCase() بلا شرط على أي signalValue قبل ما تقارنها بالقايمة دي.
+  // القيم كانت lowercase ("true") بينما extractSignalsFromSnapshot() بتبعت
+  // 'true' برضو (lowercase) — بعد التطبيع بيبقى "TRUE"، و.includes("TRUE")
+  // على array فيها "true" ترجع false دايمًا. النتيجة: IP_BOT/EMAIL_DISPOSABLE/
+  // EMAIL_FREE_PROVIDER/EMAIL_DOMAIN_* كانت بترفض بصمت (log.warn 'Rejected
+  // invalid signal') من أول يوم اتضافت فيه — صفر صف وصل SignalStat خالص.
+  // مطابقة الآن لما فعليًا هيتسجل بعد الـ .toUpperCase().
+  IP_BOT:            ["TRUE"],
+  EMAIL_DISPOSABLE:       ["TRUE"],
+  EMAIL_FREE_PROVIDER:    ["TRUE"],
+  EMAIL_DOMAIN_NOT_FOUND:  ["TRUE"],
+  EMAIL_DOMAIN_UNVERIFIED: ["TRUE"],
+  EMAIL_DOMAIN_NO_MX:      ["TRUE"],
+};
 
 async function updateSignalStat(merchantId, signalType, signalValue, isWin, dbClient = db) {
   const normalizedValue = String(signalValue).trim().toUpperCase();
@@ -140,36 +198,67 @@ async function updateSignalStat(merchantId, signalType, signalValue, isWin, dbCl
     logger.warn({ module: 'feedbackLoop', signalType, signalValue: normalizedValue }, 'Rejected invalid signal');
     return;
   }
-  const key = { merchantId: merchantId ?? null, signalType, signalValue: normalizedValue };
 
-  const now = new Date();
+  const scopedMerchantId = merchantId ?? null;
+  const winIncrement  = isWin ? 1 : 0;
+  const lossIncrement = isWin ? 0 : 1;
+  const newId = crypto.randomUUID();
 
-  // استخدام upsert مع increment على rawWins و rawLosses
-  // يضمن atomicity كاملة بدون الحاجة لقراءة القيمة الحالية
-  // dbClient defaults to the module-level `db`, but callers inside the
-  // M7 transaction boundary (processFeedbackSimplified) pass `tx` so
-  // these writes participate in the surrounding transaction.
-  await dbClient.signalStat.upsert({
-    where: { merchantId_signalType_signalValue: key },
-    create: {
-      ...key,
-      rawWins: isWin ? 1 : 0,
-      rawLosses: isWin ? 0 : 1,
-      totalEvents: 1,
-      lastDecayAt: now,
-      // الحقول القديمة decayedWins/decayedLosses نحتفظ بها للتوافق، لكننا لن نستخدمها
-
-      confidence: 0.5,
-    },
-    update: {
-      rawWins: isWin ? { increment: 1 } : undefined,
-      rawLosses: isWin ? undefined : { increment: 1 },
-      totalEvents: { increment: 1 },
-      lastDecayAt: now,
-      // الحقول القديمة: نحدثها بشكل متوافق (نفس القيم الجديدة)
-
-    },
-  });
+  // [lastDecayAt fix] الكود القديم كان بيحدّث lastDecayAt = now() في كل
+  // استدعاء (create وupdate الاتنين) — ده كان بيكسر معنى الـ decay
+  // بالكامل: applyDecay() في signalWeights.js بتحسب daysSince = now -
+  // lastDecayAt وبتطبّقه على *كل* الـ rawWins/rawLosses التراكمية من أول
+  // يوم. لو lastDecayAt بيتحدّث مع كل حدث جديد، أي إشارة نشطة (زي IP_TOR
+  // وقت هجوم حقيقي) هتفضل daysSince ≈ 0 دايمًا وقت القراءة — يعني الـ
+  // decay بيتوقف فعليًا عن أي تأثير عليها، بينما الإشارات الهادئة بس هي
+  // اللي بتتأثر. ده معكوس الغرض الأساسي (تقليل تأثير بيانات قديمة، مش
+  // حديثة) — وأخطر ما يكون بالظبط في الإشارات الأهم لمشروع الكارد
+  // تيستنج (IP_TOR, IP_DATACENTER, BIN_PREPAID).
+  //
+  // الفيكس: "decay-then-accumulate" ذرّي في statement واحد (INSERT ...
+  // ON CONFLICT DO UPDATE). Postgres بيقيّم كل تعبيرات SET ضد قيمة الصف
+  // *قبل* التحديث (مش ضد بعضها البعض) — يعني "SignalStat"."rawWins" في
+  // المعادلة تحت هي القيمة القديمة بالظبط، فمفيش أي read-then-write race
+  // حتى مع كتّاب متزامنين على نفس الصف (Postgres بيقفل الصف وقت الـ
+  // UPDATE زي أي UPDATE عادي — مفيش داعي لـ row locking يدوي). كل حدث
+  // جديد: decay القيمة القديمة على قد الوقت اللي فات من آخر لمسة فعلية
+  // للصف، يضيف +1 للفوز أو الخسارة، يحدّث lastDecayAt = now(). ده
+  // بالتحديد تعريف "lazy exponential decay accumulator" الصحيح — نفس
+  // المعنى اللي applyDecay() في signalWeights.js مبنية عليه من الأول.
+  // الطبقتين (هنا وقت الكتابة، وapplyDecay وقت القراءة) بيتكاملوا مع
+  // بعض صح رياضيًا: exp(-λd1) × exp(-λd2) = exp(-λ(d1+d2))، فمفيش أي
+  // double-decay — كل طبقة بتغطي فترة زمنية مختلفة (من آخر event لآخر
+  // event، ومن آخر event لحظة القراءة).
+  //
+  // DECAY_LAMBDA مستوردة من signalWeights.js (مصدر واحد للحقيقة) بدل ما
+  // تتكرر كرقم منفصل هنا — أي تغيير هناك بينعكس هنا تلقائيًا من غير drift.
+  //
+  // id بيتولّد يدويًا (crypto.randomUUID()) لأن @default(cuid()) في الـ
+  // schema بيتطبّق client-side جوه Prisma's fluent API بس — $executeRaw
+  // بيتخطاه، فلازم نجهزه إحنا قبل الـ INSERT.
+  await dbClient.$executeRaw`
+    INSERT INTO "SignalStat" (
+      "id", "merchantId", "signalType", "signalValue",
+      "rawWins", "rawLosses", "totalEvents", "confidence",
+      "lastDecayAt", "createdAt", "updatedAt"
+    )
+    VALUES (
+      ${newId}, ${scopedMerchantId}, ${signalType}, ${normalizedValue},
+      ${winIncrement}, ${lossIncrement}, 1, 0.5,
+      now(), now(), now()
+    )
+    ON CONFLICT ("merchantId", "signalType", "signalValue")
+    DO UPDATE SET
+      "rawWins" = "SignalStat"."rawWins"
+        * exp(-${DECAY_LAMBDA}::float8 * (EXTRACT(EPOCH FROM (now() - COALESCE("SignalStat"."lastDecayAt", "SignalStat"."createdAt"))) / 86400.0))
+        + ${winIncrement},
+      "rawLosses" = "SignalStat"."rawLosses"
+        * exp(-${DECAY_LAMBDA * 0.5}::float8 * (EXTRACT(EPOCH FROM (now() - COALESCE("SignalStat"."lastDecayAt", "SignalStat"."createdAt"))) / 86400.0))
+        + ${lossIncrement},
+      "totalEvents" = "SignalStat"."totalEvents" + 1,
+      "lastDecayAt" = now(),
+      "updatedAt" = now()
+  `;
 }
 
 // ─── Update Merchant Profile (simplified, no transaction) ─────────────────
@@ -403,8 +492,17 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
         const uniqueSignals = [...new Map(signals.map(s => [`${s.type}:${s.value}`, s])).values()];
 
         for (const signal of uniqueSignals) {
-          // تحديث الإحصائية العامة (merchantId = null)
-          await updateSignalStat(null, signal.type, signal.value, isWin, tx);
+          // [Global-tier NULL bug fix] كانت merchantId=null — الـ unique
+          // constraint (@@unique([merchantId, signalType, signalValue]))
+          // في Postgres بيتجاهل NULL كمعيار مطابقة (NULL ≠ NULL في فحص
+          // الـ unique index)، يعني كل استدعاء بـ merchantId=null كان
+          // هيعمل INSERT صف جديد بدل UPDATE على الصف الموجود، فتتراكم
+          // آلاف الصفوف المكررة بمرور الوقت بدل صف واحد مجمّع لكل إشارة.
+          // اتأكدنا إن الجدول فاضي تمامًا حاليًا (صفر صفوف، صفر
+          // DisputeOutcome) — يعني الفيكس ده بيتطبّق قبل أي بيانات
+          // تتجمع، فمفيش أي migration/دمج مطلوب. GLOBAL_MERCHANT_ID قيمة
+          // ثابتة (مش NULL) فالـ unique constraint هتشتغل صح تلقائيًا.
+          await updateSignalStat(GLOBAL_MERCHANT_ID, signal.type, signal.value, isWin, tx);
           // تحديث إحصائية التاجر
           await updateSignalStat(merchantId, signal.type, signal.value, isWin, tx);
         }
@@ -538,8 +636,18 @@ function extractSignalsFromSnapshot(snapshot) {
     if (snapshot.emailIntel.isFreeProvider) {
       signals.push({ type: 'EMAIL_FREE_PROVIDER', value: 'true' });
     }
-    if (!snapshot.emailIntel.domainExists) {
-      signals.push({ type: 'EMAIL_DOMAIN_INVALID', value: 'true' });
+    // [Granularity fix] بديل EMAIL_DOMAIN_INVALID الخام — بيطابق فروع
+    // calculateEmailPenalty() في emailIntelligence.js حرفيًا (نفس شروط
+    // domainExists/uncertain/hasMX)، بدل شرط واحد كان بيخلط حالتين
+    // ويترك حالة تالتة عمياء تمامًا. snapshot.emailIntel هنا هو نفس شكل
+    // نتيجة getEmailIntelligence() (مخزّن كامل في signalsSnapshot.emailIntel
+    // عبر risk.js)، فكل الحقول دي متاحة.
+    if (snapshot.emailIntel.domainExists === false && snapshot.emailIntel.uncertain !== true) {
+      signals.push({ type: 'EMAIL_DOMAIN_NOT_FOUND', value: 'true' });
+    } else if (snapshot.emailIntel.domainExists === false && snapshot.emailIntel.uncertain === true) {
+      signals.push({ type: 'EMAIL_DOMAIN_UNVERIFIED', value: 'true' });
+    } else if (snapshot.emailIntel.hasMX === false && snapshot.emailIntel.uncertain !== true) {
+      signals.push({ type: 'EMAIL_DOMAIN_NO_MX', value: 'true' });
     }
   }
 
@@ -553,6 +661,12 @@ function extractSignalsFromSnapshot(snapshot) {
     }
     if (snapshot.ipIntel.isTor) {
       signals.push({ type: 'IP_TOR', value: 'true' });
+    }
+    // [IP_BOT wiring] كانت غايبة تمامًا — isBot عندها عقوبة فعلية شغالة في
+    // calculateIPPenalty() من زمان (راجع ipIntelligence.js) لكن التعلّم
+    // منها ما بدأش خالص لغياب هذا السطر.
+    if (snapshot.ipIntel.isBot) {
+      signals.push({ type: 'IP_BOT', value: 'true' });
     }
     if (snapshot.ipIntel.country) {
       signals.push({ type: 'IP_COUNTRY', value: snapshot.ipIntel.country });
@@ -569,20 +683,47 @@ function extractSignalsFromSnapshot(snapshot) {
     signals.push({ type: 'HIGH_VALUE', value: 'true' });
   }
 
-  // Connected risk signal
-  if (snapshot.connectedRisk > 30) {
+  // Connected risk signal — [threshold fix] riskScoring.js's الفعلي
+  // بيبدأ العقوبة من `graphRisk > 10` — العتبة القديمة هنا (>30) كانت
+  // بتفوّت كل النطاق من 11 لـ30 رغم إنه بياخد عقوبة فعلية (لحد -30).
+  if (snapshot.connectedRisk > 10) {
     signals.push({ type: 'GRAPH_RISK_HIGH', value: 'true' });
   }
 
   // ===== الإشارات الجديدة =====
-  // Device velocity
-  if (snapshot.deviceVelocityCount >= 2) {
-    signals.push({ type: 'DEVICE_VELOCITY', value: snapshot.deviceVelocityCount >= 3 ? 'high' : 'medium' });
+  // [Card-testing signal fidelity fix] كانت الكتلتين تحت بتخترعوا تدريج
+  // medium/high مش له أساس في riskScoring.js الحقيقي — مطابقة دلوقتي
+  // بالحرف. القيم لسه lowercase هنا (زي ما كانت) — مفيش داعي uppercase
+  // في الاستخراج نفسه، updateSignalStat() بتطبّعها بعد كده تلقائيًا.
+
+  // Device velocity — [fix] كانت بتبدأ من count>=2، وبتخلط count=2
+  // وcount=3+ تحت "high" واحدة، وبتتجاهل count=1 تمامًا رغم إنه بياخد
+  // عقوبة فعلية (-15). دلوقتي مطابقة لتدريج riskScoring.js's
+  // deviceVelocityCount بالحرف: medium=1(-15), high=2(-25), critical=3+(-40)
+  // — نفس القيم المستخدمة في topSignals هناك بالظبط.
+  if (snapshot.deviceVelocityCount >= 3) {
+    signals.push({ type: 'DEVICE_VELOCITY', value: 'critical' });
+  } else if (snapshot.deviceVelocityCount === 2) {
+    signals.push({ type: 'DEVICE_VELOCITY', value: 'high' });
+  } else if (snapshot.deviceVelocityCount === 1) {
+    signals.push({ type: 'DEVICE_VELOCITY', value: 'medium' });
   }
 
-  // IP velocity
+  // IP velocity — [fix] riskScoring.js's ipVelocityCount>=2 gate صيغة
+  // log2 مستمرة بسيفريتي واحدة "high" بس دايمًا — مفيش تدريج medium
+  // حقيقي خالص. التدريج القديم هنا (count>=3→'high' وإلا 'medium') كان
+  // اختراع بلا أساس في الكود الحقيقي.
   if (snapshot.ipVelocityCount >= 2) {
-    signals.push({ type: 'IP_VELOCITY', value: snapshot.ipVelocityCount >= 3 ? 'high' : 'medium' });
+    signals.push({ type: 'IP_VELOCITY', value: 'high' });
+  }
+
+  // IP burst — [إشارة جديدة] كانت غايبة بالكامل. riskScoring.js's
+  // "sustained_ip_burst" override (ipVelocityCount>=10 → -50, critical،
+  // topSignals type "IP_BURST") بيتفعّل بـ if مستقل (مش else-if) جنب
+  // بلوك IP_VELOCITY فوق — الاتنين بيطبّقوا مع بعض على نفس الحدث،
+  // فتسجيلهم مع بعض هنا صحيح ومطابق للواقع، مش تكرار.
+  if (snapshot.ipVelocityCount >= 10) {
+    signals.push({ type: 'IP_BURST', value: 'true' });
   }
 
   // Email velocity
@@ -603,6 +744,18 @@ function extractSignalsFromSnapshot(snapshot) {
   // Amount anomaly
   if (snapshot.amountAnomaly) {
     signals.push({ type: 'AMOUNT_ANOMALY', value: 'true' });
+  }
+
+  // [BIN Velocity learning-loop wiring] if/else-if مطابق بالحرف لنفس
+  // الأولوية المستخدمة في riskScoring.js (10min > 1h > 24h) — أوردر
+  // واحد بيولّد إشارة واحدة بس، تعكس بالظبط التدريج اللي فعليًا طبّق
+  // العقوبة على هذا الأوردر، مش كل التدريجات اللي تحقق شرطها.
+  if (snapshot.binVelocityCount10min >= 2) {
+    signals.push({ type: 'BIN_VELOCITY_10MIN', value: 'true' });
+  } else if (snapshot.binVelocityCount1h >= 3) {
+    signals.push({ type: 'BIN_VELOCITY_1H', value: 'true' });
+  } else if (snapshot.binVelocityCount24h >= 5) {
+    signals.push({ type: 'BIN_VELOCITY_24H', value: 'true' });
   }
 
   return signals;

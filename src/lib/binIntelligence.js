@@ -14,6 +14,7 @@ const prometheus = require('./prometheus');
 const logger = require('../lib/logger');
 const db = require('./db'); // Prisma client for BinRecord
 const { calculateCountryRiskPenalty } = require('./countryRisk');
+const { getLearnedMultiplier } = require('./signalWeights');
 // binlistGlobalBucket imported from metrics
 // const { calculateCountryRiskPenalty } = require('./countryRisk'); // غير مطلوب حاليًا
 
@@ -405,7 +406,12 @@ async function getBINIntelligence(binRaw, merchantId = null) {
 }
 
 // ─── Penalty calculation (to be used in riskScoring.js) ─────────────────
-function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, merchantConfig = null) {
+// [Learning-loop wiring] getW اختيارية، بس مُستخدمة هنا حاليًا لتمريرها
+// لـ calculateCountryRiskPenalty() (Signal 4 تحت — BIN_COUNTRY). BIN_PREPAID
+// (Signal 1) وBIN issuer/billing mismatch (Signal 2) لسه hardcoded عمدًا —
+// الاتنين amount-scaled (زي IP_DATACENTER)، توصيلهم بأمان محتاج قرار
+// تصميمي منفصل (فصل الـ boolean عن صيغة amount-scaling)، مش نسخ/لصق.
+function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, merchantConfig = null, getW = null) {
   if (!binIntel || binIntel.source === 'skipped') return { penalty: 0, flags: [] };
 
   let penalty = 0;
@@ -418,14 +424,22 @@ function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, mer
   };
 
   // Signal 1: Prepaid card
+ // Signal 1: Prepaid card
   if (binIntel.isPrepaid) {
-    const base = amount > 200 ? 20 : 10;
+    // [Amount-scaled signals wiring] الصيغة الأصلية (amount > 200 ? 20 : 10)
+    // باقية كما هي — getLearnedMultiplier() بس بتحرّكها نسبيًا حسب تاريخ
+    // dispute حقيقي لإشارة BIN_PREPAID. الـ combo bonus تحت (+20، prepaid
+    // + new customer + high value) يفضل hardcoded عمدًا — مفيش إشارة
+    // تعلّم مخصصة لهذا الـ compound condition في extractSignalsFromSnapshot()،
+    // فمفيش بيانات نتعلّم منها؛ توصيلها محتاج إضافة إشارة جديدة مستقلة أولاً.
+    // [Case-normalization fix]
+    const prepaidMultiplier = getLearnedMultiplier(getW, 'BIN_PREPAID', 'TRUE');
+    const base = Math.round((amount > 200 ? 20 : 10) * prepaidMultiplier);
     addPenalty(base);
     flags.push({
       severity: amount > 200 ? 'high' : 'medium',
       text: `Prepaid card detected (${binIntel.brand || 'unknown'}) — elevated fraud risk`,
     });
-
     if (isNewCustomer && amount >= 150) {
       addPenalty(20);
       flags.push({
@@ -446,7 +460,13 @@ function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, mer
   } catch { /* ignore */ }
 
   if (binIntel.issuerCountry && billingCountry && binIntel.issuerCountry !== billingCountry) {
-    const p = amount > 100 ? 12 : 5;
+    // [Amount-scaled signals wiring] نفس نمط Signal 1 — الصيغة
+    // (amount > 100 ? 12 : 5) باقية، multiplier بس بيحرّكها. مطابقة
+    // 1:1 مع snapshot.binIssuerMismatch في extractSignalsFromSnapshot()،
+    // فالبيانات المتعلّمة تقيس بالظبط نفس الشرط اللي بيفعّل العقوبة هنا.
+    // [Case-normalization fix]
+    const mismatchMultiplier = getLearnedMultiplier(getW, 'BIN_ISSUER_MISMATCH', 'TRUE');
+    const p = Math.round((amount > 100 ? 12 : 5) * mismatchMultiplier);
     addPenalty(p);
     flags.push({
       severity: amount > 100 ? 'high' : 'medium',
@@ -480,6 +500,7 @@ function calculateBINPenalty(binIntel, order, isNewCustomer, ipIntel = null, mer
         binIntel.issuerCountry,
         amount,
         merchantConfig,
+        getW,
       );
       if (countryRisk) {
         addPenalty(countryRisk.penalty);

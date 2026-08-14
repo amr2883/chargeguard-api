@@ -492,6 +492,14 @@ async function recordPattern(order, emailIntel, ipIntel, isFraud = false, mercha
     indexPattern(patternHash, activeSignals);
 
     const isNewPatternMerchant = await registerPatternMerchant(patternHash, merchantId);
+    // [Per-tenant cap off-by-one fix] كانت مفقودة في مسار "pattern جديد"
+    // تحديدًا — الفرع existing فوق بينادي incrementMerchantLegitCount()
+    // بعد registerPatternMerchant() بالظبط، لكن هذا الفرع (أول ظهور
+    // للـ pattern) كان بيحط FraudPattern.legitCount=1 في الـ create تحت
+    // من غير ما يعكسها على PatternMerchant.legitCount — يعني أول مساهمة
+    // legit لأي تاجر لأي pattern جديد كانت بتفلت من MAX_LEGIT_INFLUENCE_PER_MERCHANT
+    // (5) بصمت، فالسقف الفعلي كان 6 مش 5.
+    if (!isFraud) await incrementMerchantLegitCount(patternHash, merchantId);
 
     const firstFraudCount  = isFraud ? 1 : 0;
     const firstTotalCount  = 1;

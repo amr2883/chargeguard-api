@@ -78,7 +78,23 @@ function normalizeValue(type, value) {
       // IdentityNode rows for what is the same real-world identity.
       return normalizeEmailShared("EMAIL", value);
     case "IP":
-      return value.trim();
+      // [IP-plausibility fix] نفس منطق فيكس EMAIL فوق بالحرف — utils.js's
+      // normalizeValue("IP", ...) بترفض private/reserved IPs و Cloudflare
+      // edge IPs (عبر isPlausibleClientIp()، اللي تعليقها بينص صراحة على
+      // "identity-graph anchoring" كأحد الاستخدامات المقصودة لها). كانت
+      // هذه الحالة بس (من بين EMAIL/IP الاتنين) سابت local .trim() بدون
+      // أي فحص، رغم إن normalizeEmailShared (=utils.js's normalizeValue)
+      // مستوردة بالفعل جوه هذا الملف ومستخدمة لـ EMAIL بجانبها مباشرة.
+      // بدون الفيكس ده: أي IP خام (private/reserved، أو Cloudflare edge IP
+      // نتيجة misconfiguration في resolve الـ client IP) كان بيتحول لـ
+      // IdentityNode فعلي ويدخل في traversal/global-risk حسابات — ده أخطر
+      // ما يكون مع edge IPs مشتركة: مئات العملاء المختلفين وراء نفس الـ
+      // Cloudflare IP كانوا هيتلخبطوا كأنهم "نفس الجهاز/الشبكة" في الـ
+      // graph. لو الفحص رفض الـ IP، normalizeValue() بترجع '' فـ
+      // hashValue() بترجع null و upsertNode/upsertGlobalNode بيتجاهلوا
+      // الحقل ده بهدوء (نفس سلوك utils.js's IP case بالظبط) — مش بيوقف
+      // بناء باقي الـ graph (DEVICE/EMAIL/ADDRESS لسه بيتسجلوا عادي).
+      return normalizeEmailShared("IP", value);
     case "DEVICE":
     case "FINGERPRINT":
       return value.trim();
