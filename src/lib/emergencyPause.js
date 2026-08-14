@@ -107,6 +107,20 @@ async function activatePause({ tenantId = null, durationMinutes, activatedById =
 }
 
 async function deactivatePause({ tenantId = null, deactivatedById = null, reason = 'manual', silent = false } = {}) {
+  // [Memory/DB divergence fix] الـ DB write بقى الأول دلوقتي — لو فشل، الدالة
+  // بترمي exception قبل ما تلمس الذاكرة خالص، فمفيش أي لحظة الذاكرة بتقول
+  // "مفيش pause" والـ DB لسه بيقول "فيه pause فعّال". قبل الفيكس، الترتيب
+  // كان معكوس: الذاكرة بتتفضّى الأول، فلو الـ updateMany فشل، الصف في الـ
+  // DB يفضل isActive:true بينما الذاكرة بتفتكر إنه اتشال — وده كان بيرجع
+  // يظهر تاني بعد أي restart عن طريق loadActivePauses() (اللي بتحمّل أي صف
+  // isActive:true ولسه مش منتهي). activatePause() بينادي الدالة دي (silent)
+  // قبل ما يعمل create لصف جديد بدون try/catch — فلو فشلت هنا، الفيكس ده
+  // بيضمن إن activatePause كمان تفشل بنظافة بدل ما تسيب حالة متضاربة.
+  const result = await db.emergencyPause.updateMany({
+    where: { tenantId: tenantId ?? null, isActive: true },
+    data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: reason },
+  });
+
   const timerId = tenantId ? tenantPauses.get(tenantId)?.id : globalPause?.id;
   if (timerId && timers.has(timerId)) {
     clearTimeout(timers.get(timerId));
@@ -114,11 +128,6 @@ async function deactivatePause({ tenantId = null, deactivatedById = null, reason
   }
   if (tenantId) tenantPauses.delete(tenantId);
   else globalPause = null;
-
-  const result = await db.emergencyPause.updateMany({
-    where: { tenantId: tenantId ?? null, isActive: true },
-    data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: reason },
-  });
 
   if (!silent) {
     logger.warn({ module: 'emergencyPause', tenantId: tenantId || 'GLOBAL', deactivatedById, reason }, 'Emergency pause DEACTIVATED');

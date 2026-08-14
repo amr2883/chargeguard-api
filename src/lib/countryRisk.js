@@ -74,24 +74,32 @@ function getCountryRiskTier(countryCode) {
 //   { countryOverrides: { 'PH': 'allow', 'NG': 'escalate' } }
 //
 // بيرجع { penalty, flag } أو null لو مفيش risk أو اتـsuppress
-function calculateCountryRiskPenalty(countryCode, amount, merchantConfig = null) {
+// [Learning-loop wiring] getW اختيارية، نفس النمط المتبع في باقي الملفات.
+// عند cold start، getStaticWeight('BIN_COUNTRY', code) === riskTier.basePenalty
+// حرفيًا لكل الدول العشرة (تم التحقق يدويًا — critical=15/high=10/
+// medium=6/elevated=3 تطابق STATIC_WEIGHTS's BIN_COUNTRY:* بالظبط بعد
+// إضافة RO/UA)، يعني صفر أثر سلوكي وقت النشر.
+function calculateCountryRiskPenalty(countryCode, amount, merchantConfig = null, getW = null) {
   const riskTier = getCountryRiskTier(countryCode);
   if (!riskTier) return null;
-
   // ─── Merchant Override ────────────────────────────────────────────────
   // 'allow'     — suppress الـ penalty كاملاً (مثال: merchant سوقه الأساسي PH)
   // 'escalate'  — ضاعف الـ penalty (مثال: merchant شايف NG high risk جداً)
   // مفيش override — استخدم الـ default tier penalty
   const override = merchantConfig?.countryOverrides?.[countryCode?.toUpperCase()];
   if (override === 'allow') return null; // suppressed
-
+  // الأساس الفعلي — متعلّم لو getW متاحة (وبيتحرك مع تاريخ dispute حقيقي
+  // لهذه الدولة تحديدًا)، أو ثابت التصميم الأصلي كـ fallback.
+  const effectiveBase = getW
+    ? getW('BIN_COUNTRY', countryCode.toUpperCase())
+    : riskTier.basePenalty;
   // ─── Amount Scaling ───────────────────────────────────────────────────
   // أوردر فوق $100 → full penalty
   // أوردر تحت $100 → نص الـ penalty
   // منطق: risk بيتضخم مع قيمة الأوردر
   const scaledPenalty = amount > 100
-    ? riskTier.basePenalty
-    : Math.floor(riskTier.basePenalty / 2);
+    ? effectiveBase
+    : Math.floor(effectiveBase / 2);
 
   const finalPenalty = override === 'escalate'
     ? Math.min(scaledPenalty * 2, 20) // escalate مع cap عشان مش نبالغ

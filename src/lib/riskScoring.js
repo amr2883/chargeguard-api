@@ -3,9 +3,10 @@
 // v2: Integrated with Learning System (SignalWeights + RiskEvaluation)
 
 const db = require('../lib/db');
-const { getWeightsForMerchant, getStaticWeight } = require('./signalWeights');
+const { getWeightsForMerchant, getStaticWeight, getLearnedMultiplier } = require('./signalWeights');
 const { getConnectedRisk } = require('./identityGraph');
 const { normalizeEmail } = require('../lib/utils');
+const { computeNormalizedValue } = require('./blacklistGate');
 const { getIPIntelligence, calculateIPPenalty } = require('./ipIntelligence');
 const { getEmailIntelligence, calculateEmailPenalty, invalidateEmailCache } = require('./emailIntelligence');
 const { findSimilarDisputes } = require('./similarity');
@@ -184,6 +185,30 @@ async function calculateRiskScore(
   const email = normalizeEmail(order.email);
   const ip = order.ipAddress || "";
   const deviceId = order.deviceFingerprint || order.deviceId || "";
+
+  // [Discovery 2 fix] BIN لازم تتحسب هنا فوق، مش عند binRaw تحت (قسم IP
+  // Intelligence) — inBlacklist في Tier 1 تحت محتاجها قبل نقطة تعريف
+  // binRaw بمراحل طويلة. نفس نمط earlyHasCorroboration/earlyDeviceTrustFactor
+  // تحت (إعادة حساب مبكرة من نفس المصدر بدل إعادة ترتيب الفنكشن كله).
+  // Digit-strip + slice(0,6) نفس منطق enrichmentProcessor.js's
+  // cardBinPrefix — مش نفس binPrefix المُعرّف لاحقًا في قسم BIN Velocity
+  // (ده من غير strip، ومُعرّف بعد نقطة استخدام inBlacklist بمراحل).
+  const earlyOrderBin = order.payment_details?.card_bin ?? order.payment_details?.credit_card_bin ?? null;
+  const earlyBinPrefix = earlyOrderBin ? String(earlyOrderBin).replace(/\D/g, '').slice(0, 6) : null;
+
+  // TDZ FIX (hotfix): isNewEmail لازم تتحسب هنا، فور توفر `email`، لأن
+  // بلوك deviceDisputes في Tier 1 تحت بيقراها عن طريق earlyHasCorroboration
+  // قبل نقطة تعريفها الأصلية (اللي كانت قبل كده قريبة من isNewDevice، بعد
+  // مئات السطور). قراءة const قبل تعريفها بترمي ReferenceError (temporal
+  // dead zone) — يعني أي أوردر من جهاز عليه dispute خاسرة سابقة كان بيكرش
+  // الفنكشن بالكامل، وده بيتسبب كمان في فتح الـ circuit breaker في الـ
+  // WordPress plugin بعد 3 فشلات متتالية (راجع request_with_breaker في
+  // class-api-client.php) — يعني الحماية كلها بتتقفل مؤقتًا للمتجر كله،
+  // مش بس للجهاز ده. التعريف الأصلي (دوّر على isNewDevice) اتشال، وده
+  // بقى المصدر الوحيد للمتغيّر ده.
+  const isNewEmail = !allOrders.some(o =>
+    normalizeEmail(o.email) === email && o.id !== order.id
+  );
   const shippingAddr = (() => {
     try { return JSON.parse(order.shippingAddress || "{}"); } catch { return {}; }
   })();
@@ -194,7 +219,14 @@ async function calculateRiskScore(
   const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
   const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-
+  // [P0 fix] الـ duplicate declaration اللي كانت هنا اتشالت — isNewEmail
+  // بالفعل معرّفة فوق (راجع تعليق "TDZ FIX (hotfix)" قبل شويّة، قبل
+  // shippingAddr). كان فيه نسختين `const isNewEmail` في نفس الـ function
+  // scope، وده SyntaxError وقت التحميل (Identifier 'isNewEmail' has
+  // already been declared) — مش runtime error شرطي زي الـ bug الأصلي، ده
+  // كان بيمنع الملف كله من إنه يتحمّل بـ require()، يعني الـ backend كان
+  // مش هيقدر يقوم خالص. التعليق القديم هنا كان بيوصف نية صحيحة (نقل
+  // التعريف لأول الفنكشن) لكن التنفيذ نسي يمسح النسخة القديمة.
 
   // ─── Intel Results Cache ───────────────────────────────────────────────
   // محفوظين هنا عشان الـ pattern sharing يستخدمهم بدون API calls جديدة
@@ -261,11 +293,33 @@ async function calculateRiskScore(
     topSignals.push({ type: "BOT", value: "elevated", contribution: -15 });
   }
 
-  const inBlacklist = blacklist.some(b =>
-    (b.email && b.email === email) ||
-    (b.ip && b.ip === ip) ||
-    (b.deviceId && b.deviceId === deviceId)
-  );
+  // [Discovery 1 fix] كانت بتقارن b.email/b.ip/b.deviceId — حقول مش
+  // موجودة أصلاً على BlacklistEntry (الـ schema الحقيقي: type/value/
+  // normalizedValue، راجع blacklistGate.js). كانت dead code دايمًا —
+  // .some() ترجع false مهما كان محتوى blacklist. المطابقة دلوقتي صحيحة
+  // ضد الـ shape الفعلي. عمليًا هذا الفحص الآن defense-in-depth بس، مش
+  // الدفاع الأساسي: /evaluate و/woocommerce-webhook الاتنين بيوقفوا
+  // الطلب بـ 403 قبل ما يوصلوا هنا لو فيه تطابق (راجع risk.js's early
+  // gates)، فـ blacklist هنا بيوصل فاضي دايمًا من المسارين المعروفين —
+  // لكن أي caller مستقبلي لـ calculateRiskScore() من غير early gate
+  // خاص بيه (مثال: rescoreOrder() لو اتفعّلت) هيستفيد من الحماية دي
+  // فعليًا بدل ما تكون فخ صامت.
+  const inBlacklist = blacklist.some(b => {
+    if (!b || !b.type) return false;
+    const bNormalized = b.normalizedValue ?? computeNormalizedValue(b.type, b.value);
+    if (b.type === 'EMAIL')              return !!email && bNormalized === email;
+    if (b.type === 'IP')                 return !!ip && bNormalized === String(ip).trim();
+    if (b.type === 'DEVICE_FINGERPRINT') return !!deviceId && bNormalized === String(deviceId).trim();
+    // [Discovery 2 fix] كانت BIN غايبة من هذا الفحص خالص — نفس فئة باگ
+    // Discovery 1 الأصلي (حقل مدعوم في الـ schema بس مش متفحّص فعليًا).
+    // defense-in-depth بس حاليًا: الـ 3 callers المعروفين (evaluate،
+    // webhook، enrich) بيمرروا blacklist=[] دايمًا — enrichmentProcessor.js
+    // دلوقتي عنده early BIN gate خاص بيه قبل ما يوصل هنا خالص — لكن أي
+    // caller مستقبلي من غير early gate هيستفيد من الحماية دي فعليًا بدل
+    // ما تكون فخ صامت تاني.
+    if (b.type === 'BIN')                return !!earlyBinPrefix && bNormalized === earlyBinPrefix;
+    return false;
+  });
   if (inBlacklist) {
     score -= 80;
     flags.push({ severity: "critical", text: "Customer is on the fraud blacklist" });
@@ -298,6 +352,7 @@ async function calculateRiskScore(
   if (ipDisputes.length >= 3) {
     score -= 50;
     flags.push({ severity: "critical", text: "ip_dispute_network" });
+    topSignals.push({ type: "IP_DISPUTE_NETWORK", value: ipDisputes.length, contribution: -50 });
   }
 
   // ─── Tier 2 — Strong ──────────────────────────────────────────────────
@@ -326,10 +381,16 @@ async function calculateRiskScore(
     try {
       ipIntelResult = ipIntelSettled.value;
       const billingCountry = billingAddr.country?.toUpperCase() ?? null;
+      // [Learning-loop wiring] getW مُمرّرة دلوقتي — getW معرّفة فوق (Helper
+      // — gets effective weight for a signal) وبتستخدم weights المحمّلة
+      // من getWeightsForMerchant() لو merchantId متاح، أو fallback لـ
+      // getStaticWeight() (نفس القيم الثابتة القديمة) لو مش متاح — بالظبط
+      // نفس النمط المستخدم بالفعل لـ ECI/AVS/CVV2 فوق.
       const { penalty: ipPenalty, flags: ipFlags } = calculateIPPenalty(
         ipIntelResult,
         order.amount || 0,
         billingCountry,
+        getW,
       );
       if (ipPenalty > 0) {
         score -= ipPenalty;
@@ -345,7 +406,14 @@ async function calculateRiskScore(
 
   if (shippingAddr.country && billingAddr.country && shippingAddr.country !== billingAddr.country) {
     score -= 15;
-    flags.push({ severity: "high", text: "Shipping country differs from billing country" });
+    // [Bug #4 fix] كانت جملة بشرية ("Shipping country differs from billing
+    // country") بعكس كل الأعلام التانية في الملف (كلها snake_case).
+    // risk.js's /evaluate كان بيدوّر على 'shipping_billing_mismatch'
+    // بالظبط فمكنش بيلاقيها أبدًا — shippingBillingMismatch في
+    // signalsSnapshot كانت دايمًا false. نفس السبب الجذري لـ Bug #10
+    // (SHIPPING_BILLING_MISMATCH learning signal ميت) — التوحيد بيحل
+    // الاتنين مرة واحدة.
+    flags.push({ severity: "high", text: "shipping_billing_mismatch" });
   }
 
 
@@ -363,10 +431,8 @@ async function calculateRiskScore(
     : 0;
   const orderMultiple = avgOrderValue > 0 ? order.amount / avgOrderValue : 0;
   const isHighValue = orderMultiple >= 3;
-  // isNewEmail — email مش شفناه قبل كده
-  const isNewEmail = !allOrders.some(o =>
-    normalizeEmail(o.email) === email && o.id !== order.id
-  );
+  // isNewEmail is now computed earlier in this function (right after
+  // last1h/last6h/last24h) — see the TDZ crash fix comment there.
 
   // isNewDevice — device مش شفناه قبل كده
   const isNewDevice = !deviceId || !allOrders.some(o =>
@@ -403,12 +469,18 @@ async function calculateRiskScore(
     }
   }
 
+  // Bug fix: unlike deviceDisputes/ipDisputes just above (both filtered by
+  // d.result === "lost"), this filter was missing the outcome check
+  // entirely — meaning a customer who WON a prior dispute (proven
+  // legitimate, evidence accepted) was penalized identically to one who
+  // lost it. Winning a dispute is evidence of legitimacy, not fraud risk.
   const emailDisputes = disputes.filter(d =>
-    normalizeEmail(d.order?.email) === email && email
+    normalizeEmail(d.order?.email) === email && email && d.result === "lost"
   );
   if (emailDisputes.length > 0) {
     score -= 30;
     flags.push({ severity: "high", text: "email_dispute_history" });
+    topSignals.push({ type: "EMAIL_DISPUTE", value: "lost", contribution: -30 });
   }
 // ─── Authenticated Account Signal ────────────────────────────────────────
   // customerLoginId = Shopify customer account ID (null for guest checkout)
@@ -487,7 +559,8 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
         { amount: order.amount, billingAddress: billingAddr },
         isNewCustomer,
         ipIntelResult,
-        merchantConfig
+        merchantConfig,
+        getW,
       );
       if (binPenalty > 0) {
         score -= binPenalty;
@@ -518,6 +591,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
         emailIntelResult,
         order.amount || 0,
         isNewEmail,
+        getW,
       );
       if (emailPenalty > 0) {
         score -= emailPenalty;
@@ -612,24 +686,47 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     }
   }
 
-  // تطبيق العقوبات بناءً على deviceVelocityCount
+  // [Learning-loop wiring — Card Testing priority] كانت قيم ثابتة تمامًا
+  // (40/25/15) بمعزل كامل عن نظام التعلّم — رغم إن DEVICE_VELOCITY أهم
+  // إشارة كارد تيستنج كلاسيكية (تكرار نفس الجهاز بسرعة). الأرقام دي
+  // مطابقة بالحرف لـ base القيم في STATIC_WEIGHTS
+  // (DEVICE_VELOCITY:CRITICAL/HIGH/MEDIUM = 40/25/15)، فاستبدال مباشر
+  // بـ getW() آمن 100%: عند cold start (صفر بيانات تعلّم) بترجع نفس
+  // القيم الثابتة بالضبط — صفر أثر سلوكي وقت النشر. مع تراكم dispute
+  // outcomes حقيقية، القيمة تتحرك جوه [0, base×3] (راجع
+  // MAX_WEIGHT_MULTIPLIER في signalWeights.js).
   if (deviceVelocityCount >= 3) {
-    score -= 40;
+    const penalty = Math.round(getW("DEVICE_VELOCITY", "CRITICAL"));
+    score -= penalty;
     flags.push({ severity: "critical", text: "device_velocity_blocked" });
-    topSignals.push({ type: "DEVICE_VELOCITY", value: "critical", contribution: -40 });
+    topSignals.push({ type: "DEVICE_VELOCITY", value: "critical", contribution: -penalty });
   } else if (deviceVelocityCount === 2) {
-    score -= 25;
+    const penalty = Math.round(getW("DEVICE_VELOCITY", "HIGH"));
+    score -= penalty;
     flags.push({ severity: "high", text: "device_velocity_blocked" });
-    topSignals.push({ type: "DEVICE_VELOCITY", value: "high", contribution: -25 });
+    topSignals.push({ type: "DEVICE_VELOCITY", value: "high", contribution: -penalty });
   } else if (deviceVelocityCount === 1) {
-    score -= 15;
+    const penalty = Math.round(getW("DEVICE_VELOCITY", "MEDIUM"));
+    score -= penalty;
     flags.push({ severity: "medium", text: "device_velocity_blocked" });
-    topSignals.push({ type: "DEVICE_VELOCITY", value: "medium", contribution: -15 });
+    topSignals.push({ type: "DEVICE_VELOCITY", value: "medium", contribution: -penalty });
   }
 
-  // IP velocity penalty
+  // [Learning-loop wiring — Card Testing priority] الـ 15 هنا معامل جوه
+  // صيغة log2 مستمرة (مش عقوبة نهائية مباشرة) — استبدال كامل بـ getW()
+  // كان هيمسح صيغة الـ log2 بالكامل ويحوّلها لقيمة ثابتة. بدل كده،
+  // getLearnedMultiplier() بترجع *نسبة* (learned/staticBase) بتحرّك
+  // المعامل الأصلي جوه نفس الصيغة — نفس نمط BIN_PREPAID في
+  // binIntelligence.js بالحرف. عند cold start (getW بترجع نفس
+  // static base) النسبة = 1.0 بالضبط، فالصيغة الأصلية (15 × log2)
+  // تشتغل بلا أي تغيير سلوكي.
+  //
+  // الـ cap (35) يفضل *ثابت* عمدًا وغير متأثر بالـ multiplier — سقف أمان
+  // معماري بيمنع انفجار عقوبة إشارة واحدة على حساب باقي الإشارات، مش
+  // قيمة قابلة للتعلّم في حد ذاتها.
   if (ipVelocityCount >= 2) {
-    const ipVelocityPenalty = Math.min(Math.round(15 * Math.log2(ipVelocityCount + 1)), 35);
+    const ipVelocityMultiplier = getLearnedMultiplier(getW, 'IP_VELOCITY', 'HIGH');
+    const ipVelocityPenalty = Math.min(Math.round(15 * ipVelocityMultiplier * Math.log2(ipVelocityCount + 1)), 35);
     score -= ipVelocityPenalty;
     flags.push({ severity: "high", text: "ip_velocity_high" });
     topSignals.push({ type: "IP_VELOCITY", value: ipVelocityCount, contribution: -ipVelocityPenalty });
@@ -648,63 +745,123 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   // proxy/exit node, not just a new cookie or random string — so once the
   // count is high enough, it is treated as a definitive signal on its own,
   // independent of whether device/email signals were successfully evaded.
+  // [Learning-loop wiring — Card Testing priority] كانت 50 ثابتة — مطابقة
+  // بالحرف لـ IP_BURST:TRUE's base الجديد في STATIC_WEIGHTS (صفر أثر
+  // سلوكي وقت النشر). IP هي أصعب إشارة على المهاجم يتفاداها (محتاج
+  // exit node جديد فعليًا، مش مجرد fingerprint عشوائي) — أولوية عالية
+  // لتفعيل التعلّم عليها.
   if (ipVelocityCount >= 10) {
-    score -= 50;
+    const burstPenalty = Math.round(getW("IP_BURST", "TRUE"));
+    score -= burstPenalty;
     flags.push({ severity: "critical", text: "sustained_ip_burst" });
-    topSignals.push({ type: "IP_BURST", value: ipVelocityCount, contribution: -50 });
+    topSignals.push({ type: "IP_BURST", value: ipVelocityCount, contribution: -burstPenalty });
   }
 
-  // Email velocity penalty
+  // [Learning-loop wiring — Card Testing priority] نفس نمط IP_VELOCITY
+  // فوق بالحرف — 12 معامل جوه صيغة log2، مش عقوبة نهائية. cap (30)
+  // ثابت غير متأثر بالتعلّم لنفس السبب المعماري.
   if (emailVelocityCount >= 3) {
-    const emailVelocityPenalty = Math.min(Math.round(12 * Math.log2(emailVelocityCount + 1)), 30);
+    const emailVelocityMultiplier = getLearnedMultiplier(getW, 'EMAIL_VELOCITY', 'HIGH');
+    const emailVelocityPenalty = Math.min(Math.round(12 * emailVelocityMultiplier * Math.log2(emailVelocityCount + 1)), 30);
     score -= emailVelocityPenalty;
     flags.push({ severity: "high", text: "email_velocity_high" });
     topSignals.push({ type: "EMAIL_VELOCITY", value: emailVelocityCount, contribution: -emailVelocityPenalty });
   }
 
   // ─── BIN Velocity (Multi-window + Prepaid Intelligence) ──────────────
-  const binPrefix = order.payment_details?.card_bin?.slice(0, 6) ?? null;
+  // [BIN Velocity fix] كانت هذه الطبقة معطوبة بالكامل — binCount10min/1h/24h
+  // كانوا يرجعوا صفر دايمًا لأن allOrders (formattedOrders) ما كانتش تحمل
+  // payment_details خالص في أي من الأماكن الثلاثة اللي بتبنيها (risk.js's
+  // /evaluate و/woocommerce-webhook، وenrichmentProcessor.js). المصدر
+  // اتغيّر لـ عمود Order.cardBinPrefix (indexed، مضاف عبر migration) —
+  // إما مباشرة من externalVelocity (عد دقيق من DB، /evaluate و
+  // /woocommerce-webhook)، أو fallback من allOrders.cardBinPrefix
+  // (العينة المحدودة، enrichmentProcessor.js اللي بيمرر externalVelocity=null
+  // عمدًا). القيم والـ thresholds والـ prepaid multiplier لم تتغير — هذا
+  // إصلاح لمصدر البيانات فقط، مش لمنطق المعايرة.
+  // [BIN Velocity consistency fix] كانت بدون digit-strip — بعكس كل مصدر
+  // تاني لنفس القيمة في المشروع (Order.cardBinPrefix في الـ DB،
+  // cardBinPrefixForVelocity في risk.js، cardBinPrefix في
+  // enrichmentProcessor.js — التلاتة بيعملوا replace(/\D/g,'') قبل
+  // الـ slice). في مسار الـ fallback (allOrders.filter بتاع /enrich)،
+  // المقارنة كانت هتقارن binPrefix الخام مقابل o.cardBinPrefix المُنضّف
+  // — أي حرف غير رقمي في الـ bin الوارد كان هيكسر المطابقة بصمت ويرجّع
+  // صفر عد رغم تكرار حقيقي.
+  const rawBinForPrefix = order.payment_details?.card_bin ?? null;
+  const binPrefix = rawBinForPrefix ? String(rawBinForPrefix).replace(/\D/g, '').slice(0, 6) : null;
   const isPrepaidCard = binIntelResult?.isPrepaid === true;
-  
+
+  // [BIN Velocity learning-loop wiring — /enrich fix] كانت معرّفة جوه
+  // بلوك if(binPrefix) بس — مبتوصلش لـ computedSignals في الـ return
+  // تحت، يعني calculateRiskScore() كانت بتحسب العقوبة صح لكن ترمي القيم
+  // اللي حسبتها بيها. enrichmentProcessor.js (المسار الأساسي فعليًا
+  // لوصول BIN حقيقي — راجع ADR-0) محتاج القيم دي عشان يضيفها لـ
+  // signalsSnapshot، وده مستحيل من غير ما يرجعوا من هنا. hoisted هنا
+  // برّه الـ if عشان يفضلوا في الـ function scope لحد نقطة الـ return.
+  let binCount10min = 0;
+  let binCount1h = 0;
+  let binCount24h = 0;
+
   if (binPrefix) {
-    // Three time windows
-    const last10min = new Date(Date.now() - 10 * 60 * 1000);
-    const last1h    = new Date(Date.now() - 60 * 60 * 1000);
-    
-    const binCount10min = allOrders.filter(o =>
-      o.payment_details?.card_bin?.slice(0, 6) === binPrefix &&
-      new Date(o.createdAt) > last10min &&
-      o.id !== order.id
-    ).length;
-    
-    const binCount1h = allOrders.filter(o =>
-      o.payment_details?.card_bin?.slice(0, 6) === binPrefix &&
-      new Date(o.createdAt) > last1h &&
-      o.id !== order.id
-    ).length;
-    
-    const binCount24h = allOrders.filter(o =>
-      o.payment_details?.card_bin?.slice(0, 6) === binPrefix &&
-      new Date(o.createdAt) > last24h &&
-      o.id !== order.id
-    ).length;
+    const hasDbBackedBinVelocity = externalVelocity && (
+      externalVelocity.binVelocityCount10min !== undefined ||
+      externalVelocity.binVelocityCount1h !== undefined ||
+      externalVelocity.binVelocityCount24h !== undefined
+    );
+
+    if (hasDbBackedBinVelocity) {
+      // مسار دقيق — /evaluate و /woocommerce-webhook، عدّ مباشر من DB
+      binCount10min = externalVelocity.binVelocityCount10min || 0;
+      binCount1h    = externalVelocity.binVelocityCount1h    || 0;
+      binCount24h   = externalVelocity.binVelocityCount24h   || 0;
+    } else {
+      // مسار fallback — enrichmentProcessor.js (وأي كولر مستقبلي ماعندوش
+      // externalVelocity). كان معطوبًا بسبب payment_details المفقودة؛
+      // دلوقتي بيستخدم o.cardBinPrefix الفعلي المُضاف لـ formattedOrders.
+      const last10min = new Date(Date.now() - 10 * 60 * 1000);
+      binCount10min = allOrders.filter(o =>
+        o.cardBinPrefix === binPrefix &&
+        new Date(o.createdAt) > last10min &&
+        o.id !== order.id
+      ).length;
+      binCount1h = allOrders.filter(o =>
+        o.cardBinPrefix === binPrefix &&
+        new Date(o.createdAt) > last1h &&
+        o.id !== order.id
+      ).length;
+      binCount24h = allOrders.filter(o =>
+        o.cardBinPrefix === binPrefix &&
+        new Date(o.createdAt) > last24h &&
+        o.id !== order.id
+      ).length;
+    }
 
     // Prepaid multiplier: double the counts for prepaid cards
     const prepaidMultiplier = isPrepaidCard ? 2.5 : 1.0;
 
+    // [Learning-loop wiring — Card Testing top priority] الـ 10/15/25
+    // كانت أرقام ثابتة تمامًا — دلوقتي بتتضرب في getLearnedMultiplier()
+    // (نسبة learned/staticBase) جنب prepaidMultiplier الموجود، نفس نمط
+    // BIN_PREPAID في binIntelligence.js بالحرف. عند cold start النسبة
+    // = 1.0 بالضبط فالمعادلة الأصلية تشتغل بلا أي تغيير سلوكي — مع
+    // تراكم dispute outcomes حقيقية، الوزن بيتحرك جوه [0, base×3].
+    const bin10minMultiplier = getLearnedMultiplier(getW, 'BIN_VELOCITY_10MIN', 'TRUE');
+    const bin1hMultiplier    = getLearnedMultiplier(getW, 'BIN_VELOCITY_1H', 'TRUE');
+    const bin24hMultiplier   = getLearnedMultiplier(getW, 'BIN_VELOCITY_24H', 'TRUE');
+
     // Tiered penalties
     if (binCount10min >= 2) {
-      const penalty = Math.round(10 * prepaidMultiplier);
+      const penalty = Math.round(10 * prepaidMultiplier * bin10minMultiplier);
       score -= penalty;
       flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_10MIN", value: binCount10min, contribution: -penalty });
     } else if (binCount1h >= 3) {
-      const penalty = Math.round(15 * prepaidMultiplier);
+      const penalty = Math.round(15 * prepaidMultiplier * bin1hMultiplier);
       score -= penalty;
       flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_1H", value: binCount1h, contribution: -penalty });
     } else if (binCount24h >= 5) {
-      const penalty = Math.round(25 * prepaidMultiplier);
+      const penalty = Math.round(25 * prepaidMultiplier * bin24hMultiplier);
       score -= penalty;
       flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
       topSignals.push({ type: "BIN_VELOCITY_24H", value: binCount24h, contribution: -penalty });
@@ -780,6 +937,36 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     totalPositiveBonus += bonus;
     positives.push({ text: "Address verification confirmed (AVS Y)" });
     topSignals.push({ type: "AVS", value: "Y", contribution: bonus });
+  } else if (order.avsResponse === "A" || order.avsResponse === "Z") {
+    // [AVS partial-match wiring] كانت AVS:A/AVS:Z معرّفة في STATIC_WEIGHTS
+    // (base=0.8 لكل واحدة) من غير أي منطق مستهلك ليها خالص — الكود
+    // الأصلي كان بيتأكد من avsResponse === "Y" بس، فأي رد جزئي (عنوان
+    // طابق بس ZIP لأ، أو العكس) كان بيتجاهل تمامًا — بيتعامل معاه النظام
+    // بالظبط زي عميل من غير أي AVS response أصلاً. هذا فرق حقيقي في صناعة
+    // مكافحة الاحتيال (AVS partial match = ثقة أضعف من full match، لكن
+    // أقوى من عدم وجود أي تحقق) كان بيضيع.
+    //
+    // بونص أصغر بكتير من AVS:Y عمدًا — الـ multiplier (×5) نفسه زي Y،
+    // لكن الـ base صغير (0.8 مقابل 2.0)، فالفرق الافتراضي عند cold start
+    // هو 4 نقاط (Y) مقابل ~1.6 نقطة (A/Z) — نسبة تقريبًا 40%، تعكس إن
+    // partial match إشارة أضعف مش نفس قوة full match.
+    //
+    // AVS:N (لا تطابق خالص) عمدًا بره هذا المنطق — base=0.0 في
+    // STATIC_WEIGHTS بنفس نمط ECI:7/CVV2:N (إشارات مُعطّلة عمدًا، مش
+    // مؤجّلة سهوًا)، لأن غياب أي عقوبة عند AVS:N قرار تصميمي أوسع
+    // (النظام هنا مبني على "بونص عند إثبات إيجابي" مش "عقوبة عند الفشل")
+    // خارج نطاق هذا الفيكس تحديدًا.
+    const w = getW("AVS", order.avsResponse);
+    const bonus = Math.round(w * 5);
+    if (bonus > 0) {
+      totalPositiveBonus += bonus;
+      positives.push({
+        text: order.avsResponse === "A"
+          ? "Partial address verification (AVS A — street address matched)"
+          : "Partial address verification (AVS Z — ZIP code matched)",
+      });
+      topSignals.push({ type: "AVS", value: order.avsResponse, contribution: bonus });
+    }
   }
 
   // CVV2 — uses learned weight
@@ -1058,42 +1245,15 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     }
   }
 
-  // approve → تعديل كامل
-  // review → تعديل أخف (0.7) علشان مش كل حاجة تتحول Review
-  let approveThreshold = Math.round(62 + logScale + merchantAdjustment);
-  let reviewThresholdBase = Math.round(32 + (merchantAdjustment * 0.7));
-
-  // Clamp — يمنع thresholds تكون aggressive أوي أو متساهلة أوي
-  approveThreshold = Math.min(90, Math.max(60, approveThreshold));
-
-  // ─── Review Fatigue Management ────────────────────────────────────────
-  // لو النظام بيدي Medium Risk كتير → نرفع الـ reviewThreshold تلقائياً
-  // بيمنع Alert Fatigue — التاجر مش بيشوف كتير من Medium Risk
-  // بيأثر على reviewThreshold بس — High Risk مش بيتأثر أبداً
-  let fatigueAdjustment = 0;
-  if (allOrders.length >= 20) {
-    // استثني الـ high risk orders من حساب الـ fatigue
-    // يمنع attacker من spam orders عشان يرفع الـ review rate ويخلي النظام متساهل
-    const recent100 = [...allOrders]
-      .filter(o => o.riskLevel !== "high")
-      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
-      .slice(0, 100);
-    const mediumCount = recent100.filter(o => o.riskLevel === "medium").length;
-    const reviewRate = recent100.length > 0 ? mediumCount / recent100.length : 0;
-
-    if (reviewRate > 0.20) {
-      // أكتر من 20% من الأوردرات Medium Risk → النظام aggressive أوي
-      fatigueAdjustment = 8;
-      logger.info({ module: 'riskScoring', reviewRate: reviewRate * 100, fatigueAdjustment }, 'Review fatigue adjustment');
-    } else if (reviewRate > 0.15) {
-      // 15-20% → تعديل بسيط
-      fatigueAdjustment = 4;
-    }
-    // Max +8 على الـ reviewThreshold — مش هنخلي النظام أعمى
-    fatigueAdjustment = Math.min(fatigueAdjustment, 8);
-  }
-
-    const reviewThreshold = Math.min(80, Math.max(40, reviewThresholdBase + fatigueAdjustment));
+  // [Drift-risk fix] كان الكود هنا بيكرر نفس معادلة calculateThresholds()
+  // المُعرّفة أول الملف بالحرف — رغم إن تعليقها بيدّعي إنها "single source
+  // of truth يستخدمها calculateRiskScore" — عمليًا مكانتش مستخدمة هنا
+  // خالص (rescoreOrder() اللي المفروض تستخدمها التانية stub فاضي). أي
+  // تعديل مستقبلي على calculateThresholds() كان هيبقى بلا أي أثر فعلي
+  // على القرار الحقيقي، لأن النسخة الحقيقية معزولة هنا. الاستدعاء المباشر
+  // دلوقتي بيقفل الفجوة دي — نفس القيم بالحرف، نفس السلوك 100%، لكن من
+  // مصدر واحد فعلي.
+  const { approveThreshold, reviewThreshold } = calculateThresholds(orderAmount, cachedMerchantProfile, allOrders);
 
 
 
@@ -1214,6 +1374,15 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     deviceVelocityCount: deviceVelocityCount,
     ipVelocityCount: ipVelocityCount,
     emailVelocityCount: emailVelocityCount,
+    // [BIN Velocity learning-loop wiring — /enrich fix] راجع التعليق عند
+    // تعريف binCount10min/1h/24h فوق. سواء اتحسبت من externalVelocity
+    // (DB-backed، /evaluate و/woocommerce-webhook) أو من fallback
+    // (allOrders.filter، /enrich عبر enrichmentProcessor.js)، القيمة
+    // الفعلية اللي طبّقت العقوبة على هذا الأوردر بترجع هنا دلوقتي —
+    // موحّدة لكل الـ callers الثلاثة، بدل ما تبقى محبوسة جوه الفنكشن.
+    binVelocityCount10min: binCount10min,
+    binVelocityCount1h: binCount1h,
+    binVelocityCount24h: binCount24h,
     isNewCustomer,
     isNewEmail,
     isNewDevice,
@@ -1236,6 +1405,10 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     economicData,
     computedSignals,
     graphRisk: graphRisk,
+    // [Bug #3 fix] كانت محسوبة (راجع "graphPath = graphResult.graphPath"
+    // فوق) لكن مش راجعة خالص — signalsSnapshot.graphPath في risk.js كانت
+    // دايمًا [] حتى مع identity-graph matches حقيقية.
+    graphPath: graphPath,
     ipIntel: ipIntelResult,
     emailIntel: emailIntelResult,
     binIntel: binIntelResult,

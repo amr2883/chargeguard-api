@@ -9,6 +9,13 @@ if (!RISK_SECRET_SALT) {
 const hashIp = (ip) => {
   return crypto.createHmac('sha256', RISK_SECRET_SALT).update(ip).digest('hex');
 };
+
+// [Discovery 4 fix] Prefix للـ synthetic per-order device fingerprint
+// اللي بيتصنّع في /woocommerce-webhook لما مفيش fingerprint حقيقي متاح
+// (تجار بدون JS pixel كامل، زي Classic Checkout). مركزّة هنا كمصدر واحد
+// عشان المكانين اللي لازم يتفقوا عليها — نقطة البناء (fallback)، ونقطة
+// الاستثناء في استعلام device-rotation — ميتفرقوش عن بعض بمرور الوقت.
+const WC_SYNTHETIC_DEVICE_PREFIX = 'wc_';
 // ?????????????????????????????????????????????????????????????????????????
 const logger = require('../lib/logger');
 const express = require('express');
@@ -23,6 +30,7 @@ const { hashApiKey } = require('../lib/apiKeyHash');
 const { normalizeBin } = require('../lib/binIntelligence');
 const { checkEmailHardBlock } = require('../lib/emailIntelligence');
 const { recordAndCheckGlobalRotation } = require('../lib/globalRotationDetector');
+const { checkRawDeviceVelocity, checkRawIpVelocityFallback } = require('../lib/rawVelocityDetector');
 const { shouldIncrementQuota } = require('../lib/quotaDedup');
 const { buildGraphFromOrder } = require('../lib/identityGraph');const prometheus = require('../lib/prometheus');
 
@@ -31,9 +39,15 @@ const autoRegisterStoreMiddleware = require('../middleware/autoRegisterStore');c
 const { isAgency, FREE_PLANS, getStoreScope }   = require('../lib/planAccess');
 const { checkQuotaGate }                        = require('../lib/quotaGate');
 const { mintDeviceToken, verifyDeviceToken }     = require('../lib/deviceToken');
-const { isPlausibleClientIp }                    = require('../lib/utils');
+const { isPlausibleClientIp, normalizeEmail }    = require('../lib/utils');
 const { getCloudflareRanges }                    = require('../lib/cloudflareRanges');
 const { safeErrorPayload }                       = require('../lib/errorResponse');
+
+// [Bug #7 fix, relocated] المنطق نُقل لـ lib/blacklistGate.js عشان يبقى
+// مصدر واحد يستخدمه هذا الملف (POST /blacklist, POST /whitelist, 0b
+// gate, webhook gate الجديدة) وكمان riskScoring.js (الـ inBlacklist
+// defense-in-depth check). راجع blacklistGate.js للتعليق الكامل.
+const { computeNormalizedValue, findBlacklistMatch } = require('../lib/blacklistGate');
 
 // ── Early Access Pro Grant ────────────────────────────────────────────────
 // Marketing promise (index.html): "Early Access cohort members receive
@@ -395,11 +409,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
       
 
+    // [Bug #7 fix] يُحسب مرة واحدة، يُستخدم في whitelist/blacklist/disputes
+    // تحت. undefined (مش null) عمدًا لما email غايب — Prisma بيتجاهل شروط
+    // undefined في الـ where تلقائيًا، بنفس سلوك email الخام الأصلي.
+    const normalizedEmailForMatch = email ? normalizeEmail(email) : undefined;
+    // [Discovery 2 fix] نفس مبدأ normalizedEmailForMatch بالحرف — يُحسب
+    // مرة واحدة، يُستخدم في whitelist (0a تحت) وblacklist (0b) معًا، بدل
+    // تكرار String(bin).replace(...) منفصل في أكتر من مكان.
+    const normalizedBinForMatch = bin ? String(bin).replace(/\D/g, '').slice(0, 6) : undefined;
+
     // 0a. Whitelist Check — bypass all checks for trusted entities
     const whitelistConditions = [];
-    if (email)             whitelistConditions.push({ type: 'EMAIL', value: email });
-    if (ipAddress)         whitelistConditions.push({ type: 'IP',    value: ipAddress });
-    if (bin)               whitelistConditions.push({ type: 'BIN',   value: String(bin).replace(/\D/g, '').slice(0, 6) });
+    if (normalizedEmailForMatch) whitelistConditions.push({ type: 'EMAIL', normalizedValue: normalizedEmailForMatch });
+    if (ipAddress)               whitelistConditions.push({ type: 'IP',    value: ipAddress });
+    if (normalizedBinForMatch)   whitelistConditions.push({ type: 'BIN',   value: normalizedBinForMatch });
 
     if (whitelistConditions.length > 0) {
       const whitelistCheck = await db.whitelistEntry.findFirst({
@@ -431,27 +454,19 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
 
-    // 0b. Blacklist Check
-    const blacklistConditions = [];
-    if (email)             blacklistConditions.push({ type: 'EMAIL', value: email });
-    if (ipAddress)         blacklistConditions.push({ type: 'IP', value: ipAddress });
-    if (deviceFingerprint) blacklistConditions.push({ type: 'DEVICE_FINGERPRINT', value: deviceFingerprint });
-
-    const blacklistCheck = blacklistConditions.length > 0
-      ? await db.blacklistEntry.findFirst({
-          where: {
-            merchantId,
-            ...storeScope,
-            OR: blacklistConditions,
-            AND: [
-              { OR: [
-                { expiresAt: null },
-                { expiresAt: { gt: new Date() } }
-              ] }
-            ]
-          }
-        })
-      : null;
+    // 0b. Blacklist Check — منطق الاستعلام دلوقتي جوه lib/blacklistGate.js
+    // (مصدر واحد، يستخدمه كمان /woocommerce-webhook's gate تحت).
+    // [Discovery 2 fix] bin مُضافة — كانت غايبة من هذا الفحص خالص، بالرغم
+    // من إن الـ schema بيدعمها (BlacklistEntry.type='BIN') والـ whitelist
+    // فوق بالفعل بتفحصها. راجع blacklistGate.js's findBlacklistMatch.
+    const blacklistCheck = await findBlacklistMatch(db, {
+      merchantId,
+      storeScope,
+      normalizedEmail: normalizedEmailForMatch,
+      ip: ipAddress,
+      deviceFingerprint,
+      bin: normalizedBinForMatch,
+    });
     if (blacklistCheck) {
       prometheus.recordBlacklistHit(blacklistCheck.type);
 
@@ -715,8 +730,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct device fingerprints from one IP in 1h
       const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
 
+      // [Synthetic-ID pollution fix] راجع تعليق /woocommerce-webhook's قسم
+      // 7c لنفس الفيكس بالحرف — أوردرات وصلت عبر الـ webhook من غير
+      // fingerprint حقيقي مخزّنة بـ deviceFingerprint = `wc_<orderId>`
+      // (فريدة لكل أوردر بالتصميم). Order table مشترك بين /evaluate
+      // وwebhook، فأي IP جالها أوردر واحد بس عبر الـ webhook fallback كان
+      // بيضيف "device مختلف" وهمي هنا في كل مرة.
       const recentDevicesForIp = await db.order.findMany({
-        where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: rotationWindowStart }, deviceFingerprint: { not: null } },
+        where: {
+          merchantId, ...storeScope,
+          ipAddress,
+          createdAt: { gte: rotationWindowStart },
+          deviceFingerprint: { not: null },
+          NOT: { deviceFingerprint: { startsWith: WC_SYNTHETIC_DEVICE_PREFIX } },
+        },
         select: { deviceFingerprint: true },
         distinct: ['deviceFingerprint'],
         take: 50,
@@ -823,6 +850,99 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
     // End 1c. Device Fingerprint Trust & Rotation Detection
 
+    // 1d. Raw (Unconditional) Device Velocity — يقفل الفجوة اللي سايبها
+    // checkVelocity() فوق: ده بيشوف بس المحاولات اللي مش approve. بوت
+    // بثابت الـ device fingerprint وبيلف على BIN prefixes مختلفة، وبياخد
+    // سكور واطي كفاية إنه approve في أغلب المرات — مش هيظهر في
+    // checkVelocity أبدًا مهما كان عدد محاولاته. راجع
+    // lib/rawVelocityDetector.js للتفاصيل الكاملة عن ليه device بس (مش
+    // IP) هو المفتاح الصح هنا.
+    if (deviceFingerprint) {
+      const rawDeviceVelocity = checkRawDeviceVelocity(merchantId, deviceFingerprint);
+      if (rawDeviceVelocity.blocked) {
+        let rawVelCardBin = null;
+        if (bin != null) {
+          const b = String(bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) rawVelCardBin = b;
+        }
+        const rawVelIpHash = ipAddress ? hashIp(ipAddress) : null;
+        let rawVelAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) rawVelAmount = amt;
+        }
+
+        try {
+          const rawVelIncrementQuota = shouldIncrementQuota(merchantId, 'raw_device_velocity', deviceFingerprint);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         rawVelCardBin,
+            cardType:        null,
+            reason:          'velocity',
+            ipHash:          rawVelIpHash,
+            amountAttempted: rawVelAmount,
+            riskScore:       null,
+            incrementQuota:  rawVelIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'raw_device_velocity', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (raw device velocity path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious request velocity',
+          reason: 'device_velocity_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_velocity_blocked' }]
+        });
+      }
+    } else if (ipAddress) {
+      // Fallback — بس لما مفيش deviceFingerprint خالص. عتبة أعلى بكتير
+      // عشان نتجنب false positives على شبكات NAT/مكاتب مشتركة.
+      const rawIpHash = hashIp(ipAddress);
+      const rawIpVelocity = checkRawIpVelocityFallback(merchantId, rawIpHash);
+      if (rawIpVelocity.blocked) {
+        let rawIpVelAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) rawIpVelAmount = amt;
+        }
+
+        try {
+          const rawIpVelIncrementQuota = shouldIncrementQuota(merchantId, 'raw_ip_velocity', ipAddress);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         null,
+            cardType:        null,
+            reason:          'velocity',
+            ipHash:          rawIpHash,
+            amountAttempted: rawIpVelAmount,
+            riskScore:       null,
+            incrementQuota:  rawIpVelIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'raw_ip_velocity_fallback', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (raw IP velocity fallback path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious request velocity',
+          reason: 'ip_velocity_fallback_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'ip_velocity_fallback_blocked' }]
+        });
+      }
+    }
+    // End 1d. Raw (Unconditional) Device Velocity
+
     // 1. ���� ���� order
     const order = {
       id: orderId,
@@ -865,6 +985,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       amount: o.amount,
       createdAt: o.createdAt,
       riskLevel: o.riskLevel,
+      // [BIN Velocity fix] يدعم مسار الـ fallback في riskScoring.js
+      // (لما externalVelocity مش شايل binVelocityCount*، زي enrichmentProcessor.js)
+      cardBinPrefix: o.cardBinPrefix,
     }));
 
     // ���� ��� velocity counts �������� ��������� ������ (����)
@@ -884,23 +1007,56 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       where: { merchantId, ...storeScope, email, createdAt: { gte: last6h } }
     }) : 0;
 
+    // [BIN Velocity fix] cardBinPrefix للأوردر الحالي — نفس idiom الاستخراج
+    // المستخدم بالفعل في كل مكان تاني في هذا الملف (blacklistCardBin،
+    // emailBlockCardBin، إلخ) للاتساق. مفيش orderId يستثنى هنا لأن الأوردر
+    // لسه معملوش upsert في الداتابيز في هذه المرحلة من الـ handler.
+    let cardBinPrefixForVelocity = null;
+    if (bin != null) {
+      const b = String(bin).replace(/\D/g, '').slice(0, 6);
+      if (b.length === 6) cardBinPrefixForVelocity = b;
+    }
+
+    // [BIN Velocity fix] 3 نوافذ زمنية دقيقة (DB-backed)، بنفس نمط
+    // device/ip/email فوق بالظبط. Promise.all بدل sequential awaits —
+    // تحسين أداء بسيط ومعزول، الاستعلامات مستقلة عن بعضها تمامًا.
+    let binVelocityCount10min = 0;
+    let binVelocityCount1h = 0;
+    let binVelocityCount24h = 0;
+    if (cardBinPrefixForVelocity) {
+      const last10min = new Date(Date.now() - 10 * 60 * 1000);
+      [binVelocityCount10min, binVelocityCount1h, binVelocityCount24h] = await Promise.all([
+        db.order.count({ where: { merchantId, ...storeScope, cardBinPrefix: cardBinPrefixForVelocity, createdAt: { gte: last10min } } }),
+        db.order.count({ where: { merchantId, ...storeScope, cardBinPrefix: cardBinPrefixForVelocity, createdAt: { gte: last1h } } }),
+        db.order.count({ where: { merchantId, ...storeScope, cardBinPrefix: cardBinPrefixForVelocity, createdAt: { gte: last24h } } }),
+      ]);
+    }
+
     // ����� ��� ����� ��� computedSignals (���� ������� ��� riskScoring ������)
     // ����� ��������� ������ �� signalsSnapshot
 
     // ��� �������� ������� (��� 90 ���)
-    const disputes = await db.disputeOutcome.findMany({
-      where: {
-        merchantId,
-        resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
-        OR: [
-          { order: { email: email } },
-          { order: { deviceFingerprint: deviceFingerprint } },
-          { order: { ipAddress: ipAddress } }
-        ]
-      },
-      include: { order: true },
-      take: 200
-    });
+    // [Undefined-OR fix] Prisma بتتجاهل أي مفتاح قيمته undefined، فـ
+    // deviceFingerprint (مفكوكة خام من req.body — undefined لو الـ
+    // plugin مبعتش الحقل) أو normalizedEmailForMatch (undefined لو email
+    // غايب) كانت بتحول فرعها جوه OR لشرط فاضي { order: {} } = صح دايمًا،
+    // فترجّع أول 200 dispute لكل التاجر بدل المرتبطة بهذا الأوردر فقط.
+    const disputeOrConditions = [];
+    if (normalizedEmailForMatch) disputeOrConditions.push({ order: { normalizedEmail: normalizedEmailForMatch } });
+    if (deviceFingerprint) disputeOrConditions.push({ order: { deviceFingerprint } });
+    if (ipAddress) disputeOrConditions.push({ order: { ipAddress } });
+
+    const disputes = disputeOrConditions.length > 0
+      ? await db.disputeOutcome.findMany({
+          where: {
+            merchantId,
+            resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+            OR: disputeOrConditions,
+          },
+          include: { order: true },
+          take: 200,
+        })
+      : [];
     const blacklist = [];
 
     // 3. ���� ����� ������� ������ �����
@@ -933,7 +1089,9 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       blacklist,
       merchantId,
       false,
-      { deviceVelocityCount, ipVelocityCount, emailVelocityCount },
+      // [BIN Velocity fix] binVelocityCount10min/1h/24h مضافة — راجع
+      // riskScoring.js لكيفية استهلاكها بدل allOrders.filter المكسورة.
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount, binVelocityCount10min, binVelocityCount1h, binVelocityCount24h },
       null,           // cardHashRecord — متاح فقط في /enrich
       merchantConfig,
       limitedScoring
@@ -1060,6 +1218,14 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         deviceVelocityCount: deviceVelocityCountFinal,
         ipVelocityCount: ipVelocityCountFinal,
         emailVelocityCount: emailVelocityCountFinal,
+        // [BIN Velocity learning-loop fix] كانت غايبة تمامًا من الـ snapshot
+        // رغم إنها بالفعل محسوبة فوق (binVelocityCount10min/1h/24h) ومُستخدمة
+        // فعليًا في riskScoring.js لحساب العقوبة — يعني القرار كان بيتاخد
+        // صح، لكن مفيش أي مسار للتعلّم منه لأن extractSignalsFromSnapshot()
+        // (feedbackLoop.js) محتاجة الحقول دي هنا عشان تقدر تستخرجها.
+        binVelocityCount10min,
+        binVelocityCount1h,
+        binVelocityCount24h,
         shippingBillingMismatch,
         binIssuerMismatch: riskResult.binIntel && riskResult.binIntel.issuerCountry !== billingCountry,
         amountAnomaly,
@@ -1089,6 +1255,13 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
           amount: amount || 0,
           currency: 'USD',
           email: email || null,
+          // [Bug #7 fix] لمطابقة disputes/blacklist لاحقًا — email فوق
+          // يفضل خام للعرض/الـ audit trail.
+          normalizedEmail: email ? normalizeEmail(email) : null,
+          // [BIN Velocity fix] راجع cardBinPrefixForVelocity فوق. عادةً
+          // null هنا (BIN مبيوصلش قبل الدفع حسب ADR-0) — بس الكتابة
+          // دايمًا صحيحة لو وصل مستقبلاً عبر تكامل مختلف.
+          cardBinPrefix: cardBinPrefixForVelocity,
           ipAddress: ipAddress || null,
           deviceFingerprint: deviceFingerprint || null,
           riskScore: riskResult.score,
@@ -1100,6 +1273,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         update: {
           amount: amount || 0,
           email: email || null,
+          normalizedEmail: email ? normalizeEmail(email) : null,
+          cardBinPrefix: cardBinPrefixForVelocity,
           ipAddress: ipAddress || null,
           deviceFingerprint: deviceFingerprint || null,
           riskScore: riskResult.score,
@@ -1404,11 +1579,16 @@ router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
     }
 
+    // [Bug #7 fix] normalizedValue هي اللي هتتقارن فعليًا في /evaluate
+    // و /woocommerce-webhook — راجع computeNormalizedValue() فوق.
+    const normalizedValue = computeNormalizedValue(type, value);
+
     const blacklistEntry = await db.blacklistEntry.create({
       data: {
         merchantId,
         type,
         value,
+        normalizedValue,
         reason: reason || null,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
         createdBy: createdBy || null,
@@ -1607,19 +1787,30 @@ router.post('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
     }
 
-    const normalizedValue = type === 'BIN'
+    // [Bug #7 fix] اتغيّر الاسم من normalizedValue لـ storedValue — الاسم
+    // القديم بقى محجوز للعمود الجديد اللي بيُستخدم في المطابقة الأمنية
+    // (تحت). storedValue هو اللي بيتكتب في عمود value نفسه: BIN بيتقلل
+    // لـ 6 أرقام (زي ما كان بالظبط)، EMAIL/IP بيتخزنوا زي ما اتبعتوا.
+    const storedValue = type === 'BIN'
       ? String(value).replace(/\D/g, '').slice(0, 6)
       : value;
 
-    if (type === 'BIN' && normalizedValue.length !== 6) {
+    if (type === 'BIN' && storedValue.length !== 6) {
       return res.status(400).json({ error: 'BIN must be exactly 6 digits' });
     }
+
+    // [Bug #7 fix] normalizedValue: عمود المطابقة الأمنية. بيتحسب من
+    // storedValue (مش value الخام) عشان تقليل الـ BIN لـ 6 أرقام يفضل
+    // متسق. ده بيقفل النص الخاص بالـ whitelist من نفس الثغرة — كانت
+    // إيميلات الـ whitelist ماتتطبّقش خالص قبل كده.
+    const normalizedValue = computeNormalizedValue(type, storedValue);
 
     const whitelistEntry = await db.whitelistEntry.create({
       data: {
         merchantId,
         type,
-        value: normalizedValue,
+        value: storedValue,
+        normalizedValue,
         reason: reason || null,
         expiresAt: expiresAt ? new Date(expiresAt) : null,
         createdBy: createdBy || null,
@@ -1766,16 +1957,6 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const expectedBuf = Buffer.from(expected);
       const signatureBuf = Buffer.from(signature);
 
-      // ��� ������� �������� (���� ������� �� �������� �������)
-      logger.warn({
-        module: 'risk',
-        receivedSignatureLength: signature.length,
-        expectedSignatureLength: expected.length,
-        firstRawBodyChars: rawBody.toString('utf8').slice(0, 50),
-        secretConfigured: !!wcSecret,
-        signaturePresent: !!signature,
-      }, 'Signature debug info');
-
       // crypto.timingSafeEqual throws on unequal-length buffers rather than
       // returning false — with a real per-tenant secret now in play, a
       // forged/garbled signature header is a live possibility, so guard the
@@ -1784,7 +1965,24 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const isValid = expectedBuf.length === signatureBuf.length &&
         crypto.timingSafeEqual(expectedBuf, signatureBuf);
       if (!isValid) {
-        logger.warn({ module: 'risk', tenantId: merchantId, reason: 'mismatch' }, 'Signature mismatch — rejecting forged webhook request');
+        // [Bug #13 fix] التفاصيل التشخيصية (شاملة معاينة أول 50 حرف من
+        // الـ raw body — بيانات أوردر حقيقية، PII محتمل) كانت بتتسجل
+        // *دايمًا* في نداء logger.warn منفصل فوق، بغض النظر عن نجاح
+        // التحقق من التوقيع من عدمه — يعني كل أوردر شرعي وصل بتوقيع صحيح
+        // (الحالة الغالبة) كان بيسرّب جزء من بياناته في اللوجز من غير أي
+        // داعي. دمجناه في نداء واحد هنا، ما بيتنفذش إلا وقت وجود مشكلة
+        // فعلية (mismatch) تستاهل التشخيص — نفس فلسفة "I11 fix" الموثقة
+        // في lib/woocommerce.js.
+        logger.warn({
+          module: 'risk',
+          tenantId: merchantId,
+          reason: 'mismatch',
+          receivedSignatureLength: signature.length,
+          expectedSignatureLength: expected.length,
+          firstRawBodyChars: rawBody.toString('utf8').slice(0, 50),
+          secretConfigured: !!wcSecret,
+          signaturePresent: !!signature,
+        }, 'Signature mismatch — rejecting forged webhook request');
         return res.status(401).json({ error: 'Invalid signature' });
       }
     } else if (wcSecret && !signature) {
@@ -1875,7 +2073,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
         const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
         if (fpMeta) deviceFingerprint = fpMeta.value;
     }
-    riskRequest.deviceFingerprint = deviceFingerprint || `wc_${extracted.orderId}`; // fallback
+    riskRequest.deviceFingerprint = deviceFingerprint || `${WC_SYNTHETIC_DEVICE_PREFIX}${extracted.orderId}`; // fallback
 
     // Same treatment for the server-signed device token — mirrors the
     // fingerprint extraction immediately above. Sourced from order meta
@@ -1900,10 +2098,21 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
     const webhookMerchantConfig = { deviceSignal: webhookDeviceSignal };
 
+    // [Bug #7 fix] نفس منطق normalizedEmailForMatch في /evaluate.
+    const normalizedExtractedEmail = extracted.email ? normalizeEmail(extracted.email) : undefined;
+    // [Discovery 2/3 fix] نفس منطق normalizedBinForMatch في /evaluate —
+    // يُحسب مرة واحدة، يُستخدم في 7a (whitelist) و7a1 (blacklist) تحت.
+    const normalizedExtractedBin = extracted.bin ? String(extracted.bin).replace(/\D/g, '').slice(0, 6) : undefined;
+
     // 7a. Whitelist Check
+    // [Discovery 3 fix] BIN كانت غايبة من هذا الفحص تحديدًا — بالرغم من
+    // وجودها في /evaluate's 0a (المرجع) وفي enrichmentProcessor.js's
+    // whitelist check. نفس فئة Discovery 1/2 (حقل مدعوم بالكامل بس ناقص
+    // من مسار واحد بعينه).
     const webhookWhitelistConditions = [];
-    if (extracted.email)    webhookWhitelistConditions.push({ type: 'EMAIL', value: extracted.email });
-    if (extracted.ipAddress) webhookWhitelistConditions.push({ type: 'IP',   value: extracted.ipAddress });
+    if (normalizedExtractedEmail) webhookWhitelistConditions.push({ type: 'EMAIL', normalizedValue: normalizedExtractedEmail });
+    if (extracted.ipAddress)      webhookWhitelistConditions.push({ type: 'IP',   value: extracted.ipAddress });
+    if (normalizedExtractedBin)   webhookWhitelistConditions.push({ type: 'BIN',  value: normalizedExtractedBin });
 
     if (webhookWhitelistConditions.length > 0) {
       const webhookWhitelistCheck = await db.whitelistEntry.findFirst({
@@ -1932,6 +2141,209 @@ router.post('/woocommerce-webhook', async (req, res) => {
           whitelisted: true
         });
       }
+    }
+
+    // 7a1. Blacklist Check — [Discovery 1 fix] كانت غايبة تمامًا من هذا
+    // المسار. الفحص الداخلي جوه calculateRiskScore() (inBlacklist في
+    // riskScoring.js) مش بديل كافٍ: هو soft -80 penalty بس (مش hard
+    // block)، وكان أصلاً معطوبًا بنيويًا لحد فيكس منفصل (راجع
+    // riskScoring.js). ده بيقفل التناقض الأمني بين /evaluate (عنده 0b
+    // من الأول) و/woocommerce-webhook (كان من غيرها) — كيان اتحظر ممكن
+    // كان يعدي بالكامل لو وصل عبر WooCommerce's native order webhook
+    // بدل /evaluate.
+    //
+    // [قرار محسوم] storeScope مُضافة هنا — البلاك ليست hard block قاطع،
+    // مش soft signal، فالاتساق الصحيح هو مع /evaluate's 0b (المرجع
+    // الأمني، اللي بيستخدم storeScope من الأول)، مش مع عدّادات السرعة
+    // التلاتة تحت (deviceVelocityCount/ipVelocityCount/emailVelocityCount)
+    // اللي تجاهلها لـ storeScope مقبول لأنها soft signals بس بتأثر على
+    // score. من غير الفيكس ده، بلاك ليست تاجر Agency مخصصة لـ Store A
+    // كانت هتتفحص (وتُطبّق حظر) عبر كل متاجره بما فيهم Store B غير
+    // المرتبط — عبر هذا المسار فقط — تناقض أمني من نفس فئة Discovery 1
+    // الأصلية، بس على مستوى store بدل tenant.
+    //
+    // [Discovery 2 fix] bin مُضافة كمان — راجع blacklistGate.js's
+    // findBlacklistMatch. extracted.bin نادرًا ما يتوفر عبر هذا المسار في
+    // الإنتاج (راجع ADR-0)، لكن الفحص دلوقتي صحيح لو وصل مستقبلًا.
+    const webhookBlacklistCheck = await findBlacklistMatch(db, {
+      merchantId,
+      storeScope,
+      normalizedEmail: normalizedExtractedEmail,
+      ip: extracted.ipAddress,
+      deviceFingerprint: riskRequest.deviceFingerprint,
+      bin: normalizedExtractedBin,
+    });
+    if (webhookBlacklistCheck) {
+      prometheus.recordBlacklistHit(webhookBlacklistCheck.type);
+
+      let webhookBlCardBin = null;
+      if (extracted.bin != null) {
+        const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+        if (b.length === 6) webhookBlCardBin = b;
+      }
+      const webhookBlIpHash = extracted.ipAddress ? hashIp(extracted.ipAddress) : null;
+      let webhookBlAmount = null;
+      if (extracted.amount != null) {
+        const amt = parseFloat(extracted.amount);
+        if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookBlAmount = amt;
+      }
+
+      try {
+        const webhookBlIncrementQuota = shouldIncrementQuota(merchantId, 'blacklist', webhookBlacklistCheck.value);
+
+        await db.$transaction(recordBlockedAttempt(db, {
+          merchantId,
+          storeId:         req.storeId ?? null,
+          cardBin:         webhookBlCardBin,
+          cardType:        null, // not captured by extractOrderData()
+          reason:          'blacklist',
+          ipHash:          webhookBlIpHash,
+          amountAttempted: webhookBlAmount,
+          riskScore:       null,
+          incrementQuota:  webhookBlIncrementQuota,
+        }));
+      } catch (counterErr) {
+        logger.error(
+          { module: 'risk', endpoint: 'woocommerce-webhook', path: 'blacklist', tenantId: merchantId, error: counterErr.message },
+          'Failed to record BlockedAttempt / increment quota counter (webhook blacklist path)'
+        );
+      }
+
+      return res.status(403).json({
+        error: 'Request blocked: entity is blacklisted',
+        reason: webhookBlacklistCheck.reason || 'Blacklisted',
+        decision: 'block'
+      });
+    }
+
+    // 7a2. Email Hard-Block — disposable domain / no-MX. [Bug #6 fix]
+    // كانت غايبة تمامًا من هذا المسار. تعمل بشكل مطابق لقسم 0c في
+    // /evaluate — وبشكل متعمد بدون أي شرط على limitedScoring، لأن وقت
+    // نفاد الكوتا calculateRiskScore() بيقفل getEmailIntelligence() تمامًا
+    // (راجع الـ Promise.allSettled جوه calculateRiskScore) — يعني أوردر
+    // الـ webhook وقتها كان بيوصل لـ decision نهائي بدون أي إشارة إيميل
+    // خالص، حاد ولا ناعم. اتحطت بعد whitelist (أرخص بوابة، bypass الأول)
+    // وقبل BIN-sequence، بنفس منطق "الأرخص والأكثر حسمًا الأول" المستخدم
+    // في /evaluate.
+    if (extracted.email) {
+      const webhookEmailHardBlock = await checkEmailHardBlock(extracted.email);
+      if (webhookEmailHardBlock.blocked) {
+        let webhookEmailBlockCardBin = null;
+        if (extracted.bin != null) {
+          const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) webhookEmailBlockCardBin = b;
+        }
+        const webhookEmailBlockIpHash = extracted.ipAddress ? hashIp(extracted.ipAddress) : null;
+        let webhookEmailBlockAmount = null;
+        if (extracted.amount != null) {
+          const amt = parseFloat(extracted.amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookEmailBlockAmount = amt;
+        }
+
+        try {
+          const webhookEmailIncrementQuota = shouldIncrementQuota(merchantId, 'email', extracted.email);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         webhookEmailBlockCardBin,
+            cardType:        null, // not captured by extractOrderData()
+            reason:          'email',
+            ipHash:          webhookEmailBlockIpHash,
+            amountAttempted: webhookEmailBlockAmount,
+            riskScore:       null,
+            incrementQuota:  webhookEmailIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'woocommerce-webhook', path: 'email_hard_block', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (webhook email hard-block path)'
+          );
+        }
+        return res.status(403).json({
+          error: 'Request blocked: email address failed validation',
+          reason: 'email_hard_block',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'email_hard_block' }]
+        });
+      }
+    }
+
+    // 7a3. Velocity Hard-Block — [Discovery 4 fix] كانت غايبة تمامًا من
+    // هذا المسار. checkVelocity() (نفس الفنكشن المستخدم في /evaluate's
+    // قسم 1) بيفحص CardTestAttempt — محاولات محظورة سابقة لنفس IP/device
+    // خلال 10 دقائق. قبل الفيكس، burst سريع عبر الـ webhook كان بيوصل
+    // لـ calculateRiskScore() ياخد soft penalty بس (device_velocity_blocked
+    // flag جوه الـ score) — فرق جوهري عن hard 403 فوري، لأن الـ soft
+    // penalty ممكن يتوازن بـ positive signals (MAX_POSITIVE_BOOST) أو
+    // يقع في Review مش Block. الترتيب هنا (بعد email hard-block، قبل
+    // BIN-sequence) مطابق لـ /evaluate بالحرف (قسم 1 قبل قسم 1b).
+    //
+    // deviceFingerprint هنا هي القيمة الحقيقية (قبل fallback الـ
+    // `wc_${orderId}` تحت في قسم استخراج riskRequest.deviceFingerprint) —
+    // عمدًا، مش riskRequest.deviceFingerprint. تمرير القيمة الاصطناعية
+    // هنا مش خطر أمني (كل قيمة فريدة، مستحيل توصل threshold التكرار) لكنها
+    // تلوّث بيانات بلا فايدة في CardTestAttempt.
+    const webhookVelocityCheck = await checkVelocity({
+      ip: extracted.ipAddress,
+      deviceFingerprint,
+      merchantId,
+      storeId: storeScope.storeId ?? null,
+    });
+
+    if (webhookVelocityCheck.dbError) {
+      logger.warn(
+        { module: 'risk', endpoint: 'woocommerce-webhook', merchantId, fallbackBlocked: webhookVelocityCheck.blocked },
+        'Velocity check ran in degraded mode — CardTestAttempt query failed, local fallback used'
+      );
+      try {
+        if (typeof prometheus.recordVelocityDbError === 'function') {
+          prometheus.recordVelocityDbError();
+        }
+      } catch (metricErr) {
+        // Metrics must never affect request handling.
+      }
+    }
+
+    if (webhookVelocityCheck.blocked) {
+      let webhookVelCardBin = null;
+      if (extracted.bin != null) {
+        const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+        if (b.length === 6) webhookVelCardBin = b;
+      }
+      const webhookVelIpHash = extracted.ipAddress ? hashIp(extracted.ipAddress) : null;
+      let webhookVelAmount = null;
+      if (extracted.amount != null) {
+        const amt = parseFloat(extracted.amount);
+        if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookVelAmount = amt;
+      }
+
+      try {
+        const webhookVelIncrementQuota = shouldIncrementQuota(merchantId, 'velocity', deviceFingerprint || extracted.ipAddress);
+
+        await db.$transaction(recordBlockedAttempt(db, {
+          merchantId,
+          storeId:         req.storeId ?? null,
+          cardBin:         webhookVelCardBin,
+          cardType:        null,
+          reason:          'velocity',
+          ipHash:          webhookVelIpHash,
+          amountAttempted: webhookVelAmount,
+          riskScore:       null,
+          incrementQuota:  webhookVelIncrementQuota,
+        }));
+      } catch (counterErr) {
+        logger.error(
+          { module: 'risk', endpoint: 'woocommerce-webhook', path: 'velocity', tenantId: merchantId, error: counterErr.message },
+          'Failed to record BlockedAttempt / increment quota counter (webhook velocity path)'
+        );
+      }
+
+      return res.status(403).json({
+        error: 'Request blocked due to suspicious activity',
+        reason: 'velocity_blocked',
+        decision: 'block'
+      });
     }
 
      // 7b. BIN Sequence Detection
@@ -2004,6 +2416,228 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
+    // 7c. Device Fingerprint Trust & Rotation Detection — [Discovery 4
+    // fix] كانت غايبة تمامًا من هذا المسار. webhookDeviceSignal اتعرّفت
+    // فوق (وقت فحص deviceToken) لكن rotationCount فضلت 0 دايمًا — مفيش
+    // كود كان بيحسبها أو يستخدمها للحظر. نفس منطقين مستقلين من /evaluate's
+    // قسم 1c بالحرف: (أ) per-IP — عدد device fingerprints مختلفة من نفس
+    // IP خلال ساعة، (ب) global — معدل ظهور fingerprints جديدة كليًا لهذا
+    // التاجر بغض النظر عن IP.
+    //
+    // ⚠️ فرق جوهري عن /evaluate: deviceFingerprint هنا (المتغيّر الخام،
+    // قبل fallback الـ `wc_${orderId}` المُستخدم في riskRequest.deviceFingerprint
+    // تحت) هي المستخدمة عمدًا، مش riskRequest.deviceFingerprint — لأن
+    // الـ fallback الاصطناعي فريد لكل أوردر بالتصميم، فاستخدامه في فحص
+    // "distinct fingerprints" كان هيخلق false positive حقيقي: أي تاجر
+    // بدون JS pixel حقيقي هيبقى عنده "fingerprint جديد" مع كل أوردر
+    // شرعي، ويوصل لعتبة الحظر بسرعة على أي حجم ترافيك طبيعي. كمان: عمود
+    // Order.deviceFingerprint بيتخزن فيه القيمة الاصطناعية دي بالفعل من
+    // كل أوردر webhook سابق (راجع قسم 12 تحت) — يعني الاستعلام نفسه
+    // لازم يستثنيها، مش بس منطق العدّ الحالي، لإن التلوّث موجود تاريخيًا
+    // في الداتابيز مسبقًا.
+    if (extracted.ipAddress) {
+      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour — matches /evaluate's own window
+      const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct REAL device fingerprints from one IP in 1h
+      const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
+
+      const webhookRecentDevicesForIp = await db.order.findMany({
+        where: {
+          merchantId, ...storeScope,
+          ipAddress: extracted.ipAddress,
+          createdAt: { gte: rotationWindowStart },
+          deviceFingerprint: { not: null },
+          // استثناء synthetic fallback IDs — راجع الشرح فوق.
+          NOT: { deviceFingerprint: { startsWith: 'wc_' } },
+        },
+        select: { deviceFingerprint: true },
+        distinct: ['deviceFingerprint'],
+        take: 50,
+      });
+      const webhookSeenThisOne = deviceFingerprint && webhookRecentDevicesForIp.some(d => d.deviceFingerprint === deviceFingerprint);
+      webhookDeviceSignal.rotationCount = webhookRecentDevicesForIp.length + (deviceFingerprint && !webhookSeenThisOne ? 1 : 0);
+
+      if (webhookDeviceSignal.rotationCount >= ROTATION_BLOCK_THRESHOLD) {
+        let webhookRotCardBin = null;
+        if (extracted.bin != null) {
+          const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) webhookRotCardBin = b;
+        }
+        const webhookRotIpHash = hashIp(extracted.ipAddress);
+        let webhookRotAmount = null;
+        if (extracted.amount != null) {
+          const amt = parseFloat(extracted.amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookRotAmount = amt;
+        }
+
+        try {
+          const webhookRotIncrementQuota = shouldIncrementQuota(merchantId, 'device_rotation_ip', extracted.ipAddress);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         webhookRotCardBin,
+            cardType:        null,
+            reason:          'velocity', // reuses the existing VALID_REASONS enum — same choice as /evaluate
+            ipHash:          webhookRotIpHash,
+            amountAttempted: webhookRotAmount,
+            riskScore:       null,
+            incrementQuota:  webhookRotIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'woocommerce-webhook', path: 'device_rotation', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (webhook device rotation path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious device fingerprint rotation',
+          reason: 'device_rotation_ip_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_rotation_ip_blocked' }]
+        });
+      }
+    }
+
+    // Global rotation — [Discovery 4 fix] مفيش تلوّث تاريخي هنا (in-memory
+    // مش DB)، لكن لازم نتجنب تسجيل الـ synthetic fallback ID كـ "fingerprint
+    // جديد" في كل مرة — بوابة `if (deviceFingerprint)` (القيمة الحقيقية)
+    // بس كفاية هنا، عكس الفحص فوق اللي احتاج فيكس على مستوى الاستعلام كمان.
+    if (deviceFingerprint) {
+      const webhookGlobalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
+
+      if (webhookGlobalRotation.blocked) {
+        let webhookGlobalRotCardBin = null;
+        if (extracted.bin != null) {
+          const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) webhookGlobalRotCardBin = b;
+        }
+        const webhookGlobalRotIpHash = extracted.ipAddress ? hashIp(extracted.ipAddress) : null;
+        let webhookGlobalRotAmount = null;
+        if (extracted.amount != null) {
+          const amt = parseFloat(extracted.amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookGlobalRotAmount = amt;
+        }
+
+        try {
+          const webhookGlobalRotIncrementQuota = shouldIncrementQuota(merchantId, 'device_rotation_global', deviceFingerprint);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         webhookGlobalRotCardBin,
+            cardType:        null,
+            reason:          'device_rotation_global',
+            ipHash:          webhookGlobalRotIpHash,
+            amountAttempted: webhookGlobalRotAmount,
+            riskScore:       null,
+            incrementQuota:  webhookGlobalRotIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'woocommerce-webhook', path: 'device_rotation_global', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (webhook global device rotation path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious device fingerprint rotation across the merchant',
+          reason: 'device_rotation_global_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_rotation_global_blocked' }]
+        });
+      }
+    }
+    // End 7c. Device Fingerprint Trust & Rotation Detection
+
+    // 7d. Raw (Unconditional) Device Velocity — نفس منطق /evaluate's
+    // قسم 1d بالحرف. deviceFingerprint هنا الخام عمدًا (قبل fallback
+    // wc_${orderId}) — نفس تحذير قسم 7c فوق: القيمة الاصطناعية فريدة لكل
+    // أوردر بالتصميم، فاستخدامها هنا كان هيخلق false positive حقيقي.
+    if (deviceFingerprint) {
+      const webhookRawDeviceVelocity = checkRawDeviceVelocity(merchantId, deviceFingerprint);
+      if (webhookRawDeviceVelocity.blocked) {
+        let webhookRawVelCardBin = null;
+        if (extracted.bin != null) {
+          const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+          if (b.length === 6) webhookRawVelCardBin = b;
+        }
+        const webhookRawVelIpHash = extracted.ipAddress ? hashIp(extracted.ipAddress) : null;
+        let webhookRawVelAmount = null;
+        if (extracted.amount != null) {
+          const amt = parseFloat(extracted.amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookRawVelAmount = amt;
+        }
+
+        try {
+          const webhookRawVelIncrementQuota = shouldIncrementQuota(merchantId, 'raw_device_velocity', deviceFingerprint);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         webhookRawVelCardBin,
+            cardType:        null,
+            reason:          'velocity',
+            ipHash:          webhookRawVelIpHash,
+            amountAttempted: webhookRawVelAmount,
+            riskScore:       null,
+            incrementQuota:  webhookRawVelIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'woocommerce-webhook', path: 'raw_device_velocity', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (webhook raw device velocity path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious request velocity',
+          reason: 'device_velocity_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'device_velocity_blocked' }]
+        });
+      }
+    } else if (extracted.ipAddress) {
+      const webhookRawIpHash = hashIp(extracted.ipAddress);
+      const webhookRawIpVelocity = checkRawIpVelocityFallback(merchantId, webhookRawIpHash);
+      if (webhookRawIpVelocity.blocked) {
+        let webhookRawIpVelAmount = null;
+        if (extracted.amount != null) {
+          const amt = parseFloat(extracted.amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) webhookRawIpVelAmount = amt;
+        }
+
+        try {
+          const webhookRawIpVelIncrementQuota = shouldIncrementQuota(merchantId, 'raw_ip_velocity', extracted.ipAddress);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         null,
+            cardType:        null,
+            reason:          'velocity',
+            ipHash:          webhookRawIpHash,
+            amountAttempted: webhookRawIpVelAmount,
+            riskScore:       null,
+            incrementQuota:  webhookRawIpVelIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'woocommerce-webhook', path: 'raw_ip_velocity_fallback', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (webhook raw IP velocity fallback path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious request velocity',
+          reason: 'ip_velocity_fallback_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'ip_velocity_fallback_blocked' }]
+        });
+      }
+    }
+    // End 7d. Raw (Unconditional) Device Velocity
+
     // 8. Load recent orders, disputes, blacklist for this merchant
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
     const recentOrders = await db.order.findMany({
@@ -2019,37 +2653,31 @@ router.post('/woocommerce-webhook', async (req, res) => {
       amount: o.amount,
       createdAt: o.createdAt,
       riskLevel: o.riskLevel,
+      cardBinPrefix: o.cardBinPrefix,
     }));
+    // [Undefined-OR fix] نفس فيكس /evaluate بالحرف — riskRequest.deviceFingerprint
+    // دايمًا truthy (fallback wc_${orderId} مضمون) فمحتاجش حراسة، لكن
+    // normalizedExtractedEmail وextracted.ipAddress ممكن يكونوا undefined/null.
+    const webhookDisputeOrConditions = [];
+    if (normalizedExtractedEmail) webhookDisputeOrConditions.push({ order: { normalizedEmail: normalizedExtractedEmail } });
+    webhookDisputeOrConditions.push({ order: { deviceFingerprint: riskRequest.deviceFingerprint } });
+    if (extracted.ipAddress) webhookDisputeOrConditions.push({ order: { ipAddress: extracted.ipAddress } });
+
     const disputes = await db.disputeOutcome.findMany({
       where: {
         merchantId,
         resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
-        OR: [
-          { order: { email: extracted.email } },
-          { order: { deviceFingerprint: riskRequest.deviceFingerprint } },
-          { order: { ipAddress: extracted.ipAddress } }
-        ]
+        OR: webhookDisputeOrConditions,
       },
       include: { order: true },
-      take: 200
+      take: 200,
     });
-    const blacklistOr = [];
-    if (extracted.email) blacklistOr.push({ type: 'EMAIL', value: extracted.email });
-    if (extracted.ipAddress) blacklistOr.push({ type: 'IP', value: extracted.ipAddress });
-    if (riskRequest.deviceFingerprint) blacklistOr.push({ type: 'DEVICE_FINGERPRINT', value: riskRequest.deviceFingerprint });
-
-    let blacklist = [];
-    if (blacklistOr.length > 0) {
-      blacklist = await db.blacklistEntry.findMany({
-        where: {
-          merchantId,
-          OR: blacklistOr,
-          AND: [
-            { OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }
-          ]
-        }
-      });
-    }
+    // [Discovery 1 fix] البوابة المبكرة (7a1) فوق بترفض أي تطابق فعلي بـ
+    // 403 قبل ما نوصل هنا — يعني أي أوردر وصل للسطر ده مستحيل يكون
+    // متطابق مع بلاك ليست بنفس الشروط. الاستعلام القديم هنا (blacklistOr +
+    // findMany) كان DB call مكرر بلا فايدة — نفس منطق /evaluate's
+    // `const blacklist = [];` بعد 0b بالحرف.
+    const blacklist = [];
 
     // 9. Velocity counts
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
@@ -2064,6 +2692,27 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const emailVelocityCount = extracted.email ? await db.order.count({
       where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
     }) : 0;
+
+    // [BIN Velocity fix] نفس منطق /evaluate — بدون storeScope عمدًا، اتساقًا
+    // مع باقي عدّادات السرعة الثلاثة في هذا الـ endpoint تحديدًا (تناقضهم
+    // مع /evaluate بخصوص storeScope موجود بالفعل من قبل وخارج نطاق هذا الفيكس).
+    let webhookCardBinPrefix = null;
+    if (extracted.bin != null) {
+      const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
+      if (b.length === 6) webhookCardBinPrefix = b;
+    }
+
+    let binVelocityCount10min = 0;
+    let binVelocityCount1h = 0;
+    let binVelocityCount24h = 0;
+    if (webhookCardBinPrefix) {
+      const last10min = new Date(Date.now() - 10 * 60 * 1000);
+      [binVelocityCount10min, binVelocityCount1h, binVelocityCount24h] = await Promise.all([
+        db.order.count({ where: { merchantId, cardBinPrefix: webhookCardBinPrefix, createdAt: { gte: last10min } } }),
+        db.order.count({ where: { merchantId, cardBinPrefix: webhookCardBinPrefix, createdAt: { gte: last1h } } }),
+        db.order.count({ where: { merchantId, cardBinPrefix: webhookCardBinPrefix, createdAt: { gte: last24h } } }),
+      ]);
+    }
 
     // 10. Build order object for riskScoring (compatible with calculateRiskScore)
     const orderForScoring = {
@@ -2094,7 +2743,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       blacklist,
       merchantId,
       true,  // saveEvaluation
-      { deviceVelocityCount, ipVelocityCount, emailVelocityCount },
+      { deviceVelocityCount, ipVelocityCount, emailVelocityCount, binVelocityCount10min, binVelocityCount1h, binVelocityCount24h },
       null,            // cardHashRecord — not available on this path
       webhookMerchantConfig, // threads deviceSignal into deviceTrustFactor — see above
       limitedScoring
@@ -2114,8 +2763,18 @@ router.post('/woocommerce-webhook', async (req, res) => {
       deviceVelocityCount,
       ipVelocityCount,
       emailVelocityCount,
+      // [BIN Velocity learning-loop fix] راجع نفس التعليق في /evaluate فوق
+      // — binVelocityCount10min/1h/24h محسوبة بالفعل فوق (قسم "BIN Velocity
+      // fix") ومُمررة لـ calculateRiskScore عبر externalVelocity، لكن كانت
+      // غايبة من هنا فمفيش أي بيانات تعلّم توصل SignalStat من مسار الـ webhook.
+      binVelocityCount10min,
+      binVelocityCount1h,
+      binVelocityCount24h,
       shippingBillingMismatch: extracted.billingCountry !== extracted.shippingCountry,
-      binIssuerMismatch: false, // would need BIN intel
+      // [Bug #5 fix] كانت hardcoded false. عمليًا لسه low-impact (راجع
+      // ADR-0 — bin مبيوصلش لـ webhook في الإنتاج أصلًا)، لكن لو bin وصل
+      // مستقبلًا (custom integration، إلخ) الفحص دلوقتي صحيح.
+      binIssuerMismatch: riskResult.binIntel && riskResult.binIntel.issuerCountry !== extracted.billingCountry,
       amountAnomaly: (riskResult.computedSignals?.orderMultiple || 0) >= 3,
       ipIntel: riskResult.ipIntel || null,
       emailIntel: riskResult.emailIntel || null,
@@ -2139,6 +2798,10 @@ router.post('/woocommerce-webhook', async (req, res) => {
         amount: extracted.amount,
         currency: 'USD',
         email: extracted.email,
+        // [Bug #7 fix] راجع تعليق /evaluate فوق — نفس المنطق بالظبط.
+        normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
+        // [BIN Velocity fix] راجع webhookCardBinPrefix فوق.
+        cardBinPrefix: webhookCardBinPrefix,
         ipAddress: extracted.ipAddress,
         deviceFingerprint: riskRequest.deviceFingerprint,
         riskScore: riskResult.score,
@@ -2151,6 +2814,8 @@ router.post('/woocommerce-webhook', async (req, res) => {
       update: {
         amount: extracted.amount,
         email: extracted.email,
+        normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
+        cardBinPrefix: webhookCardBinPrefix,
         ipAddress: extracted.ipAddress,
         deviceFingerprint: riskRequest.deviceFingerprint,
         riskScore: riskResult.score,
@@ -2204,6 +2869,24 @@ router.post('/woocommerce-webhook', async (req, res) => {
     // written to Order/RiskEvaluation but never counted in BlockedAttempt
     // or monthlyBlockedCount — this closes that gap.
     const webhookFinalDecision = riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block');
+
+    // [Discovery 4 fix] كانت غايبة من هذا المسار — يعني أي هجوم كارد
+    // تيستنج جه بالكامل عبر الـ webhook (مش /evaluate) مكانش بيغذّي
+    // CardTestAttempt خالص، فـ checkVelocity() (المُضافة فوق في 7a3، وأي
+    // نداء مستقبلي من /evaluate لنفس IP/device) كانت تفضل عمياء عن نشاط
+    // حقيقي حصل هنا. نفس شرط /evaluate بالحرف — أي قرار غير approve
+    // (يشمل review، لقفل نفس الفجوة الدائرية الموثقة في /evaluate).
+    // deviceFingerprint (الحقيقية، لا الاصطناعية) عمدًا — راجع تعليق 7c فوق.
+    if (webhookFinalDecision !== 'approve') {
+      recordFailedAttempt({
+        ip: extracted.ipAddress,
+        deviceFingerprint: deviceFingerprint || null,
+        merchantId,
+        storeId: storeScope.storeId ?? null,
+        amount: extracted.amount || 0,
+      });
+    }
+
     if (webhookFinalDecision === 'block') {
       let webhookFinalCardBin = null;
       if (extracted.bin != null) {
@@ -2974,6 +3657,79 @@ router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthM
     return res.status(500).json({ error: 'Internal Server Error' });
   }
 });
+// ========== POST /risk/dispute-evidence ==========
+// نقطة تسجيل موحّدة لأي دليل post-purchase يتجمّع على مدار عمر الـ
+// dispute. لا تُغيّر قرار الأوردر (خلاص اتنفذ) — الغرض الوحيد هو تجميع
+// إشارات هتُقرأ لاحقًا في processFeedbackSimplified() (feedbackLoop.js)
+// وقت إغلاق الـ dispute (won/lost)، فتغذّي SignalStat بدقة أعلى من
+// signalsSnapshot وحدها.
+//
+// Idempotent by design: @@unique([orderId, evidenceType]) — استدعاء
+// متكرر لنفس النوع بيحدّث القيمة (upsert)، مش يكرر الصف.
+const VALID_EVIDENCE_TYPES = new Set([
+  'TRACKING', 'DELIVERY_PROOF', 'LOGIN', 'CTA', 'PRE_CHARGE',
+  'USAGE_LOGS', 'NO_CANCEL_REQUEST', 'CE30', 'REFUND',
+]);
+const VALID_EVIDENCE_SOURCES = new Set(['system_derived', 'processor_webhook', 'manual']);
+
+router.post('/dispute-evidence', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
+  try {
+    const { orderId, evidenceType, value, source, metadata } = req.body;
+    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
+
+    if (!orderId || typeof orderId !== 'string') {
+      return res.status(400).json({ error: 'orderId is required' });
+    }
+    if (!evidenceType || !VALID_EVIDENCE_TYPES.has(evidenceType)) {
+      return res.status(400).json({ error: `evidenceType must be one of: ${[...VALID_EVIDENCE_TYPES].join(', ')}` });
+    }
+    if (!value || typeof value !== 'string') {
+      return res.status(400).json({ error: 'value is required' });
+    }
+    const safeSource = VALID_EVIDENCE_SOURCES.has(source) ? source : 'manual';
+
+    // Scoped lookup — نفس نمط C3/C4 المستخدم في باقي الملف: compound key
+    // يضمن إن الأوردر ينتمي لنفس التاجر المُصادَق عليه، مستحيل يرجع صف
+    // تاجر تاني.
+    const order = await db.order.findUnique({
+      where: { merchantId_orderId: { merchantId, orderId } },
+      select: { id: true },
+    });
+    if (!order) {
+      logger.warn({ module: 'risk', endpoint: 'dispute-evidence', merchantId, orderId }, 'Order not found for this merchant');
+      return res.status(404).json({ error: 'Order not found' });
+    }
+
+    const confidence = safeSource === 'manual' ? 0.7 : 1.0;
+
+    const evidence = await db.disputeEvidence.upsert({
+      where: { orderId_evidenceType: { orderId: order.id, evidenceType } },
+      create: {
+        merchantId,
+        orderId: order.id,
+        evidenceType,
+        value,
+        source: safeSource,
+        confidence,
+        metadata: metadata ?? undefined,
+        submittedBy: safeSource === 'manual' ? (req.body.submittedBy || 'merchant') : 'system',
+      },
+      update: {
+        value,
+        source: safeSource,
+        confidence,
+        metadata: metadata ?? undefined,
+        submittedAt: new Date(),
+      },
+    });
+
+    res.json({ success: true, evidence: { id: evidence.id, evidenceType: evidence.evidenceType, value: evidence.value } });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'dispute-evidence', error: error.message, stack: error.stack }, 'Error recording dispute evidence');
+    res.status(500).json(safeErrorPayload(error));
+  }
+});
+
 // ── TEMP DEBUG — احذف هذا البلوك بالكامل بعد الانتهاء من الاختبار ──
 router.get('/debug-quota/:tenantId', async (req, res) => {
   if (req.query.secret !== process.env.ADMIN_SECRET) {
