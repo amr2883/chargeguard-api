@@ -13,6 +13,7 @@
 const { recordIP, checkIPLimit } = require('./metrics');
 const prometheus = require('./prometheus');
 const logger = require('../lib/logger');
+const { getLearnedMultiplier } = require('./signalWeights');
 
 // ─── Feature Flag ─────────────────────────────────────────────────────────
 // لو حصل bug في production → ENABLE_IP_INTEL=false في .env يوقفه فوراً
@@ -385,25 +386,45 @@ function invalidateIPCache(rawIp) {
 // 3. Signal combining — datacenter + country mismatch = boosted penalty
 // 4. Capped — max -25 total to prevent double counting with graph
 
-function calculateIPPenalty(ipIntel, orderAmount, billingCountry) {
+// [Learning-loop wiring] getW اختيارية — دالة (signalType, signalValue) =>
+// weight من signalWeights.js's getWeightsForMerchant(), مُمرّرة من
+// riskScoring.js. null/undefined = fallback الكامل للأرقام الثابتة
+// القديمة (نفس سلوك الإنتاج الحالي 100%) — أي كولر تاني موجود أو مستقبلي
+// مش بيمرر getW لسه هيشتغل بلا أي تغيير.
+//
+// نطاق التوصيل هنا: IP_TOR، IP_BOT، IP_COUNTRY، وIP_DATACENTER (كإشارة
+// مخصصة مستقلة عن الـ composite-risk — راجع "Dedicated Datacenter/Hosting
+// Signal" تحت). IP_PROXY يفضل مؤجّلة عمدًا:
+//   - IP_PROXY: isProxy/isVpn بالفعل بيغذّوا riskScore نفسها (جوه
+//     computeIPRisk/fallback calc) — توصيلها كإشارة منفصلة هنا هيعمل
+//     double-count حرفي مع عقوبة effectiveRisk اللي أصلاً بتحتويها. هذا
+//     الإرجاء مبني على دليل مباشر من computeIPRisk() مش تخمين.
+function calculateIPPenalty(ipIntel, orderAmount, billingCountry, getW = null) {
   if (!ipIntel || ipIntel.source === "skipped" || ipIntel.source === "timeout") {
     return { penalty: 0, flags: [] };
   }
   // stale: confidence منخفضة (0.20-0.40) → effectiveRisk منخفض → penalty منخفضة أوتوماتيكلي
   // مش بنعمل early return لأن الـ confidence weighting بيتعامل معاه
-
   const flags = [];
   let penalty = 0;
   // penalty هنا positive number — بيتطرح من الـ score في riskScoring.js
   // Cap final: Math.min(penalty, 25) يمنع double counting مع Identity Graph
-
   // Effective risk = riskScore × confidence
   const effectiveRisk = ipIntel.riskScore * ipIntel.confidence;
 
 // ── Tor Penalty ──────────────────────────────────────────────────────────
   // Tor is categorically different — anonymization with criminal-use base rate
+  // [Learning-loop wiring] كانت 30 ثابتة. لو getW متاحة، القيمة بتتحسب من
+  // getW("IP_TOR","true") — عند cold start (صفر بيانات تعلّم) بترجع 30
+  // بالظبط (STATIC_WEIGHTS's base)، يعني صفر تغيير سلوكي وقت النشر. مع
+  // تراكم dispute outcomes حقيقية، القيمة تتحرك جوه [0, 90] (30×3 سقف —
+  // راجع MAX_WEIGHT_MULTIPLIER في signalWeights.js).
   if (ipIntel.isTor) {
-    penalty += 30;
+    // [Case-normalization fix] "TRUE" — لازم تطابق STATIC_WEIGHTS's
+    // "IP_TOR:TRUE" بالحرف بعد فيكس signalWeights.js، وإلا getW() ترجع
+    // undefined و Math.round(undefined) = NaN يلوّث score كله.
+    const torPenalty = getW ? Math.round(getW("IP_TOR", "TRUE")) : 30;
+    penalty += torPenalty;
     flags.push({
       severity: "critical",
       text: `IP identified as Tor exit node — anonymized traffic, critical fraud risk`,
@@ -411,54 +432,121 @@ function calculateIPPenalty(ipIntel, orderAmount, billingCountry) {
   }
 
   // ── Bot / Botnet Penalty ──────────────────────────────────────────────────
+  // [IP_BOT wiring] نفس نمط IP_TOR بالحرف — getW() بترجع 20 بالظبط عند
+  // cold start (STATIC_WEIGHTS's base)، وتتحرك مع تراكم dispute outcomes
+  // حقيقية بعد كده.
   if (ipIntel.isBot) {
-    penalty += 20;
+    // [Case-normalization fix] راجع تعليق IP_TOR فوق — نفس السبب بالحرف.
+    const botPenalty = getW ? Math.round(getW("IP_BOT", "TRUE")) : 20;
+    penalty += botPenalty;
     flags.push({
       severity: "critical",
       text: `IP flagged as bot or botnet participant — automated fraud risk`,
     });
   }
 
-  // ── Datacenter / Hosting Penalty ────────────────────────────────────────
-  if (effectiveRisk > 0.5) {    // High confidence datacenter
-    const basePenalty = orderAmount > 200 ? 25 : 10;
-    penalty += basePenalty;
+  // ── Composite Risk Score + Dedicated Datacenter Signal (shared cap) ─────
+  // [Correctness fix] effectiveRisk هنا مش بتقيس "هل الـ IP datacenter؟"
+  // فعليًا — هي إما IPQS's fraudScore الكامل (composite خارجي، مش قابل
+  // للتفكيك)، أو في وضع fallback مجموع isTor+isBot+isProxy/isVpn (راجع
+  // computeIPRisk() فوق). isDatacenter/hosting مش جزء من أي المعادلتين
+  // خالص. الأرقام والـ thresholds هنا (25/10/15/5) اتحافظ عليها زي ما
+  // هي — بس الاسم والـ flag text اتصححوا عشان مايكدبوش على التاجر
+  // بادعاء "datacenter" لشرط مش بيختبره فعليًا.
+  let compositeRiskPenalty = 0;
+  if (effectiveRisk > 0.5) {
+    compositeRiskPenalty = orderAmount > 200 ? 25 : 10;
     flags.push({
       severity: orderAmount > 200 ? "high" : "medium",
-      text: `IP address identified as datacenter/VPN (${ipIntel.isp || "unknown ISP"}) — high fraud risk`,
+      text: `IP address shows elevated composite fraud risk (${ipIntel.isp || "unknown ISP"})`,
     });
   } else if (effectiveRisk > 0.25) {
-    // Medium confidence — partial signal
-    const basePenalty = orderAmount > 200 ? 15 : 5;
-    penalty += basePenalty;
+    compositeRiskPenalty = orderAmount > 200 ? 15 : 5;
     flags.push({
       severity: "medium",
-      text: `IP address associated with hosting provider (${ipIntel.isp || "unknown ISP"})`,
+      text: `IP address shows moderately elevated fraud risk (${ipIntel.isp || "unknown ISP"})`,
     });
   }
-
-  // ── Country Mismatch Penalty ─────────────────────────────────────────────
-  // Replaces the old static Egyptian IPs check
-  // Soft penalty — expats and travelers are real customers
-  if (ipIntel.country && billingCountry && ipIntel.country !== billingCountry) {
-    const mismatchPenalty = orderAmount > 100 ? 15 : 5;
-    penalty += mismatchPenalty;
+  // [IP_DATACENTER wiring — Phase 2] إشارة مخصصة مبنية مباشرة على
+  // ipIntel.isDatacenter (= data.hosting === true)، مستقلة تمامًا عن
+  // effectiveRisk. هذه أول عقوبة فعلية في المشروع مبنية على isDatacenter
+  // نفسها — قبل كده الحقل ده كان بيُستخدم للـ labeling بس (topSignals في
+  // riskScoring.js) من غير أي تأثير حقيقي على الدرجة. base صغير عمدًا
+  // (12/6) لأنها إشارة تكميلية جنب compositeRiskPenalty فوق، مش بديل
+  // ليها — الاتنين بيتجمعوا تحت IP_HOSTING_PENALTY_CAP.
+  let datacenterPenalty = 0;
+  if (ipIntel.isDatacenter) {
+    // [Case-normalization fix] راجع تعليق IP_TOR فوق.
+    const datacenterMultiplier = getLearnedMultiplier(getW, 'IP_DATACENTER', 'TRUE');
+    datacenterPenalty = Math.round((orderAmount > 200 ? 12 : 6) * datacenterMultiplier);
     flags.push({
-      severity: orderAmount > 100 ? "high" : "medium",
-      text: `IP country (${ipIntel.country}) doesn't match billing country (${billingCountry})`,
+      severity: orderAmount > 200 ? "high" : "medium",
+      text: `IP address identified as datacenter/hosting provider (${ipIntel.isp || "unknown ISP"})`,
     });
+  }
+  // Cap مشترك = 20 (السقف الكلي للدالة 25 عادةً — راجع penaltyCap تحت —
+  // ناقص 5 كحد أدنى محجوز لإشارة country mismatch/IP_COUNTRY عشان
+  // ماتتبلعش بالكامل داخل الـ hosting budget).
+  const IP_HOSTING_PENALTY_CAP = 20;
+  penalty += Math.min(compositeRiskPenalty + datacenterPenalty, IP_HOSTING_PENALTY_CAP);
+
+  // ── Country Mismatch + Country-Inherent Risk (combined, capped) ─────────
+  // [Learning-loop wiring] IP_COUNTRY كانت يتيمة تمامًا — signalWeights.js
+  // عندها مفاتيح (IP_COUNTRY:NG/CM/GH/PK/BD/VN/ID/PH/RO/UA)،
+  // extractSignalsFromSnapshot() بتجمع البيانات، لكن مفيش أي نقطة
+  // استهلاك خالص قبل كده. دلوقتي بتتحسب هنا كإشارة مستقلة عن الـ mismatch،
+  // لكن **مجمّعة تحت cap مشترك واحد** بدل ما تتضاف لوحدها:
+  //   1. mismatchPenalty      — IP country ≠ billing country (موجودة،
+  //      بدون أي تغيير في الصيغة/الـ thresholds — soft penalty، الـ
+  //      expats/travelers عملاء حقيقيين).
+  //   2. countryInherentPenalty — دولة الـ IP نفسها خطرة بمعزل عن أي
+  //      mismatch (learned-only عبر IP_COUNTRY:<code> — صفر لأي دولة
+  //      برّه الـ whitelist، يعني كل الدول منخفضة الخطورة بتفضل صفر
+  //      بالتصميم).
+  // الاتنين ممكن يشتغلوا على نفس الأوردر (IP من نيجيريا + billing من
+  // دولة تانية) — من غير cap مشترك، هيتراكموا بلا حد لنفس الحقيقة
+  // الجغرافية الأساسية. IP_GEO_PENALTY_CAP بيحافظ على التناسب مع حجم
+  // الـ mismatch tier الأصلي (أقصاها كانت 15) بينما بيسمح للإشارة
+  // المتعلّمة تضيف وزن حقيقي لما البيانات تبرر ده.
+  const IP_GEO_PENALTY_CAP = 20;
+  let mismatchPenalty = 0;
+  if (ipIntel.country && billingCountry && ipIntel.country !== billingCountry) {
+    mismatchPenalty = orderAmount > 100 ? 15 : 5;
+  }
+  let countryInherentPenalty = 0;
+  if (ipIntel.country && getW) {
+    countryInherentPenalty = Math.round(getW("IP_COUNTRY", ipIntel.country.toUpperCase()));
+  }
+  const geoPenalty = Math.min(mismatchPenalty + countryInherentPenalty, IP_GEO_PENALTY_CAP);
+  if (geoPenalty > 0) {
+    penalty += geoPenalty;
+    if (mismatchPenalty > 0) {
+      flags.push({
+        severity: orderAmount > 100 ? "high" : "medium",
+        text: `IP country (${ipIntel.country}) doesn't match billing country (${billingCountry})`,
+      });
+    }
+    if (countryInherentPenalty > 0) {
+      flags.push({
+        severity: "medium",
+        text: `IP connection from elevated-risk country (${ipIntel.country})`,
+      });
+    }
   }
 
   // ── Signal Combining Boost ───────────────────────────────────────────────
-  // Datacenter + Country Mismatch together = much stronger signal
-  const hasDatacenter = effectiveRisk > 0.5;
+  // [Correctness fix] كانت hasDatacenter = effectiveRisk > 0.5 (تقريب
+  // غير صحيح). دلوقتي بتستخدم ipIntel.isDatacenter الحقيقية OR
+  // compositeRiskPenalty > 0 — يعني الـ boost بيتفعّل لو أي من
+  // الإشارتين (composite risk أو dedicated hosting) فعلية، مش بس تقريب
+  // واحد مضلل زي الأول.
+  const hasHostingSignal = ipIntel.isDatacenter || compositeRiskPenalty > 0;
   const hasCountryMismatch = ipIntel.country && billingCountry && ipIntel.country !== billingCountry;
-
-  if (hasDatacenter && hasCountryMismatch) {
+  if (hasHostingSignal && hasCountryMismatch) {
     penalty += 10; // Interaction boost
     flags.push({
       severity: "high",
-      text: `Combined signal: datacenter IP + country mismatch — strong fraud indicator`,
+      text: `Combined signal: elevated IP risk + country mismatch — strong fraud indicator`,
     });
   }
 

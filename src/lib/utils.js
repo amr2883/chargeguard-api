@@ -88,26 +88,69 @@ function isPlausibleClientIp(ip) {
   return { ok: true };
 }
 
+// ─── Unicode Homoglyph Map ────────────────────────────────────────────────
+// [Bug #7 fix] موحّدة هنا كـ single source of truth — كانت مكررة (بدون
+// homoglyph) في هذا الملف، وبنسخة أقوى (مع homoglyph) في similarity.js.
+// similarity.js دلوقتي بيستورد normalizeEmail من هنا بدل تعريفها بنفسه —
+// انظر similarity.js. أي مكان بيقارن إيميلات (blacklist/whitelist/disputes
+// في risk.js، أو identity graph عبر normalizeValue تحت) لازم يمر من هنا.
+//
+// NFKC normalization وحدها لا تكفي — Cyrillic "а" (U+0430) ليست
+// compatibility equivalent لـ Latin "a" في معيار Unicode. المهاجمون
+// يستخدمون هذه الأحرف بشكل شائع في email fraud (bypass للـ blacklist).
+//
+// المصدر: Unicode Confusables (https://unicode.org/reports/tr39/#Confusable_Detection)
+const HOMOGLYPH_MAP = {
+  // Cyrillic lowercase → Latin
+  "\u0430": "a", "\u0435": "e", "\u043E": "o", "\u0440": "r", "\u0441": "c",
+  "\u0445": "x", "\u0443": "y", "\u0456": "i", "\u0454": "e",
+  // Cyrillic uppercase → Latin
+  "\u0410": "a", "\u0412": "b", "\u0415": "e", "\u041A": "k", "\u041C": "m",
+  "\u041D": "h", "\u041E": "o", "\u0420": "r", "\u0421": "c", "\u0422": "t",
+  "\u0425": "x",
+  // Greek confusables
+  "\u03BF": "o", "\u03B1": "a", "\u03B5": "e", "\u03BD": "v",
+  // Latin look-alikes (IPA / phonetic chars used in fraud)
+  "\u0251": "a", "\u0261": "g", "\u0269": "i", "\u026A": "i",
+  "\u2113": "l", "\u0277": "o", "\u028C": "v",
+  // Arabic-Indic digits → ASCII digits (١٢٣ → 123)
+  "\u0660": "0", "\u0661": "1", "\u0662": "2", "\u0663": "3", "\u0664": "4",
+  "\u0665": "5", "\u0666": "6", "\u0667": "7", "\u0668": "8", "\u0669": "9",
+};
+
+function applyHomoglyphMap(str) {
+  return [...str].map(c => HOMOGLYPH_MAP[c] ?? c).join("");
+}
+
+const DOMAIN_ALIASES = { "googlemail.com": "gmail.com" };
+const DOTLESS_DOMAINS = new Set(["gmail.com"]);
+
+// ─── Email Normalization ──────────────────────────────────────────────────
+// بينظف الـ email قبل المقارنة. يمنع bypass بـ:
+//   - dots أو plus tags (gmail trick)
+//   - Unicode homoglyphs (Cyrillic/Greek/Arabic-Indic digits look-alike)
+//   - alias domains (googlemail.com ≡ gmail.com)
 function normalizeEmail(email) {
   if (!email || typeof email !== 'string') return '';
-  let normalized = email.normalize('NFKC').toLowerCase().trim();
+
+  const normalized = applyHomoglyphMap(
+    email.normalize('NFKC').toLowerCase().trim()
+  );
+
   const atIndex = normalized.lastIndexOf('@');
   if (atIndex === -1) return normalized;
-  let local = normalized.slice(0, atIndex);
+
+  const local = normalized.slice(0, atIndex);
   const domain = normalized.slice(atIndex + 1);
-  
-  // إزالة الـ plus tag
-  local = local.split('+')[0];
-  
-  // تحويل googlemail.com إلى gmail.com
-  const canonicalDomain = domain === 'googlemail.com' ? 'gmail.com' : domain;
-  
-  // إزالة النقاط من الـ local فقط إذا كان النطاق gmail.com
-  if (canonicalDomain === 'gmail.com') {
-    local = local.replace(/\./g, '');
-  }
-  
-  return local + '@' + canonicalDomain;
+  if (!local || !domain) return normalized;
+
+  const canonicalDomain = DOMAIN_ALIASES[domain] ?? domain;
+  const localNoPlusTag = local.split('+')[0];
+  const localFinal = DOTLESS_DOMAINS.has(canonicalDomain)
+    ? localNoPlusTag.replace(/\./g, '')
+    : localNoPlusTag;
+
+  return `${localFinal}@${canonicalDomain}`;
 }
 
 function hashValue(type, value) {
@@ -123,15 +166,12 @@ function hashValue(type, value) {
 function normalizeValue(type, value) {
   if (!value) return '';
   switch (type) {
-    case 'EMAIL': {
-      const lower = value.normalize('NFKC').toLowerCase().trim();
-      const [local, domain] = lower.split('@');
-      if (!domain) return lower;
-      const cleanLocal = local.split('+')[0];
-      const gmailDomains = ['gmail.com', 'googlemail.com'];
-      const finalLocal = gmailDomains.includes(domain) ? cleanLocal.replace(/\./g, '') : cleanLocal;
-      return `${finalLocal}@${domain === 'googlemail.com' ? 'gmail.com' : domain}`;
-    }
+    // [Bug #7 fix] كانت implementation ثالثة منفصلة (بدون homoglyph) —
+    // بقت wrapper على normalizeEmail() الموحّدة فوق. أثر جانبي متعمد وآمن:
+    // hashValue() (المستخدمة في identityGraph.js) هتاخد homoglyph
+    // protection فورًا من أول ديبلوي — تحسين، مش كسر، لأن IdentityNode
+    // بتتبنى ديناميكيًا لكل أوردر جديد ومحتاجاش backfill.
+    case 'EMAIL': return normalizeEmail(value);
     case 'IP': {
       const trimmed = value.trim();
       const plausible = isPlausibleClientIp(trimmed);

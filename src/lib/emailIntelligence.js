@@ -444,14 +444,20 @@ async function getEmailIntelligence(email, merchantId = null) {
 
   // ── Per-Merchant Rate Limit ───────────────────────────────────────────────
   // FIX: skip rate limit if merchantId is null
+  //
+  // [Cross-tenant cache poisoning fix] كانت هذه النتيجة المتدهورة (rate
+  // limited) بتتكتب في emailCache المشترك بين كل التجار، مفتوح بس على
+  // normalizedEmail بدون أي merchant scoping. النتيجة: تاجر A لما يستهلك
+  // كوتته بيسمم الـ cache لمدة 5 دقايق لأي تاجر تاني (B) يستفسر عن نفس
+  // الإيميل — B بيرجع من getFromCache فوق قبل ما يوصل حتى لفحص كوتته هو،
+  // وحمايته بتضعف بسبب حد تاني بالكامل. ipIntelligence.js و
+  // binIntelligence.js (نفس النمط بالظبط) بيرجعوا النتيجة المتدهورة
+  // مباشرة من غير ما يكتبوها في الكاش خالص — اتساق مع النمط ده هنا.
+  // الكاش المشترك للنتائج الحقيقية (DNS/disposable) يفضل زي ما هو — ده
+  // قرار تصميمي سليم، المشكلة كانت في تخزين النتيجة المتدهورة تحديدًا.
   if (!checkEmailLimit(merchantId)) {
     prometheus.recordEmailIntel('rate_limited', 'failure');
-    const rateLimitedResult = { ..._skipped(), confidence: 0.10 };
-    lruSet(emailCache, normalizedEmail, {
-      data:   rateLimitedResult,
-      expiry: Date.now() + 5 * 60 * 1000,
-    }, MAX_CACHE_SIZE);
-    return rateLimitedResult;
+    return { ..._skipped(), confidence: 0.10 };
   }
 
   // ── Circuit Breaker (Sliding Window) ──────────────────────────────────────
@@ -547,7 +553,10 @@ async function getEmailIntelligence(email, merchantId = null) {
 // ─── Calculate Email Penalty ──────────────────────────────────────────────
 // Called from riskScoring.js — returns { penalty, flags }
 
-function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
+// [Learning-loop wiring] getW اختيارية — نفس نمط calculateIPPenalty() بالضبط.
+// null/undefined = fallback كامل للأرقام الثابتة (الآن مطابقة تمامًا لما
+// كان hardcoded من قبل، بعد تصحيح الـ baseline في signalWeights.js).
+function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer, getW = null) {
   // skipped → مفيش data خالص
   // timeout → البيانات مش موثوقة — consistent مع calculateIPPenalty
   if (!emailIntel || emailIntel.source === "skipped" || emailIntel.source === "timeout") {
@@ -562,15 +571,18 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
   // النتيجة: نفس الـ penalty بغض النظر عن ترتيب الـ checks
 
   // ── 1. Domain Existence ───────────────────────────────────────────────
+  // [Case-normalization fix] "TRUE" في الثلاثة نداءات تحت — لازم تطابق
+  // signalWeights.js's المفاتيح بعد الفيكس (EMAIL_DOMAIN_NOT_FOUND:TRUE
+  // إلخ)، وfeedbackLoop.js's VALID_SIGNAL_VALUES بعد نفس الفيكس.
   let domainPenalty = 0;
   if (!emailIntel.domainExists && !emailIntel.uncertain) {
-    domainPenalty = 40;
+    domainPenalty = getW ? Math.round(getW("EMAIL_DOMAIN_NOT_FOUND", "TRUE")) : 40;
     flags.push({ severity: "critical", text: "email_domain_not_found" });
   } else if (!emailIntel.domainExists && emailIntel.uncertain) {
-    domainPenalty = 5;
+    domainPenalty = getW ? Math.round(getW("EMAIL_DOMAIN_UNVERIFIED", "TRUE")) : 5;
     flags.push({ severity: "medium", text: "email_domain_unverified" });
   } else if (!emailIntel.hasMX && !emailIntel.uncertain) {
-    domainPenalty = 25;
+    domainPenalty = getW ? Math.round(getW("EMAIL_DOMAIN_NO_MX", "TRUE")) : 25;
     flags.push({ severity: "high", text: "email_domain_no_mx" });
   }
 
@@ -581,7 +593,8 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
   if (emailIntel.isDisposable) {
     flags.push({ severity: "critical", text: "disposable_email_domain" });
     if (domainPenalty === 0) {
-      disposablePenalty = 35;
+      // [Case-normalization fix]
+      disposablePenalty = getW ? Math.round(getW("EMAIL_DISPOSABLE", "TRUE")) : 35;
     }
   }
 
@@ -609,7 +622,8 @@ function calculateEmailPenalty(emailIntel, orderAmount, isNewCustomer) {
   // لأن الـ signals دي أقوى وبتغطي الـ risk
   let freePenalty = 0;
   if (emailIntel.isFreeProvider && isNewCustomer && orderAmount >= 300 && domainPenalty === 0 && disposablePenalty === 0) {
-    freePenalty = 10;
+    // [Case-normalization fix]
+    freePenalty = getW ? Math.round(getW("EMAIL_FREE_PROVIDER", "TRUE")) : 10;
     flags.push({
       severity: "medium",
       text: "free_provider_high_value_new_customer",

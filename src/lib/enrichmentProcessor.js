@@ -12,6 +12,8 @@ const { checkBINSequence } = require('./binSequenceDetector');
 const { calculateRiskScore } = require('./riskScoring');
 const { verifyDeviceToken } = require('./deviceToken');
 const { getStoreScope, isProOrAbove } = require('./planAccess');
+const { normalizeEmail } = require('./utils'); // [Bug #7 fix]
+const { findBlacklistMatch } = require('./blacklistGate'); // [Discovery 2 fix]
 
 const RISK_SECRET_SALT = process.env.SECRET_SALT;
 const hashIp = (ip) => crypto.createHmac('sha256', RISK_SECRET_SALT).update(ip).digest('hex');
@@ -54,6 +56,15 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
 
   const storeScope = getStoreScope(tenant, storeId);
 
+  // [BIN Velocity fix] cardBinPrefix للأوردر الحالي — نفس idiom
+  // المستخدم في risk.js. /enrich هو المسار الأساسي فعليًا اللي بيوصل
+  // فيه bin حقيقي (راجع ADR-0) — فده أهم نقطة تفعيل للفيكس ده كله.
+  let cardBinPrefix = null;
+  if (bin != null) {
+    const b = String(bin).replace(/\D/g, '').slice(0, 6);
+    if (b.length === 6) cardBinPrefix = b;
+  }
+
   let cardHashRecord = null;
   if (last4 && expMonth && expYear && brand && merchantId) {
     const secret = process.env.CARD_HASH_SECRET;
@@ -91,9 +102,15 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
   }
   const enrichMerchantConfig = { deviceSignal: enrichDeviceSignal };
 
+  // [Bug #7 fix] existingOrder.email خام (مكتوب وقت /evaluate أو
+  // /woocommerce-webhook) — بنطبّعه هنا وقت المقارنة، مش بنعتمد على عمود
+  // Order.normalizedEmail (مش حتى في الـ select فوق)، عشان الفحص يفضل صحيح
+  // حتى لو الأوردر اتكتب قبل تشغيل الـ backfill script على جدول Order.
+  const normalizedExistingEmail = existingOrder.email ? normalizeEmail(existingOrder.email) : undefined;
+
   // Whitelist bypass
   const wlConditions = [];
-  if (existingOrder.email) wlConditions.push({ type: 'EMAIL', value: existingOrder.email });
+  if (normalizedExistingEmail) wlConditions.push({ type: 'EMAIL', normalizedValue: normalizedExistingEmail });
   if (existingOrder.ipAddress) wlConditions.push({ type: 'IP', value: existingOrder.ipAddress });
   if (bin) wlConditions.push({ type: 'BIN', value: String(bin).replace(/\D/g, '').slice(0, 6) });
 
@@ -102,9 +119,81 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
       where: { merchantId, ...storeScope, OR: wlConditions, AND: [{ OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }] }] },
     });
     if (wl) {
-      await db.order.update({ where: { id: existingOrder.id }, data: { decision: 'approve', riskLevel: 'low', cardHash: cardHashRecord?.cardHash ?? null, enrichmentSource: body.source || 'stripe' } });
+      // [BIN Velocity fix] cardBinPrefix بيتكتب هنا كمان — الأوردر
+      // whitelisted لكن الـ bin لسه وصل فعليًا ولازم يتسجل للأوردرات
+      // المستقبلية اللي هتحسب velocity ضده.
+      await db.order.update({ where: { id: existingOrder.id }, data: { decision: 'approve', riskLevel: 'low', cardHash: cardHashRecord?.cardHash ?? null, cardBinPrefix, enrichmentSource: body.source || 'stripe' } });
       await db.pendingEnrichment.deleteMany({ where: { merchantId, orderId, status: 'pending' } });
       return { status: 200, body: { success: true, orderId, enriched: true, newRiskScore: existingOrder.riskScore, newDecision: 'approve', flags: [], whitelisted: true } };
+    }
+  }
+
+  // [Discovery 2 fix] BIN Blacklist Check — كانت البلاك ليست بالكامل من
+  // غير أي فحص BIN عبر كل المشروع، بالرغم من إن الـ schema بيدعمه رسميًا
+  // (BlacklistEntry.type='BIN') والـ whitelist فوق بالفعل بيفحص BIN.
+  // /enrich هو المسار الوحيد اللي بيوصل فيه BIN حقيقي (راجع cardBinPrefix
+  // فوق) — يعني قبل الفيكس ده، تاجر يعمل blacklist entry بـ BIN معروف
+  // إنه بيُستخدم في هجمات كارد تيستنج مكانش هيتفحص أبدًا في أي نقطة من
+  // النظام. بيتحقق قبل checkBINSequence تحت عمدًا: لو فيه تطابق مباشر،
+  // نوفر استعلام checkBINSequence الأغلى (Redis EVAL round-trip) تمامًا،
+  // ونرجع 'blacklist' كـ reason منفصل عن 'card_testing' (نفس تمييز
+  // risk.js's webhook gate). storeScope مُضافة اتساقًا مع whitelist check
+  // فوق في نفس الملف (كلاهما hard-decision paths، عكس عدّادات السرعة الـ
+  // soft في risk.js اللي بتتجاهل storeScope عمدًا).
+  if (cardBinPrefix) {
+    const binBlacklistCheck = await findBlacklistMatch(db, {
+      merchantId,
+      storeScope,
+      bin: cardBinPrefix,
+    });
+    if (binBlacklistCheck) {
+      // [Quota double-count fix] نفس نمط الحماية المستخدم بالفعل في مسار
+      // الحظر التالت في هذا الملف (enrichDecision === 'block' &&
+      // existingOrder.decision !== 'block') — كان غايب من هنا تحديدًا.
+      // بدونه: أي retry من Stripe/PayPal webhook (سيناريو حقيقي وشائع،
+      // مش نظري) لنفس الأوردر اللي عليه BIN blacklist match كان بيعمل
+      // BlockedAttempt row جديد ويزوّد monthlyBlockedCount تاني، رغم إنه
+      // نفس الحدث الفعلي الواحد. order.update لسه بيتنفذ بلا شرط (idempotent
+      // بطبيعته — نفس القيمة بتتكتب تاني، مفيش ضرر) لكن recordBlockedAttempt
+      // (اللي بيأثر على عداد فوترة/كوتا حقيقي) بقى مشروط.
+      const shouldRecordBlacklistAttempt = existingOrder.decision !== 'block';
+      try {
+        const binBlacklistOps = [
+          db.order.update({
+            where: { id: existingOrder.id },
+            data: { decision: 'block', riskLevel: 'high', cardHash: cardHashRecord?.cardHash ?? null, cardBinPrefix, enrichmentSource: body.source || 'stripe' },
+          }),
+        ];
+        if (shouldRecordBlacklistAttempt) {
+          binBlacklistOps.push(
+            ...recordBlockedAttempt(db, {
+              merchantId,
+              storeId: storeId ?? null,
+              cardBin: cardBinPrefix,
+              cardType: null,
+              reason: 'blacklist',
+              ipHash: existingOrder.ipAddress ? hashIp(existingOrder.ipAddress) : null,
+              amountAttempted: existingOrder.amount ?? null,
+              riskScore: null,
+            })
+          );
+        }
+        await db.$transaction(binBlacklistOps);
+      } catch (err) {
+        logger.error({ module: 'enrichmentProcessor', tenantId: merchantId, error: err.message }, 'Failed BIN-blacklist block transaction');
+      }
+      await db.pendingEnrichment.deleteMany({ where: { merchantId, orderId, status: 'pending' } });
+      return {
+        status: 200,
+        body: {
+          success: true,
+          orderId,
+          enriched: true,
+          newRiskScore: existingOrder.riskScore,
+          newDecision: 'block',
+          flags: [{ severity: 'critical', text: binBlacklistCheck.reason || 'BIN is blacklisted' }],
+        },
+      };
     }
   }
 
@@ -116,11 +205,18 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
       const b = String(bin).replace(/\D/g, '').slice(0, 6);
       if (b.length === 6) cardBinNorm = b;
 
+      // [Quota double-count fix] نفس التعليل بالحرف اللي فوق في BIN blacklist path.
+      const shouldRecordBinSeqAttempt = existingOrder.decision !== 'block';
       try {
-        await db.$transaction([
-          db.order.update({ where: { id: existingOrder.id }, data: { decision: 'block', riskLevel: 'high', cardHash: cardHashRecord?.cardHash ?? null, enrichmentSource: body.source || 'stripe' } }),
-          ...recordBlockedAttempt(db, { merchantId, storeId: storeId ?? null, cardBin: cardBinNorm, cardType: null, reason: 'card_testing', ipHash: existingOrder.ipAddress ? hashIp(existingOrder.ipAddress) : null, amountAttempted: existingOrder.amount ?? null, riskScore: null }),
-        ]);
+        const binSeqOps = [
+          db.order.update({ where: { id: existingOrder.id }, data: { decision: 'block', riskLevel: 'high', cardHash: cardHashRecord?.cardHash ?? null, cardBinPrefix, enrichmentSource: body.source || 'stripe' } }),
+        ];
+        if (shouldRecordBinSeqAttempt) {
+          binSeqOps.push(
+            ...recordBlockedAttempt(db, { merchantId, storeId: storeId ?? null, cardBin: cardBinNorm, cardType: null, reason: 'card_testing', ipHash: existingOrder.ipAddress ? hashIp(existingOrder.ipAddress) : null, amountAttempted: existingOrder.amount ?? null, riskScore: null })
+          );
+        }
+        await db.$transaction(binSeqOps);
       } catch (err) {
         logger.error({ module: 'enrichmentProcessor', tenantId: merchantId, error: err.message }, 'Failed BIN-sequence block transaction');
       }
@@ -152,16 +248,71 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
 
   const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const recentOrders = await db.order.findMany({ where: { merchantId, ...storeScope, createdAt: { gte: last7days } }, orderBy: { createdAt: 'desc' }, take: 200 });
-  const formattedOrders = recentOrders.map(o => ({ id: o.orderId, email: o.email, ipAddress: o.ipAddress, deviceFingerprint: o.deviceFingerprint, amount: o.amount, createdAt: o.createdAt, riskLevel: o.riskLevel }));
-  const disputes = await db.disputeOutcome.findMany({ where: { merchantId, resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) } }, include: { order: true }, take: 200 });
+  // [BIN Velocity fix] cardBinPrefix مضافة — هذا الملف بيمرر
+  // externalVelocity = null لـ calculateRiskScore() (راجع الاستدعاء تحت)،
+  // يعني BIN velocity هنا بتعتمد بالكامل على مسار الـ fallback
+  // (allOrders.filter) في riskScoring.js — بدون هذا الحقل هنا، الـ fallback
+  // نفسه هيفضل يرجع صفر دايمًا حتى بعد إصلاح riskScoring.js.
+  const formattedOrders = recentOrders.map(o => ({ id: o.orderId, email: o.email, ipAddress: o.ipAddress, deviceFingerprint: o.deviceFingerprint, amount: o.amount, createdAt: o.createdAt, riskLevel: o.riskLevel, cardBinPrefix: o.cardBinPrefix }));
+
+  // [Bug #12 fix] كانت بدون OR filter خالص — بتجيب أول 200 dispute للتاجر
+  // عمومًا (أي ترتيب Prisma الافتراضي)، مش المرتبطة بالأوردر الحالي. لتاجر
+  // عنده أكتر من 200 dispute في 90 يوم، الـ Tier-1 signals (deviceDisputes/
+  // emailDisputes/ipDisputes في riskScoring.js) كانت بترجع فاضية بصمت حتى
+  // مع وجود نزاع حقيقي مطابق. هنا أضفنا نفس الـ OR filter المستخدم في
+  // /evaluate و /woocommerce-webhook، باستخدام normalizedExistingEmail
+  // (محسوبة فوق ضمن فيكس Bug #7) بدل existingOrder.email الخام.
+  // [Undefined-OR fix] نفس فئة Bug #12 بالحرف بس بسبب مختلف: Prisma
+  // بتتجاهل أي مفتاح قيمته undefined في الـ where — فلو existingOrder.email
+  // فاضي (guest checkout)، normalizedExistingEmail = undefined، وفرع
+  // { order: { normalizedEmail: undefined } } بيتحول عمليًا لشرط فاضي
+  // { order: {} }، وشرط فاضي جوه OR معناه "صح دايمًا" — يرجّع أول 200
+  // dispute للتاجر كله بدل المرتبطة بهذا الجهاز/الإيميل/الـ IP فقط. نفس
+  // الحراسة المستخدمة فعلاً فوق لبناء wlConditions (if (normalizedExistingEmail))
+  // — deviceFingerprint/ipAddress مش محتاجين نفس الحراسة لأن null (مش
+  // undefined) بيترجم لفلتر IS NULL حقيقي في Prisma، مش "صح دايمًا".
+  const disputeOrConditions = [];
+  if (normalizedExistingEmail) disputeOrConditions.push({ order: { normalizedEmail: normalizedExistingEmail } });
+  if (existingOrder.deviceFingerprint) disputeOrConditions.push({ order: { deviceFingerprint: existingOrder.deviceFingerprint } });
+  if (existingOrder.ipAddress) disputeOrConditions.push({ order: { ipAddress: existingOrder.ipAddress } });
+
+  const disputes = disputeOrConditions.length > 0
+    ? await db.disputeOutcome.findMany({
+        where: {
+          merchantId,
+          resolvedAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+          OR: disputeOrConditions,
+        },
+        include: { order: true },
+        take: 200,
+      })
+    : [];
 
   const riskResult = await calculateRiskScore(enrichedOrder, formattedOrders, disputes, [], merchantId, false, null, cardHashRecord, enrichMerchantConfig, limitedScoring);
 
-  const updatedSnapshot = { ...snapshot, ipIntel: riskResult.ipIntel || null, emailIntel: riskResult.emailIntel || null, binIntel: riskResult.binIntel || null, flags: riskResult.flags, positives: riskResult.positives };
+  // [BIN Velocity learning-loop wiring] راجع computedSignals في
+  // riskScoring.js — binVelocityCount10min/1h/24h دلوقتي بترجع من
+  // calculateRiskScore() بغض النظر عن مصدرها (fallback هنا، لأن هذا
+  // الملف بيمرر externalVelocity=null دايمًا). من غير هذا السطر،
+  // extractSignalsFromSnapshot() (feedbackLoop.js) مالهاش أي طريقة
+  // تشوف بيها BIN velocity لأي أوردر وصل الـ BIN بتاعه عبر /enrich —
+  // وهو المسار الأساسي فعليًا لوصول BIN حقيقي (راجع ADR-0).
+  const computed = riskResult.computedSignals || {};
+  const updatedSnapshot = {
+    ...snapshot,
+    ipIntel: riskResult.ipIntel || null,
+    emailIntel: riskResult.emailIntel || null,
+    binIntel: riskResult.binIntel || null,
+    binVelocityCount10min: computed.binVelocityCount10min ?? 0,
+    binVelocityCount1h: computed.binVelocityCount1h ?? 0,
+    binVelocityCount24h: computed.binVelocityCount24h ?? 0,
+    flags: riskResult.flags,
+    positives: riskResult.positives,
+  };
 
   await db.order.update({
     where: { id: existingOrder.id },
-    data: { riskScore: riskResult.score, riskLevel: riskResult.riskLevel, decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'), cardHash: cardHashRecord?.cardHash ?? null, enrichmentSource: enrichmentSourceValue, signalsSnapshot: JSON.stringify(updatedSnapshot) },
+    data: { riskScore: riskResult.score, riskLevel: riskResult.riskLevel, decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'), cardHash: cardHashRecord?.cardHash ?? null, cardBinPrefix, enrichmentSource: enrichmentSourceValue, signalsSnapshot: JSON.stringify(updatedSnapshot) },
   });
 
   await db.riskEvaluation.upsert({
