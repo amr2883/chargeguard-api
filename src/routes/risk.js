@@ -1125,7 +1125,14 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // غير ما نسجل كل أوردر approve عادي (الأغلبية الساحقة من الترافيك)،
     // فحجم الجدول يفضل متحكم فيه ومناسب لمدة الاحتفاظ 60 يوم.
     if (response.decision !== 'approve') {
-      recordFailedAttempt({ ip: ipAddress, deviceFingerprint, merchantId, storeId: storeScope.storeId ?? null, amount: amount || 0 });
+      recordFailedAttempt({
+        ip: ipAddress,
+        deviceFingerprint,
+        merchantId,
+        storeId: storeScope.storeId ?? null,
+        amount: amount || 0,
+        wasBlocked: response.decision === 'block',
+      });
     }
 
     // تسجيل الـ BlockedAttempt/quota — يفضل مربوط بـ block فقط عمدًا (مش
@@ -2884,6 +2891,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
         merchantId,
         storeId: storeScope.storeId ?? null,
         amount: extracted.amount || 0,
+        wasBlocked: webhookFinalDecision === 'block',
       });
     }
 
