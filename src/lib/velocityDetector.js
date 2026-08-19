@@ -13,6 +13,19 @@ const THRESHOLDS = {
   DEVICE: 5,
 };
 
+// Softer threshold for requests flagged for manual review (decision ===
+// 'review') rather than hard-blocked (decision === 'block'). A single
+// review-worthy request is weak evidence on its own (e.g. a borderline
+// risk-floor cap on a clean customer) and must not count 1-for-1
+// alongside a confirmed block. Requires more repetitions from the same
+// IP/device before escalating to a hard velocity block. Starting value
+// (12) is a reasoned default, not a measured constant — revisit once
+// real merchant traffic data is available.
+const REVIEW_THRESHOLDS = {
+  IP:     12,
+  DEVICE: 12,
+};
+
 // ظ¤ظ¤ظ¤ DB-Error Fallback Store ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤
 // Used ONLY when the authoritative CardTestAttempt count query below
 // throws (transient DB blip, Prisma timeout, schema mismatch, etc.).
@@ -77,7 +90,7 @@ const hashValue = (val) => {
  * ╪ز╪│╪ش┘è┘ ┘à╪ص╪د┘ê┘╪ر ┘╪د╪┤┘╪ر ┘┘è CardTestAttempt
  * @param {object} params - { ip, deviceFingerprint, merchantId, amount }
  */
-async function recordFailedAttempt({ ip, deviceFingerprint, merchantId = 'unknown', storeId = null, amount = 0 }) {
+async function recordFailedAttempt({ ip, deviceFingerprint, merchantId = 'unknown', storeId = null, amount = 0, wasBlocked = true }) {
   try {
     await db.cardTestAttempt.create({
       data: {
@@ -86,7 +99,7 @@ async function recordFailedAttempt({ ip, deviceFingerprint, merchantId = 'unknow
         ipHash:     ip               ? hashValue(ip)               : null,
         deviceHash: deviceFingerprint ? hashValue(deviceFingerprint) : null,
         amount,
-        wasBlocked: true,
+        wasBlocked,
       },
     });
   } catch (err) {
@@ -110,29 +123,53 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown', st
 
   try {
     if (ip) {
-      const ipHash  = hashValue(ip);
-      const ipCount = await db.cardTestAttempt.count({
+      const ipHash = hashValue(ip);
+      const ipGroups = await db.cardTestAttempt.groupBy({
+        by: ['wasBlocked'],
         where: { merchantId: merchantId || 'unknown', ...storeScope, ipHash, createdAt: { gte: since } },
+        _count: { _all: true },
       });
-      if (ipCount >= THRESHOLDS.IP) {
-        logger.info({ module: 'velocityDetector', ipCount }, 'velocity_ip_blocked');
+      const ipBlockedCount = ipGroups.find(g => g.wasBlocked === true)?._count._all || 0;
+      const ipReviewCount  = ipGroups.find(g => g.wasBlocked === false)?._count._all || 0;
+
+      if (ipBlockedCount >= THRESHOLDS.IP) {
+        logger.info({ module: 'velocityDetector', ipBlockedCount }, 'velocity_ip_blocked');
         return {
           blocked: true,
           reason:  'velocity_ip_blocked',
         };
       }
+      if (ipReviewCount >= REVIEW_THRESHOLDS.IP) {
+        logger.info({ module: 'velocityDetector', ipReviewCount }, 'velocity_ip_review_accumulated');
+        return {
+          blocked: true,
+          reason:  'velocity_ip_review_accumulated',
+        };
+      }
     }
 
     if (deviceFingerprint) {
-      const deviceHash  = hashValue(deviceFingerprint);
-      const deviceCount = await db.cardTestAttempt.count({
+      const deviceHash = hashValue(deviceFingerprint);
+      const deviceGroups = await db.cardTestAttempt.groupBy({
+        by: ['wasBlocked'],
         where: { merchantId: merchantId || 'unknown', ...storeScope, deviceHash, createdAt: { gte: since } },
+        _count: { _all: true },
       });
-      if (deviceCount >= THRESHOLDS.DEVICE) {
-        logger.info({ module: 'velocityDetector', deviceCount }, 'velocity_device_blocked');
+      const deviceBlockedCount = deviceGroups.find(g => g.wasBlocked === true)?._count._all || 0;
+      const deviceReviewCount  = deviceGroups.find(g => g.wasBlocked === false)?._count._all || 0;
+
+      if (deviceBlockedCount >= THRESHOLDS.DEVICE) {
+        logger.info({ module: 'velocityDetector', deviceBlockedCount }, 'velocity_device_blocked');
         return {
           blocked: true,
           reason:  'velocity_device_blocked',
+        };
+      }
+      if (deviceReviewCount >= REVIEW_THRESHOLDS.DEVICE) {
+        logger.info({ module: 'velocityDetector', deviceReviewCount }, 'velocity_device_review_accumulated');
+        return {
+          blocked: true,
+          reason:  'velocity_device_review_accumulated',
         };
       }
     }
