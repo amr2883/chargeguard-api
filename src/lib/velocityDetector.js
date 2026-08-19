@@ -132,6 +132,11 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown', st
       const ipBlockedCount = ipGroups.find(g => g.wasBlocked === true)?._count._all || 0;
       const ipReviewCount  = ipGroups.find(g => g.wasBlocked === false)?._count._all || 0;
 
+      logger.warn(
+        { module: 'velocityDetector', DEBUG_ipGroups: ipGroups, ipBlockedCount, ipReviewCount, since: since.toISOString(), THRESHOLDS_IP: THRESHOLDS.IP, REVIEW_THRESHOLDS_IP: REVIEW_THRESHOLDS.IP },
+        'DEBUG_velocity_ip_check'
+      );
+
       if (ipBlockedCount >= THRESHOLDS.IP) {
         logger.info({ module: 'velocityDetector', ipBlockedCount }, 'velocity_ip_blocked');
         return {
