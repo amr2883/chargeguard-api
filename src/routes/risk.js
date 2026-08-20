@@ -3764,17 +3764,17 @@ router.get('/DEBUG-RAW-VELOCITY', async (req, res) => {
   if (req.query.secret !== process.env.ADMIN_SECRET) {
     return res.status(403).json({ error: 'forbidden' });
   }
-  const RVD = REQUIRE('../LIB/RAWVELOCITYDETECTOR');
+  const rvd = require('../lib/rawVelocityDetector');
   res.json({
-    MODULELOADED: TRUE,
-    RAW_DEVICE_BLOCK_THRESHOLD: RVD.RAW_DEVICE_BLOCK_THRESHOLD,
-    RAW_IP_FALLBACK_BLOCK_THRESHOLD: RVD.RAW_IP_FALLBACK_BLOCK_THRESHOLD,
-    RAW_VELOCITY_WINDOW_MS: RVD.RAW_VELOCITY_WINDOW_MS,
-    ENVTHRESHOLDOVERRIDE: PROCESS.ENV.RAW_DEVICE_VELOCITY_THRESHOLD || NULL,
-    ENVWINDOWOVERRIDE: PROCESS.ENV.RAW_VELOCITY_WINDOW_MINUTES || NULL,
-    PID: PROCESS.PID,
-    UPTIMESECONDS: MATH.ROUND(PROCESS.UPTIME()),
-    NOWUTC: new DATE().toISOString(),
+    moduleloaded: true,
+    RAW_DEVICE_BLOCK_THRESHOLD: rvd.RAW_DEVICE_BLOCK_THRESHOLD,
+    RAW_IP_FALLBACK_BLOCK_THRESHOLD: rvd.RAW_IP_FALLBACK_BLOCK_THRESHOLD,
+    RAW_VELOCITY_WINDOW_MS: rvd.RAW_VELOCITY_WINDOW_MS,
+    envThresholdOverride: process.env.RAW_DEVICE_VELOCITY_THRESHOLD || null,
+    envWindowOverride: process.env.RAW_VELOCITY_WINDOW_MINUTES || null,
+    pid: process.pid,
+    uptimeSeconds: Math.round(process.uptime()),
+    nowUTC: new Date().toISOString(),
   });
 });
 // ── END TEMP DEBUG ──
