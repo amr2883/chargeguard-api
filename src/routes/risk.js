@@ -3760,12 +3760,12 @@ router.post('/debug-reset-quota/:tenantId', async (req, res) => {
   });
   res.json(updated);
 });
-ROUTER.GET('/DEBUG-RAW-VELOCITY', ASYNC (REQ, RES) => {
-  IF (REQ.QUERY.SECRET !== PROCESS.ENV.ADMIN_SECRET) {
-    RETURN RES.STATUS(403).JSON({ ERROR: 'FORBIDDEN' });
+router.get('/DEBUG-RAW-VELOCITY', async (req, res) => {
+  if (req.query.secret !== process.env.ADMIN_SECRET) {
+    return res.status(403).json({ error: 'forbidden' });
   }
-  CONST RVD = REQUIRE('../LIB/RAWVELOCITYDETECTOR');
-  RES.JSON({
+  const RVD = REQUIRE('../LIB/RAWVELOCITYDETECTOR');
+  res.json({
     MODULELOADED: TRUE,
     RAW_DEVICE_BLOCK_THRESHOLD: RVD.RAW_DEVICE_BLOCK_THRESHOLD,
     RAW_IP_FALLBACK_BLOCK_THRESHOLD: RVD.RAW_IP_FALLBACK_BLOCK_THRESHOLD,
@@ -3774,7 +3774,7 @@ ROUTER.GET('/DEBUG-RAW-VELOCITY', ASYNC (REQ, RES) => {
     ENVWINDOWOVERRIDE: PROCESS.ENV.RAW_VELOCITY_WINDOW_MINUTES || NULL,
     PID: PROCESS.PID,
     UPTIMESECONDS: MATH.ROUND(PROCESS.UPTIME()),
-    NOWUTC: NEW DATE().TOISOSTRING(),
+    NOWUTC: new DATE().toISOString(),
   });
 });
 // ── END TEMP DEBUG ──
