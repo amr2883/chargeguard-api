@@ -995,8 +995,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
+    // [False-positive fix] deviceVelocityCount بيعدّ دلوقتي بس الأوردرات
+    // غير الـ approved (review/block) خلال الساعة، مش كل الأوردرات. عميل
+    // نجح في 3 عمليات شراء حقيقية مش نمط card-testing — النمط الحقيقي هو
+    // تكرار الرفض/الحظر من نفس الجهاز. مهاجم ينجح في كل محاولاته (حالة
+    // نادرة) يفضل متغطي بشكل مستقل عبر rawVelocityDetector.js's
+    // checkRawDeviceVelocity (عتبة 10 محاولات/10 دقايق، غير مشروطة
+    // بالقرار أصلاً) — فمفيش أي تراجع أمني من هذا التعديل.
     const deviceVelocityCount = deviceFingerprint ? await db.order.count({
-      where: { merchantId, ...storeScope, deviceFingerprint, createdAt: { gte: last1h } }
+      where: { merchantId, ...storeScope, deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
 
     const ipVelocityCount = ipAddress ? await db.order.count({
@@ -2690,8 +2697,11 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    // [False-positive fix] راجع نفس التعليق في /evaluate أعلاه — نفس
+    // المنطق بالحرف، لازم يتصلح هنا كمان عشان أوردرات الـ webhook
+    // (Classic Checkout إلخ) تاخد نفس المعاملة.
     const deviceVelocityCount = riskRequest.deviceFingerprint ? await db.order.count({
-      where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h } }
+      where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
     const ipVelocityCount = extracted.ipAddress ? await db.order.count({
       where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h } }
