@@ -122,7 +122,7 @@ function getConfidence(source) {
 // ─── Fetch with Timeout ───────────────────────────────────────────────────
 
 async function fetchIPData(ip, timeoutMs = TIMEOUT_MS_WITHOUT_CACHE) {
-  const apiKey = process.env.IPQS_API_KEY;
+  const apiKey = process.env.IPLOCATE_API_KEY;
   
   // ✅ الوضع الوهمي الآمن للتطوير (لا يعمل إلا إذا تم تفعيله صراحة)
   if (process.env.MOCK_IP_INTEL === 'true') {
@@ -149,8 +149,8 @@ async function fetchIPData(ip, timeoutMs = TIMEOUT_MS_WITHOUT_CACHE) {
   }
 
   // 🚀 منطق الإنتاج (يستخدم API الحقيقي)
-  if (!apiKey || apiKey === 'your_ipqualityscore_api_key_here') {
-    logger.warn({ module: 'ipIntel' }, 'IPQS_API_KEY missing or invalid — IP intelligence degraded');
+  if (!apiKey || apiKey === 'your_iplocate_api_key_here') {
+    logger.warn({ module: 'ipIntel' }, 'IPLOCATE_API_KEY missing or invalid — IP intelligence degraded');
     prometheus.recordIPIntel('api', 'failure');
     return null;
   }
@@ -159,7 +159,7 @@ async function fetchIPData(ip, timeoutMs = TIMEOUT_MS_WITHOUT_CACHE) {
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const res = await fetch(`https://ipqualityscore.com/api/json/ip/${apiKey}/${ip}`, {
+    const res = await fetch(`https://iplocate.io/api/lookup/${ip}?apikey=${apiKey}`, {
       signal: controller.signal,
     });
     clearTimeout(timer);
@@ -169,23 +169,23 @@ async function fetchIPData(ip, timeoutMs = TIMEOUT_MS_WITHOUT_CACHE) {
       return null;
     }
     const data = await res.json();
-    if (!data?.success) {
+    if (!data?.privacy) {
       prometheus.recordIPIntel('api', 'failure');
       return null;
     }
 
     return {
-      countryCode:  data.country_code   ?? null,
-      isp:          data.isp            ?? null,
-      org:          data.organization   ?? null,
-      hosting:      data.proxy === true || data.vpn === true || data.bot_status === true,
-      fraudScore:   data.fraud_score    ?? null,
-      isProxy:      data.proxy          === true,
-      isVpn:        data.vpn            === true,
-      isTor:        data.tor            === true,
-      isBot:        data.bot_status     === true,
-      asn:          data.asn            ?? null,
-      mobile:       data.mobile         === true,
+      countryCode:  data.country_code                    ?? null,
+      isp:          data.company?.name ?? data.asn?.name ?? null,
+      org:          data.asn?.name                        ?? null,
+      hosting:      data.privacy.is_hosting               === true,
+      fraudScore:   null,
+      isProxy:      data.privacy.is_proxy                 === true,
+      isVpn:        data.privacy.is_vpn                   === true,
+      isTor:        data.privacy.is_tor                   === true,
+      isBot:        data.privacy.is_abuser                === true,
+      asn:          data.asn?.asn                         ?? null,
+      mobile:       false,
     };
 
   } catch {
