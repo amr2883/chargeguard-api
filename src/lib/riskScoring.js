@@ -1192,7 +1192,11 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   // يمنع edge case لو الـ reviewThreshold منخفض جداً يخلي score=40 يبقى Review
   if (hasCriticalSignal) {
     score = Math.min(score, 40);
-    logger.warn({ module: 'riskScoring', cappedAt: 40, criticalCount }, 'Risk floor applied (critical flags)');
+    // [TEMP DEBUG] بيطبع أسماء الـ critical flags الفعلية اللي سبّبت
+    // الحظر، مش بس العدد — عشان نحدد مصدر الحظر بدقة بدل التخمين.
+    // احذف السطر ده بعد ما نخلص التشخيص.
+    const criticalFlagTexts = flags.filter(f => f.severity === "critical").map(f => f.text);
+    logger.warn({ module: 'riskScoring', cappedAt: 40, criticalCount, criticalFlagTexts }, 'Risk floor applied (critical flags)');
   } else if (hasHighSignal && highCount >= 2 && score > 55) {
     // لو عنده 2+ high flags — أشد من واحدة بس
     score = 55;
