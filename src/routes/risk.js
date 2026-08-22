@@ -1006,8 +1006,17 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       where: { merchantId, ...storeScope, deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
 
+    // [False-positive fix] نفس فلسفة deviceVelocityCount فوق — بس مع
+    // trade-off واعي: sustained_ip_burst (riskScoring.js) مصمم أصلاً
+    // ليمسك مهاجم نجح يتفادى باقي الطبقات (device/email) طالما استخدم
+    // نفس الـ IP، حتى لو كل محاولاته approved. فلترة decision هنا بتفقد
+    // القدرة دي نظريًا، لكن عمليًا checkVelocity's IP-based check
+    // (CardTestAttempt، عتبة 5 محاولات مرفوضة خلال 10 دقايق بس) بيمسك
+    // أي burst حقيقي من محاولات مرفوضة أسرع وأشد بكتير من هذا الفحص
+    // (10 خلال 24 ساعة) قبل ما يوصله أصلاً — فمفيش فجوة أمنية حقيقية
+    // بتتفتح، وده اللي بيخلي الفلترة هنا آمنة بنفس منطق الـ device.
     const ipVelocityCount = ipAddress ? await db.order.count({
-      where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: last24h } }
+      where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: last24h }, decision: { not: 'approve' } }
     }) : 0;
 
     const emailVelocityCount = email ? await db.order.count({
@@ -2703,8 +2712,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const deviceVelocityCount = riskRequest.deviceFingerprint ? await db.order.count({
       where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
+    // [False-positive fix] راجع نفس التعليق في /evaluate أعلاه.
     const ipVelocityCount = extracted.ipAddress ? await db.order.count({
-      where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h } }
+      where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h }, decision: { not: 'approve' } }
     }) : 0;
     const emailVelocityCount = extracted.email ? await db.order.count({
       where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
