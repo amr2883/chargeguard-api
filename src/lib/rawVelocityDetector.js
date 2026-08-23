@@ -34,7 +34,7 @@ const RAW_VELOCITY_WINDOW_MS =
   (parseInt(process.env.RAW_VELOCITY_WINDOW_MINUTES, 10) || 10) * 60 * 1000;
 
 const RAW_DEVICE_BLOCK_THRESHOLD =
-  parseInt(process.env.RAW_DEVICE_VELOCITY_THRESHOLD, 10) || 10; // 10+ محاولات من نفس الـ device، أي قرار، لكل تاجر، خلال النافذة
+  parseInt(process.env.RAW_DEVICE_VELOCITY_THRESHOLD, 10) || 5; // 5+ محاولات من نفس الـ device، أي قرار، لكل تاجر، خلال النافذة — كان 10: بيسمح بـ 9 عمليات approve حقيقية قبل الحظر (راجع اختبار bin-diverse الحقيقي). حظر أبكر بكتير مع احتفاظ بهامش كافي لعميل حقيقي بيجرب أكتر من بطاقة مرة أو اتنين.
 
 const RAW_IP_FALLBACK_BLOCK_THRESHOLD =
   parseInt(process.env.RAW_IP_VELOCITY_FALLBACK_THRESHOLD, 10) || 25; // عتبة أعلى بكتير — fallback بس لما مفيش fingerprint خالص

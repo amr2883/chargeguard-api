@@ -5,10 +5,14 @@
 // البوت بيجيب بطاقات من نفس الـ dump → نفس الـ BIN prefix (أول 4 أرقام)
 // حتى لو غير كل حاجة تانية، الـ BIN range بيفضح نمط الهجوم
 //
-// 3 طبقات كشف:
+// 4 طبقات كشف:
 // Layer 1: BIN Prefix Velocity  — كتير BINs من نفس الـ prefix في وقت قصير
 // Layer 2: Sequential BIN Scan  — BINs بترتيب تصاعدي/تنازلي (علامة brute-force)
 // Layer 3: Cross-Entity Linking — نفس الـ BIN prefix مع entities مختلفة تماماً
+// Layer 4: Cross-Prefix Diversity — [إضافة جديدة] نفس الـ entity بيختبر
+//          براندات/بنوك مختلفة تمامًا (BIN prefixes مختلفة) بدل تكرار
+//          نفس الـ prefix — يقفل الفجوة اللي Layer 1/2/3 عمياء عنها لما
+//          المهاجم بيلف على أنواع بطاقات متنوعة (Visa/Mastercard/Amex/...)
 
 'use strict';
 
@@ -28,6 +32,14 @@ const THRESHOLDS = {
 
   // Layer 3: نفس الـ BIN prefix مع كمية entities مختلفة (IPs أو devices)
   UNIQUE_ENTITIES_PER_PREFIX: 6,
+
+  // Layer 4 [NEW — bin-diverse attack fix]: كمية BIN prefixes مختلفة
+  // (بنوك/براندات مختلفة تمامًا) من نفس الـ entity في 10 دقائق. عتبة
+  // منخفضة عمدًا (4) — عميل حقيقي عمره ما بيختبر 4 بنوك/براندات مختلفة
+  // في نفس الجلسة، فمفيش خطر false-positive حقيقي، وده بيقفل الفجوة
+  // اللي Layer 1/2/3 عمياء عنها بالتصميم (بيجمّعوا بالـ prefix، مش
+  // بالـ entity، فمهاجم بيلف على براندات مختلفة كان بيعدّي منهم الثلاثة).
+  UNIQUE_PREFIXES_PER_ENTITY: 4,
 };
 
 // --- Store: Redis-backed (multi-instance safe) with in-memory fallback ---
@@ -93,13 +105,32 @@ setInterval(() => {
       memoryStore.delete(key);
       continue;
     }
-    for (const bin of Object.keys(data.bins)) {
-      const fresh = data.bins[bin].filter(t => t > now - WINDOW_MS);
-      if (fresh.length === 0) delete data.bins[bin];
-      else data.bins[bin] = fresh;
-    }
-    if (Object.keys(data.bins).length === 0 && !data.blockedUntil) {
-      memoryStore.delete(key);
+    // Layer 1-3 entries: { bins: {...}, entities: {...}, blockedUntil }
+    // Layer 4 entries:   { prefixes: {...}, blockedUntil } — added by
+    // recordEntityPrefixAttempt's fallback path, a different shape under
+    // the same memoryStore Map (key `${tenantId}:entity:${entity}`).
+    // Without this branch, Object.keys(data.bins) throws on a Layer 4
+    // entry (data.bins is undefined) — a synchronous exception inside a
+    // setInterval callback is uncaught and crashes the whole Node
+    // process, not just this cleanup tick.
+    if (data.bins) {
+      for (const bin of Object.keys(data.bins)) {
+        const fresh = data.bins[bin].filter(t => t > now - WINDOW_MS);
+        if (fresh.length === 0) delete data.bins[bin];
+        else data.bins[bin] = fresh;
+      }
+      if (Object.keys(data.bins).length === 0 && !data.blockedUntil) {
+        memoryStore.delete(key);
+      }
+    } else if (data.prefixes) {
+      for (const prefix of Object.keys(data.prefixes)) {
+        const fresh = data.prefixes[prefix].filter(t => t > now - WINDOW_MS);
+        if (fresh.length === 0) delete data.prefixes[prefix];
+        else data.prefixes[prefix] = fresh;
+      }
+      if (Object.keys(data.prefixes).length === 0 && !data.blockedUntil) {
+        memoryStore.delete(key);
+      }
     }
   }
 }, 5 * 60 * 1000).unref();
@@ -300,6 +331,87 @@ local result = {
 return cjson.encode(result)
 `;
 
+// --- Lua script: atomic record-and-evaluate for Layer 4 (cross-prefix
+// diversity) — نفس فلسفة RECORD_BIN_ATTEMPT_SCRIPT فوق بالحرف، لكن
+// المفتاح هنا entity-scoped مش prefix-scoped: بيتتبّع كام BIN prefix
+// مختلف (بنك/براند) شافهم نفس الـ entity، مش كام BIN شافهم نفس الـ prefix.
+//
+// KEYS[1] = entityStoreKey
+// ARGV[1] = prefix
+// ARGV[2] = now (ms)
+// ARGV[3] = WINDOW_MS
+// ARGV[4] = BLOCK_DURATION_MS
+// ARGV[5] = THRESHOLDS.UNIQUE_PREFIXES_PER_ENTITY
+// ARGV[6] = TTL in seconds (REDIS_TTL_SECONDS)
+const RECORD_ENTITY_PREFIX_SCRIPT = `
+local storeKey = KEYS[1]
+local prefix = ARGV[1]
+local now = tonumber(ARGV[2])
+local windowMs = tonumber(ARGV[3])
+local blockDurationMs = tonumber(ARGV[4])
+local uniquePrefixesThreshold = tonumber(ARGV[5])
+local ttlSeconds = tonumber(ARGV[6])
+
+local raw = redis.call('GET', storeKey)
+local data
+if raw then
+  data = cjson.decode(raw)
+else
+  data = { prefixes = {}, blockedUntil = cjson.null }
+end
+if data.prefixes == nil then data.prefixes = {} end
+
+local windowStart = now - windowMs
+
+if data.prefixes[prefix] == nil then data.prefixes[prefix] = {} end
+table.insert(data.prefixes[prefix], now)
+
+local prunedPrefixes = {}
+for p, timestamps in pairs(data.prefixes) do
+  local fresh = {}
+  for _, t in ipairs(timestamps) do
+    if t > windowStart then
+      table.insert(fresh, t)
+    end
+  end
+  if #fresh > 0 then
+    prunedPrefixes[p] = fresh
+  end
+end
+data.prefixes = prunedPrefixes
+
+local activePrefixes = {}
+for p, _ in pairs(data.prefixes) do
+  table.insert(activePrefixes, p)
+end
+
+local triggered = false
+local reason = cjson.null
+local riskAddition = 0
+
+if #activePrefixes >= uniquePrefixesThreshold then
+  triggered = true
+  reason = 'Entity tested ' .. #activePrefixes .. ' different card BIN prefixes (banks/brands) in 10 minutes — cross-brand card testing pattern'
+  riskAddition = 45
+end
+
+if triggered then
+  data.blockedUntil = now + blockDurationMs
+end
+
+redis.call('SET', storeKey, cjson.encode(data), 'EX', ttlSeconds)
+
+local result = {
+  triggered = triggered,
+  reason = reason,
+  riskAddition = riskAddition,
+  activePrefixesCount = #activePrefixes,
+  blockedUntil = data.blockedUntil or cjson.null,
+}
+
+return cjson.encode(result)
+`;
+
 // --- Helper: استخراج الـ prefix ---
 function extractPrefix(bin) {
   if (!bin || typeof bin !== 'string') return null;
@@ -408,6 +520,82 @@ async function recordBINAttempt({ tenantId, bin, entity }) {
   await storeSet(storeKey, data);
   return null; // signals the caller to fall back to its own storeGet+checkPrefix
 }
+
+// --- تسجيل محاولة جديدة لـ Layer 4 (تنوّع الـ prefix لنفس الـ entity) ---
+// عكس recordBINAttempt فوق (اللي بيرجع null في المسار غير-الذري ويسيب
+// الـ caller يعمل storeGet+checkPrefix بنفسه)، الدالة دي بترجع نتيجة
+// جاهزة (triggered/reason/riskAddition) في المسارين (Redis أو fallback)
+// دايمًا — عشان checkBINSequence يستهلكها مباشرة من غير خطوة قراءة تانية.
+async function recordEntityPrefixAttempt({ tenantId, entity, prefix }) {
+  if (!entity || !prefix) return { triggered: false, reason: null, riskAddition: 0 };
+
+  const entityStoreKey = `${tenantId}:entity:${entity}`;
+  const now = Date.now();
+
+  if (usingRedis && redisClient && redisClient.status === 'ready') {
+    try {
+      const raw = await redisClient.eval(
+        RECORD_ENTITY_PREFIX_SCRIPT,
+        1,
+        entityStoreKey,
+        prefix,
+        now,
+        WINDOW_MS,
+        BLOCK_DURATION_MS,
+        THRESHOLDS.UNIQUE_PREFIXES_PER_ENTITY,
+        REDIS_TTL_SECONDS
+      );
+      return JSON.parse(raw);
+    } catch (err) {
+      logger.error(
+        { module: 'binSequenceDetector', err: err.message, entityStoreKey },
+        'Redis EVAL failed for recordEntityPrefixAttempt — falling back to non-atomic read-modify-write for this call'
+      );
+      // fall through to the non-atomic path below
+    }
+  }
+
+  let data = await storeGet(entityStoreKey);
+  if (!data) {
+    data = { prefixes: {}, blockedUntil: null };
+  }
+  if (!data.prefixes) data.prefixes = {};
+
+  const existingTimestamps = data.prefixes[prefix] || [];
+  existingTimestamps.push(now);
+  data.prefixes[prefix] = existingTimestamps;
+
+  const result = checkEntityPrefixes(data, now);
+  if (result.triggered) {
+    data.blockedUntil = now + BLOCK_DURATION_MS;
+  }
+
+  await storeSet(entityStoreKey, data);
+  return result;
+}
+
+// --- فحص Layer 4 (تنوّع الـ prefix) لـ entity معين — نفس نمط checkPrefix
+// تحت بالحرف، لكن بيعدّ prefixes مختلفة مش BINs مختلفة ---
+function checkEntityPrefixes(data, now = Date.now()) {
+  const windowStart = now - WINDOW_MS;
+  const activePrefixes = [];
+  for (const [prefix, timestamps] of Object.entries(data.prefixes || {})) {
+    if (timestamps.some(t => t > windowStart)) {
+      activePrefixes.push(prefix);
+    }
+  }
+
+  if (activePrefixes.length >= THRESHOLDS.UNIQUE_PREFIXES_PER_ENTITY) {
+    return {
+      triggered: true,
+      reason: `Entity tested ${activePrefixes.length} different card BIN prefixes (banks/brands) in 10 minutes — cross-brand card testing pattern`,
+      riskAddition: 45,
+    };
+  }
+
+  return { triggered: false, reason: null, riskAddition: 0 };
+}
+
 // --- فحص prefix معين ---
 // L4 fix: data.bins / data.entities are now plain objects (Redis-
 // serializable) instead of Map — Object.entries()/Object.values() used
@@ -488,8 +676,42 @@ async function checkBINSequence({ tenantId, bin, ipAddress, deviceFingerprint })
     };
   }
 
-  // entity = IP أو device (أيهما متاح)
+  // entity = IP أو device (أيهما متاح) — نفس التعريف الأصلي، لسه مستخدم
+  // في تسجيل BIN attempts لـ Layer 1/2/3 (زي ما كان بالظبط قبل الفيكس).
   const entity = ipAddress || deviceFingerprint || 'unknown';
+
+  // ─── Layer 4 [NEW]: Cross-Prefix Diversity ─────────────────────────────
+  // diversityEntity منفصلة عمدًا عن entity فوق: بتفضّل deviceFingerprint
+  // على IP (عكس entity العادية اللي بتفضّل IP). السبب: الطبقة دي عتبتها
+  // ضيقة جدًا (4 بنوك مختلفة بس) عشان تمسك الهجوم بسرعة — استخدام IP
+  // كمفتاح أساسي هنا كان ممكن يعمل false positive على شبكة مكتب/شبكة
+  // موبايل مشتركة (عملاء حقيقيين مختلفين وراء نفس الـ IP، كل واحد ببنك
+  // مختلف). device fingerprint أدق بكتير كمعرّف "نفس الجلسة/المتصفح"،
+  // فهو الأنسب لطبقة بالحساسية دي. بيرجع لـ IP بس لو مفيش fingerprint
+  // خالص (نفس fallback المستخدم في كل مكان تاني في المشروع).
+  const diversityEntity = deviceFingerprint || ipAddress || 'unknown';
+  const entityStoreKey = `${tenantId}:entity:${diversityEntity}`;
+  const entityData = await storeGet(entityStoreKey);
+  if (entityData?.blockedUntil && entityData.blockedUntil > now) {
+    return {
+      blocked: true,
+      riskAddition: 50,
+      reason: `Entity temporarily blocked — cross-brand card testing pattern (active attack wave)`,
+      layer: 0,
+    };
+  }
+
+  const entityResult = await recordEntityPrefixAttempt({ tenantId, entity: diversityEntity, prefix });
+  if (entityResult && entityResult.triggered) {
+    return {
+      blocked: true,
+      riskAddition: entityResult.riskAddition || 0,
+      reason: entityResult.reason,
+      layer: 4,
+    };
+  }
+  // ─── End Layer 4 ────────────────────────────────────────────────────────
+
   const atomicResult = await recordBINAttempt({ tenantId, bin, entity });
 
   // M2 fix: on the Redis/Lua path, atomicResult already reflects the exact
@@ -582,10 +804,16 @@ async function getBINStats(tenantId) {
 
   for (const [key, data] of memoryStore.entries()) {
     if (!key.startsWith(tenantKeyPrefix)) continue;
+    // Layer 4 entries (`${tenantId}:entity:${entity}`) also match this
+    // tenant-prefix filter but have a different shape ({ prefixes },
+    // no `bins`) — tallyEntry() assumes the Layer 1-3 shape and throws
+    // on them. getBINStats() is specifically BIN-prefix stats, so these
+    // are simply out of scope here, not an error case.
+    if (key.includes(':entity:')) continue;
     tallyEntry(data);
   }
 
   return { activePrefixes, blockedPrefixes, totalActiveBINs };
 }
 
-module.exports = { checkBINSequence, recordBINAttempt, getBINStats, THRESHOLDS };
+module.exports = { checkBINSequence, recordBINAttempt, recordEntityPrefixAttempt, getBINStats, THRESHOLDS };
