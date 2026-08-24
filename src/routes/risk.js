@@ -22,7 +22,7 @@ const express = require('express');
 const router = express.Router();
 const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
-const { checkBINSequence } = require('../lib/binSequenceDetector');
+const { checkBINSequence, checkCardFingerprintVelocity } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
 const emergencyPause = require('../lib/emergencyPause');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
@@ -340,7 +340,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // ── End Subscription & Quota Status ──────────────────────────────────
 
     // ������� ��������
-    const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken } = req.body;
+    const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken, cardFingerprint } = req.body;
     // merchantId is derived from the authenticated tenant (CWE-639 / OWASP API1:2023 fix).
     // It is never read from the request body or x-merchant-id header.
     const merchantId = req.tenant.id;
@@ -942,6 +942,69 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
     // End 1d. Raw (Unconditional) Device Velocity
+
+    // 1e. Pre-Authorization Card Fingerprint Velocity — يقفل الفجوة اللي
+    // كل الطبقات فوق عمياء عنها بالتصميم: بوت بيثبّت الـ device
+    // fingerprint (فبيعدّي من rawVelocityDetector لحد المحاولة التانية)
+    // ويستخدم كارت حقيقي مختلف تمامًا في كل محاولة — bin أصلًا مبيوصلش
+    // هنا قبل الدفع (ADR-0)، فـ BIN Sequence Detection (1b) عمياء
+    // بالكامل عن النمط ده. cardFingerprint يوصل بس لما الـ WooCommerce
+    // plugin ينده Stripe's get_payment_method() — وده بيحصل بس على
+    // المحاولة التانية فأكتر محليًا (عداد PHP transient جوه
+    // class-dynamic-firewall.php)، فمفيش أي تكلفة أداء إضافية على أول
+    // محاولة شرعية لأي عميل. القرار "هل ننده هذه الطبقة؟" اتاخد بالفعل
+    // في الـ PHP؛ الـ backend هنا بيستهلك النتيجة بس، مايكررش المنطق.
+    // راجع lib/binSequenceDetector.js's checkCardFingerprintVelocity
+    // (Layer 5) للتفاصيل الكاملة (Redis-atomic، tenant-scoped، نفس نمط
+    // Layer 4 بالحرف).
+    if (cardFingerprint) {
+      const cardFpVelocity = await checkCardFingerprintVelocity({
+        tenantId: merchantId,
+        cardFingerprint,
+        ipAddress,
+        deviceFingerprint,
+      });
+
+      if (cardFpVelocity.blocked) {
+        // مفيش bin وصل في هذا المسار بالتعريف (ADR-0) — cardBin يفضل
+        // null، نفس معاملة raw_device_velocity/device_rotation فوق.
+        const cardFpIpHash = ipAddress ? hashIp(ipAddress) : null;
+        let cardFpAmount = null;
+        if (amount != null) {
+          const amt = parseFloat(amount);
+          if (!isNaN(amt) && amt >= 0 && amt < 1_000_000) cardFpAmount = amt;
+        }
+
+        try {
+          const cardFpIncrementQuota = shouldIncrementQuota(merchantId, 'card_fingerprint_velocity', deviceFingerprint || ipAddress);
+
+          await db.$transaction(recordBlockedAttempt(db, {
+            merchantId,
+            storeId:         req.storeId ?? null,
+            cardBin:         null,
+            cardType:        null,
+            reason:          'card_fingerprint_velocity',
+            ipHash:          cardFpIpHash,
+            amountAttempted: cardFpAmount,
+            riskScore:       null,
+            incrementQuota:  cardFpIncrementQuota,
+          }));
+        } catch (counterErr) {
+          logger.error(
+            { module: 'risk', endpoint: 'evaluate', path: 'card_fingerprint_velocity', tenantId: merchantId, error: counterErr.message },
+            'Failed to record BlockedAttempt / increment quota counter (card fingerprint velocity path)'
+          );
+        }
+
+        return res.status(403).json({
+          error: 'Request blocked due to suspicious card testing pattern',
+          reason: 'card_fingerprint_velocity_blocked',
+          decision: 'block',
+          flags: [{ severity: 'critical', text: 'card_fingerprint_velocity_blocked' }]
+        });
+      }
+    }
+    // End 1e. Pre-Authorization Card Fingerprint Velocity
 
     // 1. ���� ���� order
     const order = {
@@ -3596,7 +3659,7 @@ const blockedAttemptRateLimit = (req, res, next) => {
   next();
 };
 
-const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern', 'email', 'device_rotation_global']);const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
+const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'pattern', 'email', 'device_rotation_global', 'card_fingerprint_velocity']);const VALID_CARD_TYPES = new Set(['visa', 'mastercard', 'amex', 'discover', 'unknown']);
 
 // L3 fix: blockedAttemptRateLimit now runs after apiKeyAuth rather than
 // before it. Only a request that has already presented a real, valid

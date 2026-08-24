@@ -40,6 +40,18 @@ const THRESHOLDS = {
   // اللي Layer 1/2/3 عمياء عنها بالتصميم (بيجمّعوا بالـ prefix، مش
   // بالـ entity، فمهاجم بيلف على براندات مختلفة كان بيعدّي منهم الثلاثة).
   UNIQUE_PREFIXES_PER_ENTITY: 4,
+
+  // LAYER 5 [NEW — PRE-AUTHORIZATION CARD-FINGERPRINT FIX]: كمية
+  // CARD.FINGERPRINT مختلفة (بطاقات حقيقية مختلفة، مش BIN PREFIX) لنفس
+  // الـ ENTITY خلال 10 دقائق. عتبة أقل من LAYER 4 عمدًا (3 بدل 4) —
+  // هذه إشارة أدق وأقوى: بتيجي من نفس DEVICE FINGERPRINT بالتحديد (مش
+  // IP وحده)، وبتعتمد على FINGERPRINT حقيقي من STRIPE نفسها، مش مجرد
+  // نطاق بنكي. عميل حقيقي عمره ما بيستخدم 3 كروت فعلية مختلفة تمامًا
+  // في نفس الجلسة خلال دقايق معدودة. مُستدعاة فقط لما الـ WOOCOMMERCE
+  // PLUGIN يبعت CARDFINGERPRINT — وده بيحصل بس لما عداد المحاولات
+  // المحلي (جوه CLASS-DYNAMIC-FIREWALL.PHP) يوصل لمحاولة تانية فأكتر،
+  // فمفيش أي تكلفة أداء إضافية على أول محاولة شرعية لأي عميل.
+  UNIQUE_FINGERPRINTS_PER_ENTITY: 3,
 };
 
 // --- Store: Redis-backed (multi-instance safe) with in-memory fallback ---
@@ -129,6 +141,21 @@ setInterval(() => {
         else data.prefixes[prefix] = fresh;
       }
       if (Object.keys(data.prefixes).length === 0 && !data.blockedUntil) {
+        memoryStore.delete(key);
+      }
+    } else if (data.fingerprints) {
+      // Layer 5 entries: { fingerprints: {...}, blockedUntil } — added by
+      // recordCardFingerprintAttempt's fallback path, key `${tenantId}:cardfp:${entity}`.
+      // Same rationale as the `data.prefixes` branch above: without this,
+      // a Layer 5 entry falls through neither branch silently (harmless)
+      // but never gets pruned — a slow, unbounded memory leak under
+      // sustained traffic when Redis is unavailable.
+      for (const fp of Object.keys(data.fingerprints)) {
+        const fresh = data.fingerprints[fp].filter(t => t > now - WINDOW_MS);
+        if (fresh.length === 0) delete data.fingerprints[fp];
+        else data.fingerprints[fp] = fresh;
+      }
+      if (Object.keys(data.fingerprints).length === 0 && !data.blockedUntil) {
         memoryStore.delete(key);
       }
     }
@@ -412,6 +439,88 @@ local result = {
 return cjson.encode(result)
 `;
 
+// --- Lua script: atomic record-and-evaluate for Layer 5 (card-fingerprint
+// velocity) — نفس فلسفة RECORD_ENTITY_PREFIX_SCRIPT فوق بالحرف، لكن
+// المفتاح هنا namespace منفصل تمامًا (`:cardfp:` مش `:entity:`) عشان
+// نتجنب أي تصادم مع بيانات Layer 4 (اللي بتستخدم نفس entity كمفتاح لكن
+// بشكل بيانات مختلف تمامًا — {prefixes} مقابل {fingerprints} هنا).
+//
+// KEYS[1] = cardFpStoreKey
+// ARGV[1] = cardFingerprint
+// ARGV[2] = now (ms)
+// ARGV[3] = WINDOW_MS
+// ARGV[4] = BLOCK_DURATION_MS
+// ARGV[5] = THRESHOLDS.UNIQUE_FINGERPRINTS_PER_ENTITY
+// ARGV[6] = TTL in seconds (REDIS_TTL_SECONDS)
+const RECORD_CARD_FINGERPRINT_SCRIPT = `
+local storeKey = KEYS[1]
+local fingerprint = ARGV[1]
+local now = tonumber(ARGV[2])
+local windowMs = tonumber(ARGV[3])
+local blockDurationMs = tonumber(ARGV[4])
+local uniqueFingerprintsThreshold = tonumber(ARGV[5])
+local ttlSeconds = tonumber(ARGV[6])
+
+local raw = redis.call('GET', storeKey)
+local data
+if raw then
+  data = cjson.decode(raw)
+else
+  data = { fingerprints = {}, blockedUntil = cjson.null }
+end
+if data.fingerprints == nil then data.fingerprints = {} end
+
+local windowStart = now - windowMs
+
+if data.fingerprints[fingerprint] == nil then data.fingerprints[fingerprint] = {} end
+table.insert(data.fingerprints[fingerprint], now)
+
+local prunedFingerprints = {}
+for fp, timestamps in pairs(data.fingerprints) do
+  local fresh = {}
+  for _, t in ipairs(timestamps) do
+    if t > windowStart then
+      table.insert(fresh, t)
+    end
+  end
+  if #fresh > 0 then
+    prunedFingerprints[fp] = fresh
+  end
+end
+data.fingerprints = prunedFingerprints
+
+local activeFingerprints = {}
+for fp, _ in pairs(data.fingerprints) do
+  table.insert(activeFingerprints, fp)
+end
+
+local triggered = false
+local reason = cjson.null
+local riskAddition = 0
+
+if #activeFingerprints >= uniqueFingerprintsThreshold then
+  triggered = true
+  reason = 'Entity used ' .. #activeFingerprints .. ' different card fingerprints in 10 minutes — pre-authorization card testing pattern'
+  riskAddition = 55
+end
+
+if triggered then
+  data.blockedUntil = now + blockDurationMs
+end
+
+redis.call('SET', storeKey, cjson.encode(data), 'EX', ttlSeconds)
+
+local result = {
+  triggered = triggered,
+  reason = reason,
+  riskAddition = riskAddition,
+  activeFingerprintsCount = #activeFingerprints,
+  blockedUntil = data.blockedUntil or cjson.null,
+}
+
+return cjson.encode(result)
+`;
+
 // --- Helper: استخراج الـ prefix ---
 function extractPrefix(bin) {
   if (!bin || typeof bin !== 'string') return null;
@@ -572,6 +681,81 @@ async function recordEntityPrefixAttempt({ tenantId, entity, prefix }) {
 
   await storeSet(entityStoreKey, data);
   return result;
+}
+
+// --- تسجيل محاولة جديدة لـ Layer 5 (تنوّع card.fingerprint لنفس الـ
+// entity) — نفس نمط recordEntityPrefixAttempt فوق بالحرف، namespace
+// منفصل (`:cardfp:`) لتجنب أي تصادم مع مفاتيح Layer 4. مُستدعاة فقط من
+// checkCardFingerprintVelocity() تحت، وفقط لما cardFingerprint وصل من
+// الـ plugin أصلًا (يعني الجهاز على محاولته التانية+ محليًا).
+async function recordCardFingerprintAttempt({ tenantId, entity, cardFingerprint }) {
+  if (!entity || !cardFingerprint) return { triggered: false, reason: null, riskAddition: 0 };
+
+  const cardFpStoreKey = `${tenantId}:cardfp:${entity}`;
+  const now = Date.now();
+
+  if (usingRedis && redisClient && redisClient.status === 'ready') {
+    try {
+      const raw = await redisClient.eval(
+        RECORD_CARD_FINGERPRINT_SCRIPT,
+        1,
+        cardFpStoreKey,
+        cardFingerprint,
+        now,
+        WINDOW_MS,
+        BLOCK_DURATION_MS,
+        THRESHOLDS.UNIQUE_FINGERPRINTS_PER_ENTITY,
+        REDIS_TTL_SECONDS
+      );
+      return JSON.parse(raw);
+    } catch (err) {
+      logger.error(
+        { module: 'binSequenceDetector', err: err.message, cardFpStoreKey },
+        'Redis EVAL failed for recordCardFingerprintAttempt — falling back to non-atomic read-modify-write for this call'
+      );
+      // fall through to the non-atomic path below
+    }
+  }
+
+  let data = await storeGet(cardFpStoreKey);
+  if (!data) {
+    data = { fingerprints: {}, blockedUntil: null };
+  }
+  if (!data.fingerprints) data.fingerprints = {};
+
+  const existingTimestamps = data.fingerprints[cardFingerprint] || [];
+  existingTimestamps.push(now);
+  data.fingerprints[cardFingerprint] = existingTimestamps;
+
+  const result = checkCardFingerprints(data, now);
+  if (result.triggered) {
+    data.blockedUntil = now + BLOCK_DURATION_MS;
+  }
+
+  await storeSet(cardFpStoreKey, data);
+  return result;
+}
+
+// --- فحص Layer 5 (تنوّع card.fingerprint) لـ entity معين — نفس نمط
+// checkEntityPrefixes تحت بالحرف، لكن بيعدّ fingerprints مختلفة مش prefixes ---
+function checkCardFingerprints(data, now = Date.now()) {
+  const windowStart = now - WINDOW_MS;
+  const activeFingerprints = [];
+  for (const [fp, timestamps] of Object.entries(data.fingerprints || {})) {
+    if (timestamps.some(t => t > windowStart)) {
+      activeFingerprints.push(fp);
+    }
+  }
+
+  if (activeFingerprints.length >= THRESHOLDS.UNIQUE_FINGERPRINTS_PER_ENTITY) {
+    return {
+      triggered: true,
+      reason: `Entity used ${activeFingerprints.length} different card fingerprints in 10 minutes — pre-authorization card testing pattern`,
+      riskAddition: 55,
+    };
+  }
+
+  return { triggered: false, reason: null, riskAddition: 0 };
 }
 
 // --- فحص Layer 4 (تنوّع الـ prefix) لـ entity معين — نفس نمط checkPrefix
@@ -743,6 +927,40 @@ async function checkBINSequence({ tenantId, bin, ipAddress, deviceFingerprint })
   };
 }
 
+// --- الدالة الرئيسية لـ Layer 5: يستخدمها /evaluate مباشرة (قسم 1e) ---
+// بترجع { blocked, riskAddition, reason, layer }. مستقلة تمامًا عن bin —
+// بعكس checkBINSequence، دي بتتنادى بس لما cardFingerprint يوصل من الـ
+// plugin (بعد نداء Stripe get_payment_method() الشرطي)، بغض النظر عن
+// وجود bin من عدمه (وADR-0 بيقول bin عادةً مش بيوصل لـ /evaluate أصلًا).
+async function checkCardFingerprintVelocity({ tenantId, cardFingerprint, ipAddress, deviceFingerprint }) {
+  if (!cardFingerprint) return { blocked: false, riskAddition: 0, reason: null };
+
+  // نفس منطق diversityEntity في checkBINSequence's Layer 4 بالحرف —
+  // device fingerprint أولوية (أدق كمعرّف "نفس الجهاز")، IP fallback.
+  const entity = deviceFingerprint || ipAddress || 'unknown';
+  const cardFpStoreKey = `${tenantId}:cardfp:${entity}`;
+  const now = Date.now();
+
+  const existingData = await storeGet(cardFpStoreKey);
+  if (existingData?.blockedUntil && existingData.blockedUntil > now) {
+    return {
+      blocked: true,
+      riskAddition: 55,
+      reason: 'Entity temporarily blocked — pre-authorization card testing pattern (active attack wave)',
+      layer: 0,
+    };
+  }
+
+  const result = await recordCardFingerprintAttempt({ tenantId, entity, cardFingerprint });
+
+  return {
+    blocked: result.triggered,
+    riskAddition: result.riskAddition || 0,
+    reason: result.reason,
+    layer: result.triggered ? 5 : null,
+  };
+}
+
 // --- إحصائيات للـ dashboard ---
 // L4 fix: now async. When Redis is active, uses SCAN (non-blocking,
 // cursor-based iteration) rather than KEYS, since KEYS blocks the whole
@@ -810,10 +1028,14 @@ async function getBINStats(tenantId) {
     // on them. getBINStats() is specifically BIN-prefix stats, so these
     // are simply out of scope here, not an error case.
     if (key.includes(':entity:')) continue;
+    // Layer 5 entries (`${tenantId}:cardfp:${entity}`) — same rationale
+    // as the `:entity:` skip above: different shape ({ fingerprints },
+    // no `bins`), out of scope for BIN-prefix stats specifically.
+    if (key.includes(':cardfp:')) continue;
     tallyEntry(data);
   }
 
   return { activePrefixes, blockedPrefixes, totalActiveBINs };
 }
 
-module.exports = { checkBINSequence, recordBINAttempt, recordEntityPrefixAttempt, getBINStats, THRESHOLDS };
+module.exports = { checkBINSequence, checkCardFingerprintVelocity, recordBINAttempt, recordEntityPrefixAttempt, recordCardFingerprintAttempt, getBINStats, THRESHOLDS };
