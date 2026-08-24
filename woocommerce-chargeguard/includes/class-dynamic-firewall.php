@@ -1050,7 +1050,7 @@ class ChargeGuard_Dynamic_Firewall {
         $key = 'cg_devattempt_' . md5($device_fp);
         $count = (int) get_transient($key);
         $count++;
-        set_transient($key, $count, self::card_fp_attempt_window_seconds);
+        set_transient($key, $count, self::CARD_FP_ATTEMPT_WINDOW_SECONDS);
         return $count;
     }
 
@@ -1061,7 +1061,7 @@ class ChargeGuard_Dynamic_Firewall {
      * @return bool
      */
     private function is_card_fp_circuit_open() {
-        return (bool) get_transient(self::card_fp_circuit_open_transient);
+        return (bool) get_transient(self::CARD_FP_CIRCUIT_OPEN_TRANSIENT);
     }
 
     /**
@@ -1074,13 +1074,13 @@ class ChargeGuard_Dynamic_Firewall {
      * circuit.
      */
     private function record_card_fp_failure() {
-        $failures = (int) get_transient(self::card_fp_circuit_failure_transient);
+        $failures = (int) get_transient(self::CARD_FP_CIRCUIT_FAILURE_TRANSIENT);
         $failures++;
-        set_transient(self::card_fp_circuit_failure_transient, $failures, self::card_fp_circuit_open_seconds * 2);
+        set_transient(self::CARD_FP_CIRCUIT_FAILURE_TRANSIENT, $failures, self::CARD_FP_CIRCUIT_OPEN_SECONDS * 2);
 
-        if ($failures >= self::card_fp_circuit_failure_threshold) {
-            set_transient(self::card_fp_circuit_open_transient, time(), self::card_fp_circuit_open_seconds);
-            error_log('chargeguard: card-fingerprint circuit breaker opened after ' . $failures . ' consecutive stripe get_payment_method() failures — skipping this lookup for ' . self::card_fp_circuit_open_seconds . 's.');
+        if ($failures >= self::CARD_FP_CIRCUIT_FAILURE_THRESHOLD) {
+            set_transient(self::CARD_FP_CIRCUIT_OPEN_TRANSIENT, time(), self::CARD_FP_CIRCUIT_OPEN_SECONDS);
+            error_log('chargeguard: card-fingerprint circuit breaker opened after ' . $failures . ' consecutive stripe get_payment_method() failures — skipping this lookup for ' . self::CARD_FP_CIRCUIT_OPEN_SECONDS . 's.');
         }
     }
 
@@ -1089,9 +1089,9 @@ class ChargeGuard_Dynamic_Firewall {
      * failure counter and closes the breaker if it was open.
      */
     private function record_card_fp_success() {
-        delete_transient(self::card_fp_circuit_failure_transient);
-        if (get_transient(self::card_fp_circuit_open_transient)) {
-            delete_transient(self::card_fp_circuit_open_transient);
+        delete_transient(self::CARD_FP_CIRCUIT_FAILURE_TRANSIENT);
+        if (get_transient(self::CARD_FP_CIRCUIT_OPEN_TRANSIENT)) {
+            delete_transient(self::CARD_FP_CIRCUIT_OPEN_TRANSIENT);
             error_log('chargeguard: card-fingerprint circuit breaker closed — stripe reachable again.');
         }
     }
@@ -1135,14 +1135,20 @@ class ChargeGuard_Dynamic_Firewall {
         }
 
         $attempt_count = $this->increment_local_device_attempt_count($device_fp);
-        if ($attempt_count < self::card_fp_attempt_threshold) {
+        if ($attempt_count < self::CARD_FP_ATTEMPT_THRESHOLD) {
             return null; // first attempt — not worth the stripe round trip.
         }
 
-        $extensions = $request->get_param('extensions');
-        $pm_id = isset($extensions['chargeguard']['payment_method_id'])
-            ? sanitize_text_field($extensions['chargeguard']['payment_method_id'])
-            : null;
+        $payment_data = $request->get_param('payment_data');
+        $pm_id = null;
+        if (is_array($payment_data)) {
+            foreach ($payment_data as $item) {
+                if (isset($item['key'], $item['value']) && $item['key'] === 'wc-stripe-payment-method') {
+                    $pm_id = sanitize_text_field($item['value']);
+                    break;
+                }
+            }
+        }
 
         if (empty($pm_id) || strpos($pm_id, 'pm_') !== 0) {
             return null; // not present on this request — see limitation note above.
@@ -1186,17 +1192,13 @@ class ChargeGuard_Dynamic_Firewall {
         }
 
         return [
-            'cardfingerprint' => $pm->card->fingerprint,
-            'cardwallettype'  => isset($pm->card->wallet->type) ? (string) $pm->card->wallet->type : null,
+            'cardFingerprint' => $pm->card->fingerprint,
+            'cardWalletType'  => isset($pm->card->wallet->type) ? (string) $pm->card->wallet->type : null,
         ];
     }
 
     public function intercept_checkout_block($order, $request) {
         if (defined('chargeguard_debug') && chargeguard_debug) {
-            error_log('cg_diag payment_method: ' . print_r($request->get_param('payment_method'), true));
-            error_log('cg_diag payment_data: ' . print_r($request->get_param('payment_data'), true));
-            error_log('cg_diag extensions: ' . print_r($request->get_param('extensions'), true));
-            error_log('cg_diag all_keys: ' . implode(', ', array_keys($request->get_params())));
         }
         // Untrusted, client-forgeable value — see the trust-boundary
         // warning at the top of this file. The local blacklist check
@@ -1296,8 +1298,8 @@ class ChargeGuard_Dynamic_Firewall {
             $order_data['cardWalletType']  = $card_fp_data['cardWalletType'];
         }
 
-        $result = $this->api_client->evaluate_risk($order_data);
 
+        $result = $this->api_client->evaluate_risk($order_data);
         if (is_wp_error($result)) {
             // Was previously: `return;` — an unconditional, silent
             // fail-open. This is the exploitable bypass: an attacker who
