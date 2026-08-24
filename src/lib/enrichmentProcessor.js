@@ -8,7 +8,7 @@
 const crypto = require('crypto');
 const logger = require('./logger');
 const db = require('./db');
-const { checkBINSequence } = require('./binSequenceDetector');
+const { checkBINSequence, checkCardFingerprintVelocity } = require('./binSequenceDetector');
 const { calculateRiskScore } = require('./riskScoring');
 const { verifyDeviceToken } = require('./deviceToken');
 const { getStoreScope, isProOrAbove } = require('./planAccess');
@@ -52,7 +52,7 @@ const recordBlockedAttempt = (tx, { merchantId, reason, ipHash = null, cardBin =
  * @returns {Promise<{status:number, body:object}>}
  */
 async function processEnrichment({ merchantId, orderId, body, storeId = null, tenant, limitedScoring = false }) {
-  const { bin, cardBrand, cardCountry, funding, issuer, last4, expMonth, expYear, brand, deviceToken } = body;
+  const { bin, cardBrand, cardCountry, funding, issuer, last4, expMonth, expYear, brand, deviceToken, cardFingerprint, cardWalletType } = body;
 
   const storeScope = getStoreScope(tenant, storeId);
 
@@ -224,6 +224,114 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
       return { status: 200, body: { success: true, orderId, enriched: true, newRiskScore: existingOrder.riskScore, newDecision: 'block', flags: [{ severity: 'critical', text: binSeq.reason }] } };
     }
   }
+
+  // ── Layer 5 — Post-Payment Card Fingerprint Velocity ─────────────────
+  // IMPORTANT ARCHITECTURAL NOTE: unlike every hard-block gate above,
+  // this one runs AFTER the bank has already authorized this specific
+  // payment (/enrich only ever fires post-payment_intent.succeeded or
+  // post-capture). It was originally designed as a PRE-authorization
+  // block (see design discussion) but no reliable capture point for
+  // Stripe's card.fingerprint exists before authorization in either
+  // WooCommerce Blocks or Classic checkout with the current UPE/Payment
+  // Element integration (stripe.confirmPayment() — which actually
+  // creates the PaymentMethod — runs client-side AFTER this plugin's
+  // order-creation hooks in both flows; confirmed empirically, not
+  // assumed).
+  //
+  // This is therefore a REACTIVE layer: it cannot stop the payment that
+  // triggered it, but the instant a device completes payment with a
+  // 3rd distinct real card within the window (see
+  // checkCardFingerprintVelocity's THRESHOLDS.UNIQUE_FINGERPRINTS_PER_ENTITY),
+  // it returns newDecision: 'block' — which trait-chargeguard-auto-block.php's
+  // chargeguard_fire_device_fraud_hook() consumes to local-blacklist the
+  // device immediately (stopping that device's NEXT attempt before ITS
+  // authorization), and chargeguard_maybe_block_order() consumes to
+  // cancel/refund THIS order if the merchant opted into auto_block/
+  // auto_refund. Net effect: converts what would be an undetected
+  // multi-card testing spree into "attacker loses their 3rd+ card and
+  // is locked out from attempt 4 onward," rather than true prevention
+  // from card #1.
+  //
+  // ipAddress/deviceFingerprint sourced from existingOrder (persisted at
+  // /evaluate or /woocommerce-webhook time) — /enrich's own request body
+  // never carries these fields, same source already used by
+  // checkBINSequence() above.
+  if (cardFingerprint) {
+    const cardFpVelocity = await checkCardFingerprintVelocity({
+      tenantId: merchantId,
+      cardFingerprint,
+      ipAddress: existingOrder.ipAddress,
+      deviceFingerprint: existingOrder.deviceFingerprint,
+    });
+
+    if (cardFpVelocity.blocked) {
+      // [Quota double-count fix] same guard as BIN Blacklist / BIN
+      // Sequence above — a Stripe webhook retry for an order already
+      // marked 'block' must not create a second BlockedAttempt row or
+      // increment monthlyBlockedCount again for the same underlying event.
+      const shouldRecordCardFpAttempt = existingOrder.decision !== 'block';
+      try {
+        const cardFpOps = [
+          db.order.update({
+            where: { id: existingOrder.id },
+            data: {
+              decision: 'block',
+              riskLevel: 'high',
+              cardHash: cardHashRecord?.cardHash ?? null,
+              cardBinPrefix,
+              enrichmentSource: body.source || 'stripe',
+            },
+          }),
+        ];
+        if (shouldRecordCardFpAttempt) {
+          cardFpOps.push(
+            ...recordBlockedAttempt(db, {
+              merchantId,
+              storeId: storeId ?? null,
+              cardBin: cardBinPrefix,
+              cardType: null,
+              reason: 'card_fingerprint_velocity',
+              ipHash: existingOrder.ipAddress ? hashIp(existingOrder.ipAddress) : null,
+              amountAttempted: existingOrder.amount ?? null,
+              riskScore: null,
+            })
+          );
+        }
+        await db.$transaction(cardFpOps);
+      } catch (err) {
+        logger.error(
+          { module: 'enrichmentProcessor', tenantId: merchantId, error: err.message },
+          'Failed card-fingerprint-velocity block transaction'
+        );
+      }
+
+      // Device blacklisting is NOT done here — it happens in the caller
+      // (class-stripe-webhook.php's chargeguard_fire_device_fraud_hook),
+      // triggered by the newDecision: 'block' returned below. Keeping
+      // that responsibility in the trait avoids duplicating the same
+      // do_action('chargeguard_mark_device_fraud', ...) call in two
+      // places (PayPal's webhook handler uses the identical trait path).
+      await db.pendingEnrichment.deleteMany({ where: { merchantId, orderId, status: 'pending' } });
+      return {
+        status: 200,
+        body: {
+          success: true,
+          orderId,
+          enriched: true,
+          newRiskScore: existingOrder.riskScore,
+          newDecision: 'block',
+          flags: [{ severity: 'critical', text: cardFpVelocity.reason }],
+        },
+      };
+    }
+    // Not triggered — cardWalletType is currently informational only
+    // (forwarded from Stripe, useful for forensic review in a future
+    // dashboard column) and is deliberately NOT persisted into
+    // signalsSnapshot yet, to avoid growing that JSON blob with a field
+    // nothing reads. Revisit if/when a wallet-evasion analytics view is
+    // built — see the documented Apple Pay/Google Pay evasion limitation.
+  }
+  // End Layer 5 — Post-Payment Card Fingerprint Velocity
 
   let snapshot = {};
   try { snapshot = JSON.parse(existingOrder.signalsSnapshot || '{}'); } catch {}

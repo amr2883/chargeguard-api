@@ -64,6 +64,42 @@ class ChargeGuard_Dynamic_Firewall {
     const MAX_BLACKLIST_SIZE = 500;
 
     /**
+     * Local (PHP-side) device attempt counter — determines whether this
+     * checkout is the device's 2nd+ attempt within the window, and
+     * therefore whether it's worth paying the cost of a Stripe API round
+     * trip to fetch card.fingerprint. A first-time legitimate customer
+     * never triggers the Stripe call at all — zero added latency for the
+     * overwhelming majority of checkouts.
+     *
+     * Window matches the backend's rawVelocityDetector.js
+     * RAW_VELOCITY_WINDOW_MINUTES default (10 min) by design — both
+     * counters are conceptually tracking "how many times has this exact
+     * device attempted checkout recently," just at two different layers
+     * (PHP pre-authorization gate vs. Node.js post-request analytics).
+     * They do not need to share storage; independent counters answering
+     * the same question are fine here since this one only gates a local
+     * decision (call Stripe or not), not a block decision by itself.
+     */
+    const CARD_FP_ATTEMPT_WINDOW_SECONDS = 600; // 10 minutes
+    const CARD_FP_ATTEMPT_THRESHOLD      = 2;   // 2nd+ attempt triggers the Stripe lookup
+
+    /**
+     * Lightweight circuit breaker for the Stripe get_payment_method()
+     * call specifically — deliberately separate from
+     * ChargeGuard_API_Client's breaker (self::CIRCUIT_*), which monitors
+     * the ChargeGuard backend's health, not Stripe's. Stripe being slow
+     * or briefly unreachable must never be conflated with — or allowed
+     * to open — the ChargeGuard API circuit, since that would disable
+     * unrelated protections for no reason. This breaker only ever
+     * suppresses the card-fingerprint lookup itself; it can never block
+     * a checkout on its own.
+     */
+    const CARD_FP_CIRCUIT_FAILURE_TRANSIENT = 'cg_cardfp_circuit_failures';
+    const CARD_FP_CIRCUIT_OPEN_TRANSIENT    = 'cg_cardfp_circuit_open';
+    const CARD_FP_CIRCUIT_FAILURE_THRESHOLD = 3;
+    const CARD_FP_CIRCUIT_OPEN_SECONDS      = 60;
+
+    /**
      * Merchant-configurable behavior when evaluate_risk() cannot reach the
      * backend — whether because the circuit breaker is open, or because a
      * single request failed/5xx'd (both mean "no authoritative decision is
@@ -997,7 +1033,171 @@ class ChargeGuard_Dynamic_Firewall {
      * checkout the customer is using. A Blocks-compatible pre-emptive
      * warning is tracked for a future release.
      */
+    /**
+     * increments and returns the local attempt count for a device within
+     * the card_fp_attempt_window_seconds window. untrusted input
+     * ($device_fp is client-supplied, same trust boundary as everywhere
+     * else in this file) — used only as a local cost-gating heuristic
+     * here, never as a security decision by itself.
+     *
+     * @param string $device_fp
+     * @return int the new count, including this attempt.
+     */
+    private function increment_local_device_attempt_count($device_fp) {
+        if (empty($device_fp) || $device_fp === 'unknown') {
+            return 0;
+        }
+        $key = 'cg_devattempt_' . md5($device_fp);
+        $count = (int) get_transient($key);
+        $count++;
+        set_transient($key, $count, self::card_fp_attempt_window_seconds);
+        return $count;
+    }
+
+    /**
+     * whether the stripe card-fingerprint circuit breaker is currently
+     * open (skip the stripe call and proceed without cardfingerprint).
+     *
+     * @return bool
+     */
+    private function is_card_fp_circuit_open() {
+        return (bool) get_transient(self::card_fp_circuit_open_transient);
+    }
+
+    /**
+     * records a failed stripe get_payment_method() call. opens the
+     * breaker after card_fp_circuit_failure_threshold consecutive
+     * failures. same accepted low-severity race as
+     * chargeguard_api_client::record_failure() — non-atomic
+     * read-increment-write, self-correcting, not worth the complexity of
+     * an atomic fix for a purely cost-saving (not security-critical)
+     * circuit.
+     */
+    private function record_card_fp_failure() {
+        $failures = (int) get_transient(self::card_fp_circuit_failure_transient);
+        $failures++;
+        set_transient(self::card_fp_circuit_failure_transient, $failures, self::card_fp_circuit_open_seconds * 2);
+
+        if ($failures >= self::card_fp_circuit_failure_threshold) {
+            set_transient(self::card_fp_circuit_open_transient, time(), self::card_fp_circuit_open_seconds);
+            error_log('chargeguard: card-fingerprint circuit breaker opened after ' . $failures . ' consecutive stripe get_payment_method() failures — skipping this lookup for ' . self::card_fp_circuit_open_seconds . 's.');
+        }
+    }
+
+    /**
+     * records a successful stripe get_payment_method() call — resets the
+     * failure counter and closes the breaker if it was open.
+     */
+    private function record_card_fp_success() {
+        delete_transient(self::card_fp_circuit_failure_transient);
+        if (get_transient(self::card_fp_circuit_open_transient)) {
+            delete_transient(self::card_fp_circuit_open_transient);
+            error_log('chargeguard: card-fingerprint circuit breaker closed — stripe reachable again.');
+        }
+    }
+
+    /**
+     * attempts to resolve card.fingerprint for the current checkout, but
+     * only when it's actually worth the cost: the device must be on its
+     * 2nd+ attempt within the window (see increment_local_device_attempt_count()),
+     * and a stripe payment_method id must actually be present on this
+     * request.
+     *
+     * known limitation (verify against your actual checkout flow): on
+     * woocommerce blocks with stripe's deferred-intent upe / payment
+     * element flow, stripe.confirmpayment() — which is what actually
+     * creates/confirms the paymentmethod — typically runs client-side
+     * after this hook (checkout_update_order_from_request) has already
+     * fired. in that flow, no payment_method id may be available here at
+     * all, and this method will simply return null every time — which is
+     * safe (see the fail-safe design note below) but means this layer
+     * may provide zero additional coverage until/unless a
+     * pre-tokenization flow (e.g. legacy card element, or a
+     * deferred-intent variant that tokenizes before order update) is
+     * confirmed to be in use. this must be verified empirically (e.g.
+     * temporary error_log of $pm_id below) against the live site's
+     * actual stripe integration before relying on this layer's coverage.
+     *
+     * expects the payment_method id as store api extension data under
+     * the 'chargeguard' namespace, key 'payment_method_id' — populated
+     * client-side by assets/js/chargeguard-firewall.js (to be added in a
+     * later step). returns null (no-op) if any precondition fails —
+     * never throws, never delays checkout beyond the stripe call's own
+     * timeout, never blocks on its own.
+     *
+     * @param wp_rest_request $request
+     * @param string           $device_fp
+     * @return array{cardfingerprint:string,cardwallettype:?string}|null
+     */
+    private function maybe_get_card_fingerprint($request, $device_fp) {
+        if (empty($device_fp) || $device_fp === 'unknown') {
+            return null;
+        }
+
+        $attempt_count = $this->increment_local_device_attempt_count($device_fp);
+        if ($attempt_count < self::card_fp_attempt_threshold) {
+            return null; // first attempt — not worth the stripe round trip.
+        }
+
+        $extensions = $request->get_param('extensions');
+        $pm_id = isset($extensions['chargeguard']['payment_method_id'])
+            ? sanitize_text_field($extensions['chargeguard']['payment_method_id'])
+            : null;
+
+        if (empty($pm_id) || strpos($pm_id, 'pm_') !== 0) {
+            return null; // not present on this request — see limitation note above.
+        }
+
+        // version-gate: wc_stripe_api::get_payment_method() signature and
+        // stdclass response shape are only confirmed stable for this
+        // range (tested against woocommerce-gateway-stripe 10.8.4). an
+        // out-of-range version disables this feature automatically rather
+        // than risking undefined behavior against a response shape that
+        // may have changed.
+        if (
+            !class_exists('wc_stripe_api')
+            || !method_exists('wc_stripe_api', 'get_payment_method')
+            || !defined('wc_stripe_version')
+            || !version_compare(wc_stripe_version, '10.5.0', '>=')
+            || !version_compare(wc_stripe_version, '11.0.0', '<')
+        ) {
+            return null;
+        }
+
+        if ($this->is_card_fp_circuit_open()) {
+            return null;
+        }
+
+        try {
+            $pm = wc_stripe_api::get_payment_method($pm_id);
+        } catch (\exception $e) {
+            $this->record_card_fp_failure();
+            error_log('chargeguard: wc_stripe_api::get_payment_method() failed — ' . $e->getmessage());
+            return null;
+        }
+
+        $this->record_card_fp_success();
+
+        // card.fingerprint is stripe-generated, not raw pan data — safe to
+        // forward and store (see prior design discussion: this does not
+        // expand pci scope, same sensitivity level as devicefingerprint).
+        if (!isset($pm->card->fingerprint) || !is_string($pm->card->fingerprint) || $pm->card->fingerprint === '') {
+            return null;
+        }
+
+        return [
+            'cardfingerprint' => $pm->card->fingerprint,
+            'cardwallettype'  => isset($pm->card->wallet->type) ? (string) $pm->card->wallet->type : null,
+        ];
+    }
+
     public function intercept_checkout_block($order, $request) {
+        if (defined('chargeguard_debug') && chargeguard_debug) {
+            error_log('cg_diag payment_method: ' . print_r($request->get_param('payment_method'), true));
+            error_log('cg_diag payment_data: ' . print_r($request->get_param('payment_data'), true));
+            error_log('cg_diag extensions: ' . print_r($request->get_param('extensions'), true));
+            error_log('cg_diag all_keys: ' . implode(', ', array_keys($request->get_params())));
+        }
         // Untrusted, client-forgeable value — see the trust-boundary
         // warning at the top of this file. The local blacklist check
         // just below is a cheap first-line heuristic only; evaluate_risk()
@@ -1081,6 +1281,20 @@ class ChargeGuard_Dynamic_Firewall {
             'shippingCountry' => $shipping_country,
             'merchantId' => get_option('chargeguard_merchant_id', ''),
         ];
+
+        // Pre-authorization card-fingerprint velocity signal — see
+        // maybe_get_card_fingerprint() above for the full rationale,
+        // preconditions, and the deferred-intent timing limitation that
+        // must be verified against this store's actual Stripe flow.
+        // Entirely additive and fail-safe: on any failure, missing
+        // precondition, or unsupported gateway version, $card_fp_data is
+        // null and $order_data is sent exactly as it was before this
+        // feature existed.
+        $card_fp_data = $this->maybe_get_card_fingerprint($request, $device_fp);
+        if ($card_fp_data !== null) {
+            $order_data['cardFingerprint'] = $card_fp_data['cardFingerprint'];
+            $order_data['cardWalletType']  = $card_fp_data['cardWalletType'];
+        }
 
         $result = $this->api_client->evaluate_risk($order_data);
 
