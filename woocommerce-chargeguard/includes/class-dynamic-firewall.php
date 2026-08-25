@@ -138,10 +138,14 @@ class ChargeGuard_Dynamic_Firewall {
      * When trusted-proxy mode is on:
      *   1. CF-Connecting-IP — set exclusively by Cloudflare on every proxied
      *      request; preferred over generic X-Forwarded-For when present.
-     *   2. WC_Geolocation::get_ip_address() — WooCommerce core's header
-     *      parser (X-Real-IP, then X-Forwarded-For first-hop, then
-     *      REMOTE_ADDR), reused here for its battle-tested parsing/
-     *      validation rather than reimplementing header-chain parsing.
+     *   2. ChargeGuard_Trusted_Proxy::resolve_ip_from_forwarded_header() —
+     *      takes the LAST (rightmost) syntactically valid IP in
+     *      X-Forwarded-For, i.e. the hop our own trusted proxy appended,
+     *      never the leftmost/client-Supplied one. Deliberately does NOT
+     *      use WC_Geolocation::get_ip_address() here, which takes the
+     *      FIRST entry and was found to be trivially spoofable via
+     *      "X-Forwarded-for: <fake>, <real>" even with a fully-verified
+     *      trusted remote_addr (confirmed via multi-hop xff testing).
      *   3. REMOTE_ADDR — final fallback if neither header is present.
      *
      * This method is the single source of truth for IP resolution in this
@@ -193,11 +197,12 @@ class ChargeGuard_Dynamic_Firewall {
         $trusted_cidrs = ChargeGuard_Trusted_Proxy::get_custom_proxy_cidrs();
         if ( ! empty( $trusted_cidrs )
             && ChargeGuard_Trusted_Proxy::ip_in_any_cidr( $remote_addr, $trusted_cidrs )
-            && class_exists( 'WC_Geolocation' )
+            && ! empty( $_SERVER['HTTP_X_FORWARDED_FOR'] )
         ) {
-            $wc_ip = WC_Geolocation::get_ip_address();
-            if ( ! empty( $wc_ip ) ) {
-                return $wc_ip;
+            $xff_raw = sanitize_text_field( wp_unslash( $_SERVER['HTTP_X_FORWARDED_FOR'] ) );
+            $xff_ip  = ChargeGuard_Trusted_Proxy::resolve_ip_from_forwarded_header( $xff_raw );
+            if ( ! empty( $xff_ip ) && rest_is_ip_address( $xff_ip ) ) {
+                return $xff_ip;
             }
         }
     }
