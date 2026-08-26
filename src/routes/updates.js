@@ -12,15 +12,14 @@ if (!UPDATE_DOWNLOAD_SECRET) {
   throw new Error('[updates] UPDATE_DOWNLOAD_SECRET environment variable is required');
 }
 
-// Must point at a Render Disk mount (persistent volume), NOT the service's
-// default ephemeral filesystem — anything written outside a mounted Disk
-// is wiped on every deploy/restart. Configure in Render dashboard:
-// Settings → Disks → Add Disk → mount path e.g. /var/data/releases, then
-// set RELEASES_DIR=/var/data/releases as an env var on this service.
-const RELEASES_DIR = process.env.RELEASES_DIR;
-if (!RELEASES_DIR) {
-  throw new Error('[updates] RELEASES_DIR environment variable is required (must point at a mounted Render Disk)');
-}
+// Free-tier Render web services cannot attach a persistent Disk at all
+// (no shell access, no one-off jobs, no Disks — see Render's free-tier
+// docs), so release ZIPs are hosted externally (currently: GitHub
+// Releases) and release.s3Key stores the full https:// download URL
+// rather than a relative on-disk filename. RELEASES_DIR stays optional
+// and only powers the legacy local-disk path below, for if this service
+// is ever upgraded to a paid instance with a Disk attached.
+const RELEASES_DIR = process.env.RELEASES_DIR || null;
 
 const TOKEN_TTL_MS = 2 * 60 * 1000;
 
@@ -130,6 +129,27 @@ router.get('/download', async (req, res) => {
       return res.status(404).json({ error: 'Release not found or has been pulled' });
     }
 
+    logger.info({ module: 'updates', endpoint: 'download', tenantId, version: release.version }, 'Plugin ZIP downloaded');
+
+    // release.s3Key is an absolute https:// URL when the ZIP is hosted
+    // externally (currently GitHub Releases) — the only delivery path
+    // that works on a free-tier Render instance with no persistent Disk.
+    // The signed, single-use token already validated above is what gates
+    // who receives this URL; the redirect itself carries no further
+    // secret, since the GitHub release asset is public regardless.
+    if (/^https?:\/\//i.test(release.s3Key)) {
+      res.setHeader('Cache-Control', 'no-store');
+      return res.redirect(302, release.s3Key);
+    }
+
+    // Legacy local-disk delivery path — only reachable if this service is
+    // ever upgraded to a paid Render instance with RELEASES_DIR pointed
+    // at an attached persistent Disk.
+    if (!RELEASES_DIR) {
+      logger.error({ module: 'updates', endpoint: 'download', releaseId }, 'Release s3Key is a relative path but RELEASES_DIR is not configured');
+      return res.status(500).json({ error: 'Internal server error' });
+    }
+
     // release.s3Key is treated as a relative filename under RELEASES_DIR —
     // resolve and verify it stays inside that directory before opening,
     // so a corrupted/tampered DB row (e.g. "../../etc/passwd") can never
@@ -144,8 +164,6 @@ router.get('/download', async (req, res) => {
       logger.error({ module: 'updates', endpoint: 'download', releaseId, resolvedPath }, 'Release row exists but file is missing on disk');
       return res.status(404).json({ error: 'Release file not found' });
     }
-
-    logger.info({ module: 'updates', endpoint: 'download', tenantId, version: release.version }, 'Plugin ZIP downloaded');
 
     res.setHeader('Content-Type', 'application/zip');
     res.setHeader('Content-Disposition', `attachment; filename="chargeguard-woocommerce-${release.version}.zip"`);
