@@ -22,6 +22,7 @@ const express = require('express');
 const router = express.Router();
 const { calculateRiskScore } = require('../lib/riskScoring');
 const { checkVelocity, recordFailedAttempt } = require('../lib/velocityDetector');
+const atomicIdentityGate = require('../lib/atomicIdentityGate');
 const { checkBINSequence, checkCardFingerprintVelocity } = require('../lib/binSequenceDetector');
 const db = require('../lib/db');
 const emergencyPause = require('../lib/emergencyPause');
@@ -736,22 +737,27 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       // (فريدة لكل أوردر بالتصميم). Order table مشترك بين /evaluate
       // وwebhook، فأي IP جالها أوردر واحد بس عبر الـ webhook fallback كان
       // بيضيف "device مختلف" وهمي هنا في كل مرة.
-      const recentDevicesForIp = await db.order.findMany({
-        where: {
-          merchantId, ...storeScope,
-          ipAddress,
-          createdAt: { gte: rotationWindowStart },
-          deviceFingerprint: { not: null },
-          NOT: { deviceFingerprint: { startsWith: WC_SYNTHETIC_DEVICE_PREFIX } },
-        },
-        select: { deviceFingerprint: true },
-        distinct: ['deviceFingerprint'],
-        take: 50,
+      // [TOCTOU fix] راجع lib/atomicIdentityGate.js — القراءة+القرار+الحجز
+      // بيحصلوا كخطوة ذرية واحدة محمية بـ pg_advisory_xact_lock، بدل
+      // القراءة المنفصلة زمنيًا (db.order.findMany) اللي كانت بتسمح لـ N
+      // طلب متزامن يشوفوا كلهم نفس العدد القديم ويعدّوا كلهم من البوابة.
+      const isEligibleDevice = !!deviceFingerprint && !deviceFingerprint.startsWith(WC_SYNTHETIC_DEVICE_PREFIX);
+      const rotationGate = await atomicIdentityGate.checkAndReserve({
+        merchantId,
+        storeId: req.storeId ?? null,
+        storeScope,
+        scope: 'ip_rotation',
+        groupKey: ipAddress,
+        memberKey: deviceFingerprint || null,
+        isEligibleMember: isEligibleDevice,
+        orderId,
+        windowMs: ROTATION_WINDOW_MS,
+        threshold: ROTATION_BLOCK_THRESHOLD,
       });
-      const seenThisOne = deviceFingerprint && recentDevicesForIp.some(d => d.deviceFingerprint === deviceFingerprint);
-      deviceSignal.rotationCount = recentDevicesForIp.length + (deviceFingerprint && !seenThisOne ? 1 : 0);
+      atomicIdentityGate.maybeCleanupOldSightings();
+      deviceSignal.rotationCount = rotationGate.count;
 
-      if (deviceSignal.rotationCount >= ROTATION_BLOCK_THRESHOLD) {
+      if (rotationGate.blocked) {
         let rotCardBin = null;
         if (bin != null) {
           const b = String(bin).replace(/\D/g, '').slice(0, 6);
@@ -2476,6 +2482,8 @@ router.post('/woocommerce-webhook', async (req, res) => {
         // before. cardType remains always null — extractOrderData() does not
         // capture a card-type field from the WooCommerce payload.
         try {
+          const webhookBinSeqIncrementQuota = shouldIncrementQuota(merchantId, 'card_testing', webhookBinSeqCardBin || extracted.bin);
+
           await db.$transaction(recordBlockedAttempt(db, {
             merchantId:      merchantId,
             storeId:         req.storeId ?? null,
@@ -2485,6 +2493,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
             ipHash:          webhookBinSeqIpHash,
             amountAttempted: webhookBinSeqAmount,
             riskScore:       null,
+            incrementQuota:  webhookBinSeqIncrementQuota,
           }));
         } catch (counterErr) {
           logger.error(
@@ -2526,23 +2535,27 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct REAL device fingerprints from one IP in 1h
       const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
 
-      const webhookRecentDevicesForIp = await db.order.findMany({
-        where: {
-          merchantId, ...storeScope,
-          ipAddress: extracted.ipAddress,
-          createdAt: { gte: rotationWindowStart },
-          deviceFingerprint: { not: null },
-          // استثناء synthetic fallback IDs — راجع الشرح فوق.
-          NOT: { deviceFingerprint: { startsWith: 'wc_' } },
-        },
-        select: { deviceFingerprint: true },
-        distinct: ['deviceFingerprint'],
-        take: 50,
+      // [TOCTOU fix] نفس الآلية الذرية المستخدمة في /evaluate's 1c بالحرف
+      // — نفس scope ('ip_rotation') ونفس صيغة groupKey (الـ IP الخام) عمدًا،
+      // عشان طلب من هنا وطلب من /evaluate لنفس التاجر/الـ IP يتصارعوا على
+      // نفس الـ advisory lock بدل ما يتصرفوا كمصدرين منعزلين عن بعض.
+      const webhookIsEligibleDevice = !!deviceFingerprint && !deviceFingerprint.startsWith(WC_SYNTHETIC_DEVICE_PREFIX);
+      const webhookRotationGate = await atomicIdentityGate.checkAndReserve({
+        merchantId,
+        storeId: req.storeId ?? null,
+        storeScope,
+        scope: 'ip_rotation',
+        groupKey: extracted.ipAddress,
+        memberKey: deviceFingerprint || null,
+        isEligibleMember: webhookIsEligibleDevice,
+        orderId: extracted.orderId,
+        windowMs: ROTATION_WINDOW_MS,
+        threshold: ROTATION_BLOCK_THRESHOLD,
       });
-      const webhookSeenThisOne = deviceFingerprint && webhookRecentDevicesForIp.some(d => d.deviceFingerprint === deviceFingerprint);
-      webhookDeviceSignal.rotationCount = webhookRecentDevicesForIp.length + (deviceFingerprint && !webhookSeenThisOne ? 1 : 0);
+      atomicIdentityGate.maybeCleanupOldSightings();
+      webhookDeviceSignal.rotationCount = webhookRotationGate.count;
 
-      if (webhookDeviceSignal.rotationCount >= ROTATION_BLOCK_THRESHOLD) {
+      if (webhookRotationGate.blocked) {
         let webhookRotCardBin = null;
         if (extracted.bin != null) {
           const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
@@ -2997,6 +3010,8 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
 
       try {
+        const webhookFinalIncrementQuota = shouldIncrementQuota(merchantId, 'pattern', deviceFingerprint || extracted.ipAddress || extracted.email);
+
         await db.$transaction(recordBlockedAttempt(db, {
           merchantId:      merchantId,
           storeId:         req.storeId ?? null, // best-effort, resolved above from X-WC-Webhook-Source
@@ -3006,6 +3021,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
           ipHash:          webhookFinalIpHash,
           amountAttempted: webhookFinalAmount,
           riskScore:       webhookFinalRiskScore,
+          incrementQuota:  webhookFinalIncrementQuota,
         }));
       } catch (counterErr) {
         logger.error(

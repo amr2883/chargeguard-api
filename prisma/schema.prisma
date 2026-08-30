@@ -895,3 +895,38 @@ model ProtectionEvent {
   @@index([tenantId, startedAt])
   @@index([tenantId, type, startedAt])
 }
+
+// ========== Identity Sighting (Atomic TOCTOU-safe rotation counter) ==========
+// General-purpose atomic sliding-window counter, designed to replace the
+// TOCTOU-vulnerable Order-table-based counting in risk.js's device-rotation
+// gates. `scope` distinguishes detection mechanisms sharing this table
+// ('ip_rotation' first; 'velocity_ip'/'velocity_device' reserved for a
+// later, separate migration extending this to checkVelocity/CardTestAttempt).
+// storeId is included and respected in every query against this table to
+// preserve Agency per_store isolation, matching getStoreScope()'s existing
+// behavior on Order-table queries elsewhere in risk.js — see
+// atomicIdentityGate.js for the query/lock logic.
+model IdentitySighting {
+  id         String   @id @default(cuid())
+  merchantId String
+  storeId    String?  // Agency isolation (opt-in) — null for pooled/legacy, mirrors Order.storeId
+  scope      String   // 'ip_rotation' for now; reserved values documented above
+  groupKey   String   // raw value being rate-limited (e.g. ipAddress) — unencrypted, matches Order.ipAddress's own storage
+  memberKey  String   // raw distinct-entity value (e.g. deviceFingerprint) — matches Order.deviceFingerprint's own storage
+  orderId    String   // business orderId (req.body.orderId) — idempotency guard, see @@unique below
+  seenAt     DateTime @default(now())
+
+  // Prevents a duplicate/retried check for the same order from ever being
+  // counted twice, independent of and in addition to the advisory lock —
+  // defense-in-depth, not a substitute for it (see design notes).
+  @@unique([merchantId, scope, orderId])
+  // Matches the exact WHERE-clause shape used by checkAndReserve()'s COUNT
+  // query for pooled tenants (no storeId in the query's where clause).
+  @@index([merchantId, scope, groupKey, seenAt])
+  // Same query shape for per_store (Agency) tenants, which DO filter by
+  // storeId — mirrors the paired-index pattern already used on Order
+  // (see Order model's storeId-qualified index set for the same reason).
+  @@index([merchantId, storeId, scope, groupKey, seenAt])
+  // Periodic cleanup query shape (see atomicIdentityGate.js's opportunistic sweep).
+  @@index([seenAt])
+}
