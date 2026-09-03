@@ -39,7 +39,7 @@ const { domainAuthMiddleware, domainAuthMiddlewareWithAutoRegister, normalizeDom
 const autoRegisterStoreMiddleware = require('../middleware/autoRegisterStore');const { notifyBINSequenceAlert }               = require('../lib/notify');
 const { isAgency, FREE_PLANS, getStoreScope }   = require('../lib/planAccess');
 const { checkQuotaGate }                        = require('../lib/quotaGate');
-const { mintDeviceToken, verifyDeviceToken }     = require('../lib/deviceToken');
+const { mintDeviceToken, verifyDeviceToken, mintChallengeTicket, verifyChallengeTicket } = require('../lib/deviceToken');
 const { isPlausibleClientIp, normalizeEmail }    = require('../lib/utils');
 const { getCloudflareRanges }                    = require('../lib/cloudflareRanges');
 const { safeErrorPayload }                       = require('../lib/errorResponse');
@@ -279,6 +279,196 @@ router.get('/cloudflare-ranges', apiKeyAuth, domainAuthMiddleware, verifyHmacSig
   }
 });
 
+// ── POST /risk/challenge/request ──────────────────────────────────────────
+// Issues an email OTP for the graduated 'challenge' tier of the
+// global-rotation ladder (see globalRotationDetector.js and /evaluate's
+// section 1c-ii). Reuses the same middleware stack as /device-token
+// (apiKeyAuth, domain binding w/ auto-register, HMAC signature) — same
+// trust boundary, same tenant-authenticated caller.
+const CHALLENGE_REQUEST_RATE = new Map();
+const CR_MAX_REQ   = 3;
+const CR_WINDOW_MS = 10 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of CHALLENGE_REQUEST_RATE.entries()) {
+    if (now - rec.firstAt > CR_WINDOW_MS) CHALLENGE_REQUEST_RATE.delete(key);
+  }
+}, CR_WINDOW_MS).unref();
+
+// Second, independent limiter keyed on the RECIPIENT email (not the
+// client-controllable deviceFingerprint). Without this, a checkout user
+// can rotate fingerprint per page-load (clearing cookies/localStorage —
+// trivial, no exploit needed) and re-trigger an OTP send to any third
+// party's email address with no effective ceiling — an email-bombing /
+// harassment vector against people who never touched this checkout.
+// Slightly looser window than the device limiter (device rotation across
+// a shared IP/office is legitimate; the same email receiving many codes
+// in a short window is not).
+const CHALLENGE_EMAIL_RATE = new Map();
+const CR_EMAIL_MAX_REQ   = 3;
+const CR_EMAIL_WINDOW_MS = 15 * 60 * 1000;
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of CHALLENGE_EMAIL_RATE.entries()) {
+    if (now - rec.firstAt > CR_EMAIL_WINDOW_MS) CHALLENGE_EMAIL_RATE.delete(key);
+  }
+}, CR_EMAIL_WINDOW_MS).unref();
+
+const CHALLENGE_OTP_TTL_MINUTES = 10;
+const CHALLENGE_MAX_ATTEMPTS = 5;
+
+router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
+  try {
+    const merchantId = req.tenant.id;
+    const { deviceFingerprint, email } = req.body;
+
+    if (!deviceFingerprint || !email || !email.includes('@')) {
+      return res.status(400).json({ error: 'deviceFingerprint and a valid email are required' });
+    }
+
+    const rlKey = `${merchantId}:${deviceFingerprint}`;
+    const now = Date.now();
+    const rlRec = CHALLENGE_REQUEST_RATE.get(rlKey);
+    if (rlRec && (now - rlRec.firstAt) <= CR_WINDOW_MS) {
+      if (rlRec.count >= CR_MAX_REQ) {
+        return res.status(429).json({ error: 'Too many verification requests. Please wait a few minutes.' });
+      }
+      rlRec.count++;
+    } else {
+      CHALLENGE_REQUEST_RATE.set(rlKey, { count: 1, firstAt: now });
+    }
+
+    // Second gate — keyed on the normalized recipient email, independent
+    // of deviceFingerprint. See CHALLENGE_EMAIL_RATE comment above.
+    const normalizedEmailForRate = normalizeEmail(email);
+    const emailRlKey = `${merchantId}:${normalizedEmailForRate}`;
+    const emailRlRec = CHALLENGE_EMAIL_RATE.get(emailRlKey);
+    if (emailRlRec && (now - emailRlRec.firstAt) <= CR_EMAIL_WINDOW_MS) {
+      if (emailRlRec.count >= CR_EMAIL_MAX_REQ) {
+        return res.status(429).json({ error: 'Too many verification requests for this email. Please wait a few minutes.' });
+      }
+      emailRlRec.count++;
+    } else {
+      CHALLENGE_EMAIL_RATE.set(emailRlKey, { count: 1, firstAt: now });
+    }
+
+    // Security fix: crypto.randomInt() (CSPRNG) instead of Math.random()
+    // (V8's PRNG — not cryptographically secure, and its internal state
+    // has documented recovery attacks). With only 6 digits of entropy
+    // (1M possibilities) already the binding constraint here, using a
+    // non-CSPRNG source removes the one guarantee that space actually
+    // relies on: unpredictability. crypto.randomInt(min, max) returns an
+    // integer in [min, max) — exclusive upper bound, so 1000000 (not
+    // 999999) is correct to keep the same [100000, 999999] range.
+    const otp = String(crypto.randomInt(100000, 1000000));
+    // Reuses RISK_SECRET_SALT (already required at the top of this file
+    // for hashIp) — same convention as the rest of this file: HMAC-hash
+    // any value that must never be stored in the clear.
+    const codeHash = crypto.createHmac('sha256', RISK_SECRET_SALT).update(otp).digest('hex');
+    const expiresAt = new Date(now + CHALLENGE_OTP_TTL_MINUTES * 60 * 1000);
+
+    // One active challenge per (merchantId, deviceFingerprint, email) —
+    // supersedes any prior unverified row. This is what lets
+    // /challenge/verify look the row up with no challengeId round-tripped
+    // to the client (see design discussion).
+    await db.challengeVerification.deleteMany({
+      where: { merchantId, deviceFingerprint, email, verified: false },
+    });
+    await db.challengeVerification.create({
+      data: { merchantId, deviceFingerprint, email, codeHash, expiresAt },
+    });
+
+    // Fail-open on email delivery failure: awaited (not fire-and-forget)
+    // specifically so this endpoint can tell the caller whether the OTP
+    // actually went out. Gmail API delivery has failed in this project
+    // before (documented invalid_grant incident) — if that happens here,
+    // the customer would otherwise be told "check your email" for a code
+    // that never arrives, with no way forward. emailSent:false lets the
+    // caller (class-api-client.php's request_challenge()) skip the
+    // challenge and let the order proceed rather than stranding a
+    // legitimate customer — same fail-open philosophy already used by
+    // this file's emergencyPause check.
+    //
+    // Trade-off worth confirming: this makes the response take as long as
+    // sendChallengeOtpEmail's own retry logic (up to ~2 attempts / 3s
+    // delay — deliberately short, see email.js's RETRIES comment there).
+    // A few extra seconds here is preferable to silently stranding a
+    // customer with no code and no recourse.
+    let emailSent = true;
+    const { sendChallengeOtpEmail } = require('../lib/email');
+    try {
+      await sendChallengeOtpEmail(email, otp);
+    } catch (err) {
+      emailSent = false;
+      logger.error({ module: 'risk', endpoint: 'challenge-request', merchantId, error: err.message }, 'Failed to send challenge OTP email — caller should fail open');
+    }
+
+    return res.status(200).json({ success: true, emailSent, expiresInSeconds: CHALLENGE_OTP_TTL_MINUTES * 60 });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'challenge-request', error: error.message, stack: error.stack }, 'Challenge request error');
+    res.status(500).json(safeErrorPayload(error));
+  }
+});
+
+// ── POST /risk/challenge/verify ────────────────────────────────────────────
+// Verifies the OTP and, on success, mints a signed 24h challenge ticket
+// (mintChallengeTicket, deviceToken.js) — the plugin stores it as the
+// chargeguard_ct cookie. See /evaluate's section 1c-ii for how that
+// ticket is consumed on the next request to skip re-challenging.
+router.post('/challenge/verify', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
+  try {
+    const merchantId = req.tenant.id;
+    const { code, deviceFingerprint, email } = req.body;
+
+    if (!code || !deviceFingerprint || !email) {
+      return res.status(400).json({ verified: false, error: 'code, deviceFingerprint, and email are required' });
+    }
+
+    const challenge = await db.challengeVerification.findFirst({
+      where: { merchantId, deviceFingerprint, email, verified: false },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    // Generic failure — avoids an enumeration oracle, same rationale used
+    // throughout this file (e.g. /reconcile's 404 branch).
+    if (!challenge) {
+      return res.status(400).json({ verified: false, error: 'Invalid or expired verification code' });
+    }
+
+    if (new Date() > challenge.expiresAt) {
+      return res.status(400).json({ verified: false, error: 'Verification code expired' });
+    }
+
+    if (challenge.attempts >= CHALLENGE_MAX_ATTEMPTS) {
+      return res.status(429).json({ verified: false, error: 'Too many incorrect attempts — request a new code' });
+    }
+
+    const codeHash = crypto.createHmac('sha256', RISK_SECRET_SALT).update(String(code)).digest('hex');
+    const codeBuf = Buffer.from(codeHash);
+    const expBuf = Buffer.from(challenge.codeHash);
+    const isMatch = codeBuf.length === expBuf.length && crypto.timingSafeEqual(codeBuf, expBuf);
+
+    if (!isMatch) {
+      await db.challengeVerification.update({
+        where: { id: challenge.id },
+        data: { attempts: { increment: 1 } },
+      });
+      return res.status(400).json({ verified: false, error: 'Incorrect code' });
+    }
+
+    await db.challengeVerification.update({
+      where: { id: challenge.id },
+      data: { verified: true, verifiedAt: new Date() },
+    });
+
+    const ticket = mintChallengeTicket(merchantId, deviceFingerprint, email);
+    return res.status(200).json({ verified: true, ticket });
+  } catch (error) {
+    logger.error({ module: 'risk', endpoint: 'challenge-verify', error: error.message, stack: error.stack }, 'Challenge verify error');
+    res.status(500).json(safeErrorPayload(error));
+  }
+});
+
 /**
  * @swagger
  * /risk/evaluate:
@@ -341,7 +531,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // ── End Subscription & Quota Status ──────────────────────────────────
 
     // ������� ��������
-    const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken, cardFingerprint } = req.body;
+    const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken, cardFingerprint, challengeTicket } = req.body;
     // merchantId is derived from the authenticated tenant (CWE-639 / OWASP API1:2023 fix).
     // It is never read from the request body or x-merchant-id header.
     const merchantId = req.tenant.id;
@@ -812,7 +1002,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     if (deviceFingerprint) {
       const globalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
 
-      if (globalRotation.blocked) {
+      if (globalRotation.level === 'block') {
         let globalRotCardBin = null;
         if (bin != null) {
           const b = String(bin).replace(/\D/g, '').slice(0, 6);
@@ -852,6 +1042,42 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
           decision: 'block',
           flags: [{ severity: 'critical', text: 'device_rotation_global_blocked' }]
         });
+      } else if (globalRotation.level === 'challenge') {
+        // Graduated step-up (globalRotationDetector.js): 8-11 new
+        // fingerprints/10min for this merchant — suspicious enough to
+        // demand an email-OTP proof-of-humanity, not severe enough for an
+        // outright block. Closes the "low and slow" evasion gap (an
+        // attacker sustaining ~11 new fingerprints/10min forever, just
+        // under the old single 12 threshold) without hard-blocking a
+        // genuine traffic spike (e.g. a real marketing-driven surge of
+        // new customers).
+        //
+        // ticketOk short-circuits repeat challenges: if this exact
+        // (deviceFingerprint, email) pair already passed an OTP challenge
+        // within the last 24h (see deviceToken.js's mintChallengeTicket/
+        // verifyChallengeTicket), it is not re-challenged on every
+        // subsequent checkout attempt within that window.
+        const ticketOk = challengeTicket && email
+          ? verifyChallengeTicket(challengeTicket, merchantId, deviceFingerprint, email).valid
+          : false;
+
+        if (!ticketOk) {
+          logger.info(
+            { module: 'risk', endpoint: 'evaluate', merchantId, orderId, newFingerprintCount: globalRotation.newFingerprintCount },
+            'Global device rotation at challenge tier — requesting OTP step-up'
+          );
+          return res.status(200).json({
+            orderId,
+            score: null,
+            decision: 'challenge',
+            flags: [{ severity: 'warning', text: 'device_rotation_global_challenge' }],
+            connectedRisk: 0,
+            scored: false,
+          });
+        }
+        // ticketOk === true — this device+email pair already proved
+        // itself recently; fall through and continue scoring normally,
+        // exactly like the 'clear'/'soft' levels do.
       }
     }
     // End 1c. Device Fingerprint Trust & Rotation Detection
@@ -2605,7 +2831,12 @@ router.post('/woocommerce-webhook', async (req, res) => {
     if (deviceFingerprint) {
       const webhookGlobalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
 
-      if (webhookGlobalRotation.blocked) {
+      if (webhookGlobalRotation.level === 'block') {
+        // NOTE: 'challenge' level is deliberately NOT handled here — this
+        // endpoint fires asynchronously after WooCommerce has already
+        // created the order (no live customer session to present an OTP
+        // to). It falls through and scores normally, same as 'clear'/
+        // 'soft'. See design discussion — confirm before changing.
         let webhookGlobalRotCardBin = null;
         if (extracted.bin != null) {
           const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
@@ -3836,47 +4067,6 @@ router.post('/dispute-evidence', apiKeyAuth, domainAuthMiddleware, verifyHmacSig
     res.status(500).json(safeErrorPayload(error));
   }
 });
-
-// ── TEMP DEBUG — احذف هذا البلوك بالكامل بعد الانتهاء من الاختبار ──
-router.get('/debug-quota/:tenantId', async (req, res) => {
-  if (req.query.secret !== process.env.ADMIN_SECRET) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const tenant = await db.tenant.findUnique({
-    where: { id: req.params.tenantId },
-    select: { email: true, monthlyBlockedCount: true, quotaResetDate: true },
-  });
-  res.json(tenant);
-});
-
-router.post('/debug-reset-quota/:tenantId', async (req, res) => {
-  if (req.query.secret !== process.env.ADMIN_SECRET) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const updated = await db.tenant.update({
-    where: { id: req.params.tenantId },
-    data: { monthlyBlockedCount: 0 },
-  });
-  res.json(updated);
-});
-router.get('/DEBUG-RAW-VELOCITY', async (req, res) => {
-  if (req.query.secret !== process.env.ADMIN_SECRET) {
-    return res.status(403).json({ error: 'forbidden' });
-  }
-  const rvd = require('../lib/rawVelocityDetector');
-  res.json({
-    moduleloaded: true,
-    RAW_DEVICE_BLOCK_THRESHOLD: rvd.RAW_DEVICE_BLOCK_THRESHOLD,
-    RAW_IP_FALLBACK_BLOCK_THRESHOLD: rvd.RAW_IP_FALLBACK_BLOCK_THRESHOLD,
-    RAW_VELOCITY_WINDOW_MS: rvd.RAW_VELOCITY_WINDOW_MS,
-    envThresholdOverride: process.env.RAW_DEVICE_VELOCITY_THRESHOLD || null,
-    envWindowOverride: process.env.RAW_VELOCITY_WINDOW_MINUTES || null,
-    pid: process.pid,
-    uptimeSeconds: Math.round(process.uptime()),
-    nowUTC: new Date().toISOString(),
-  });
-});
-// ── END TEMP DEBUG ──
 
 module.exports = router;
 

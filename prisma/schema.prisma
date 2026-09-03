@@ -264,7 +264,7 @@ model RiskEvaluation {
 // ========== Dispute Outcome (for learning) ==========
 model DisputeOutcome {
   id         String  @id @default(cuid())
-  disputeId  String  @unique
+  disputeId  String
   merchantId String
   orderId    String?
   // ربط بالـ Order (جديد)
@@ -274,6 +274,16 @@ model DisputeOutcome {
   signalsPresent String   @default("[]")
   caseScore      Int?
   resolvedAt     DateTime @default(now())
+
+  // C-DISPUTE-SCOPE fix: disputeId alone was globally @unique, but it's
+  // populated as the merchant-facing orderId (see feedbackLoop.js), and
+  // WooCommerce order IDs are per-store auto-increment integers — not
+  // globally unique. Two different merchants with the same orderId would
+  // collide here, and the second one's dispute outcome would be silently
+  // dropped as a "duplicate" (P2002) by feedbackLoop.js's error handling.
+  // Scoped uniqueness matches the same multi-tenant isolation pattern
+  // already used by Order's own (merchantId, orderId) constraint (C3 fix).
+  @@unique([merchantId, disputeId])
 }
 
 // ========== Dispute Evidence (Post-Purchase Signals) ==========
@@ -386,10 +396,30 @@ model IdentityNode {
   // علاقات مع IdentityEdge
   fromEdges IdentityEdge[] @relation("fromEdges")
   toEdges   IdentityEdge[] @relation("toEdges")
+  // [Cross-merchant fix] علاقة بجدول الربط الجديد تحت — يسجل فعليًا "أي
+  // تاجر شاف هذا الـ node" بدل الاعتماد على merchantsSeen اللي كانت
+  // بتتجمّد على 1 للأبد بعد أول ظهور (راجع upsertGlobalNode القديمة).
+  merchantLinks IdentityNodeMerchant[]
 
   @@unique([merchantId, type, hashedValue])
   @@index([merchantId, type, lastSeen])
   @@index([hashedValue])
+}
+
+// ========== Identity Node ↔ Merchant Junction (Cross-Merchant Fix) ========
+// يسجل كل تاجر شاف node معين (DEVICE/IP/FINGERPRINT) في الشبكة العالمية
+// (IdentityNode بـ merchantId='global'). نفس نمط PatternMerchant الموجود
+// بالفعل في هذا الملف لنفس الغرض بالضبط (FraudPattern بدل IdentityNode).
+model IdentityNodeMerchant {
+  nodeId      String
+  merchantId  String
+  firstSeenAt DateTime @default(now())
+  lastSeenAt  DateTime @updatedAt
+
+  node IdentityNode @relation(fields: [nodeId], references: [id], onDelete: Cascade)
+
+  @@id([nodeId, merchantId])
+  @@index([nodeId])
 }
 
 model IdentityEdge {
@@ -929,4 +959,53 @@ model IdentitySighting {
   @@index([merchantId, storeId, scope, groupKey, seenAt])
   // Periodic cleanup query shape (see atomicIdentityGate.js's opportunistic sweep).
   @@index([seenAt])
+}
+
+// ========== Challenge Verification (OTP step-up for low-and-slow evasion) ==========
+// Backs the graduated 'challenge' decision tier introduced alongside
+// globalRotationDetector.js's soft/challenge/block ladder (see risk.js
+// /evaluate). A row here represents one OTP code issued to a specific
+// (merchantId, deviceFingerprint, email) tuple. Follows the same
+// no-FK-relation, plain merchantId convention used by the other pooled
+// risk-engine tables in this file (CardTestAttempt, IdentitySighting,
+// Order, BlacklistEntry) rather than the tenantId+@relation convention
+// used by billing/admin tables (BlockedAttempt, Payment, Store) — this
+// table is part of the real-time scoring path, not tenant/billing
+// management.
+//
+// storeId is deliberately NOT included: unlike CardTestAttempt/
+// IdentitySighting, nothing in the current design needs per-store
+// isolation for an OTP challenge — a device+email pair is challenged the
+// same way regardless of which store in an Agency account it's
+// attempting on. Add it later only if a concrete per-store need arises.
+//
+// Single-active-challenge invariant: routes/risk.js's POST
+// /challenge/request deletes any prior unverified row for the same
+// (merchantId, deviceFingerprint, email) before creating a new one — so
+// at most one verified:false row can exist per tuple at any time. This
+// is what lets POST /challenge/verify look up the pending challenge by
+// (merchantId, deviceFingerprint, email) alone, with no challengeId
+// round-tripped to the client (see design discussion — the client only
+// ever needs to type the code, nothing else). Verified rows are
+// intentionally NOT deleted after use — they remain as an audit trail
+// and as the basis for future rate-limiting/ticket-reissue logic.
+model ChallengeVerification {
+  id                String    @id @default(cuid())
+  merchantId        String
+  deviceFingerprint String
+  email             String
+  codeHash          String    // HMAC-SHA256(code, <same secret salt used elsewhere in risk.js — confirm exact constant name when editing risk.js>) — never store the raw 6-digit code
+  attempts          Int       @default(0)
+  verified          Boolean   @default(false)
+  verifiedAt        DateTime?
+  expiresAt         DateTime
+  createdAt         DateTime  @default(now())
+
+  // Matches POST /challenge/request's deleteMany() predicate and POST
+  // /challenge/verify's lookup predicate exactly — both filter on this
+  // same (merchantId, deviceFingerprint, email, verified) shape.
+  @@index([merchantId, deviceFingerprint, email, verified])
+  // Supports a future periodic cleanup job for expired rows — same
+  // pattern as CheckoutSession.expiresAt above.
+  @@index([expiresAt])
 }

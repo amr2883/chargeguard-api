@@ -787,7 +787,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   // المقارنة كانت هتقارن binPrefix الخام مقابل o.cardBinPrefix المُنضّف
   // — أي حرف غير رقمي في الـ bin الوارد كان هيكسر المطابقة بصمت ويرجّع
   // صفر عد رغم تكرار حقيقي.
-  const rawBinForPrefix = order.payment_details?.card_bin ?? null;
+  const rawBinForPrefix = order.payment_details?.card_bin ?? order.payment_details?.credit_card_bin ?? null;
   const binPrefix = rawBinForPrefix ? String(rawBinForPrefix).replace(/\D/g, '').slice(0, 6) : null;
   const isPrepaidCard = binIntelResult?.isPrepaid === true;
 
@@ -1192,9 +1192,10 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   // يمنع edge case لو الـ reviewThreshold منخفض جداً يخلي score=40 يبقى Review
   if (hasCriticalSignal) {
     score = Math.min(score, 40);
-    // [TEMP DEBUG] بيطبع أسماء الـ critical flags الفعلية اللي سبّبت
-    // الحظر، مش بس العدد — عشان نحدد مصدر الحظر بدقة بدل التخمين.
-    // احذف السطر ده بعد ما نخلص التشخيص.
+    // Structured diagnostic log: records the actual critical-flag texts
+    // that triggered this block, not just the count — lets production
+    // log monitoring pinpoint the exact cause per decision, not just that
+    // a block happened. Intentionally permanent, not temporary.
     const criticalFlagTexts = flags.filter(f => f.severity === "critical").map(f => f.text);
     logger.warn({ module: 'riskScoring', cappedAt: 40, criticalCount, criticalFlagTexts }, 'Risk floor applied (critical flags)');
   } else if (hasHighSignal && highCount >= 2 && score > 55) {
@@ -1404,6 +1405,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     decisionBg,
     flags,
     positives,
+    topSignals,
     isLearning,
     scoringVersion: SCORING_VERSION,
     economicData,
@@ -1421,10 +1423,13 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
 }
 
 // ─── Rescore Order ────────────────────────────────────────────────────────
-// بيتنادى من الـ webhooks لما يحصل post-purchase event
-// phase: 'rescore' — بيستخدم الـ post-purchase events فعلاً
+// NOT IMPLEMENTED — intentionally returns null. Post-purchase re-scoring
+// (triggered by webhooks on events like shipment/delivery/dispute) is a
+// planned feature, not a temporarily-disabled one. Any caller currently
+// invoking this receives a silent no-op, not an error — confirm via
+// `grep -rn "rescoreOrder" src/` whether any live code path depends on
+// this actually running before treating its absence as safe.
 async function rescoreOrder(orderId, merchantId, triggerEvent) {
-  // DB معطل مؤقتًا
   return null;
 }
 module.exports = {

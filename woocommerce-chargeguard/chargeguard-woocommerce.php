@@ -56,6 +56,7 @@ require_once __DIR__ . '/includes/class-admin-settings.php';
 require_once __DIR__ . '/includes/class-stripe-webhook.php';
 require_once __DIR__ . '/includes/class-paypal-webhook.php';
 require_once __DIR__ . '/includes/class-trusted-proxy.php';
+require_once __DIR__ . '/includes/class-atomic-rate-limiter.php';
 require_once __DIR__ . '/includes/class-dynamic-firewall.php';
 require_once __DIR__ . '/includes/class-order-status.php';
 
@@ -279,6 +280,22 @@ register_activation_hook(__FILE__, function () {
 });
 register_deactivation_hook(__FILE__, function () {
     wp_clear_scheduled_hook('chargeguard_cleanup_stale_drafts');
+});
+
+/**
+ * Hourly cleanup of stale ChargeGuard_Atomic_Rate_Limiter bucket rows —
+ * see that class's cleanup_stale_buckets() docblock for why this is
+ * necessary (bucket rows are not self-expiring the way the transients
+ * they replaced were).
+ */
+add_action('chargeguard_cleanup_atomic_rate_limit_buckets', ['ChargeGuard_Atomic_Rate_Limiter', 'cleanup_stale_buckets']);
+register_activation_hook(__FILE__, function () {
+    if (!wp_next_scheduled('chargeguard_cleanup_atomic_rate_limit_buckets')) {
+        wp_schedule_event(time(), 'hourly', 'chargeguard_cleanup_atomic_rate_limit_buckets');
+    }
+});
+register_deactivation_hook(__FILE__, function () {
+    wp_clear_scheduled_hook('chargeguard_cleanup_atomic_rate_limit_buckets');
 });
 
 add_action('init', 'chargeguard_init_updater');
