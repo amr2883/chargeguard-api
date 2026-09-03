@@ -728,6 +728,61 @@ class ChargeGuard_Dynamic_Firewall {
      *
      * @param string $reason One of resolve_api_unavailable_decision()'s reason strings.
      */
+    const CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX    = 3;
+    const CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW = HOUR_IN_SECONDS;
+    const CHALLENGE_DELIVERY_FAILED_NOTICE_OPTION     = 'chargeguard_challenge_delivery_failed_notice';
+
+    /**
+     * نفس منطق check_device_blacklist() (سطر 352) لكن reusable وبترجع bool
+     * بدل الاعتماد على $_cookie مباشرة. الفورمات نفسه: array مسطّح
+     * fingerprint => expires_timestamp (مطابق لـ blacklist_option في كل الملف).
+     */
+    private function is_device_blacklisted_fp($device_fp) {
+        if (empty($device_fp)) {
+            return false;
+        }
+
+        $local_blacklist = get_option($this->blacklist_option, []);
+        if (!is_array($local_blacklist)) {
+            return false;
+        }
+
+        $now = time();
+        $changed = false;
+        foreach ($local_blacklist as $fp => $expires) {
+            if ($expires < $now) {
+                unset($local_blacklist[$fp]);
+                $changed = true;
+            }
+        }
+        if ($changed) {
+            update_option($this->blacklist_option, $local_blacklist, false);
+        }
+
+        return isset($local_blacklist[$device_fp]) && $local_blacklist[$device_fp] > $now;
+    }
+
+    /**
+     * إشعار الأدمن عند فشل تسليم otp — نفس pattern notify_admin_api_unavailable() حرفيًا.
+     */
+    private function notify_admin_challenge_delivery_failed($device_fp, $order_id, $reason) {
+        $status = get_option(self::CHALLENGE_DELIVERY_FAILED_NOTICE_OPTION, []);
+        if (!is_array($status)) {
+            $status = [];
+        }
+        $window_start = isset($status['window_start']) ? (int) $status['window_start'] : 0;
+        $now = time();
+        if (!$window_start || ($now - $window_start) > HOUR_IN_SECONDS) {
+            $status = ['window_start' => $now, 'count' => 0];
+        }
+        $status['count']       = (isset($status['count']) ? (int) $status['count'] : 0) + 1;
+        $status['last_reason'] = $reason . ' (device=' . $device_fp . ', order=' . $order_id . ')';
+        $status['last_at']     = $now;
+        update_option(self::CHALLENGE_DELIVERY_FAILED_NOTICE_OPTION, $status, false);
+
+        error_log('chargeguard: challenge delivery failed — applied fallback decision (' . $reason . ') for order #' . $order_id . '.');
+    }
+
     private function notify_admin_api_unavailable($reason) {
         $status = get_option(self::API_DOWN_STATUS_OPTION, []);
         if (!is_array($status)) {
@@ -1491,29 +1546,60 @@ class ChargeGuard_Dynamic_Firewall {
             $challenge_request = $this->api_client->request_challenge($device_fp, $email);
 
             if (is_wp_error($challenge_request) || empty($challenge_request['emailSent'])) {
-                // fail open: either the request itself failed, or it
-                // succeeded but the otp email genuinely could not be sent
-                // (gmail api delivery has failed in this project before —
-                // see sendchallengeotpemail's design notes on this exact
-                // risk). telling a customer to "check their email" for a
-                // code that will never arrive would strand a legitimate
-                // order with zero recourse — a real, silent lost sale is
-                // worse than letting this one attempt through unchallenged.
-                error_log('chargeguard: challenge requested but email delivery unconfirmed — failing open for order #' . $order->get_id());
+
+                $failure_reason = is_wp_error($challenge_request)
+                    ? $challenge_request->get_error_message()
+                    : 'emailSent_empty';
+
+                if ($this->is_device_blacklisted_fp($device_fp)) {
+                    $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_blacklisted');
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_order_blocked',
+                            __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'),
+                            400
+                        );
+                    }
+                    throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
+                }
+
+                $rl_key        = 'challenge_delivery_failed:' . $device_fp;
+                $attempt_count = ChargeGuard_Atomic_Rate_Limiter::increment(
+                    $rl_key,
+                    self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW
+                );
+
+                if ($attempt_count === 0) {
+                    $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limiter_unavailable');
+                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — proceeding with blacklist-only protection');
+                } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
+                    $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limit_exceeded');
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_order_blocked',
+                            __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'),
+                            400
+                        );
+                    }
+                    throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
+                } else {
+                    $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason);
+                    error_log('chargeguard: challenge requested but email delivery unconfirmed — proceeding under rate limit (' . $attempt_count . '/' . self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX . ') for order #' . $order->get_id());
+                }
             } else {
                 $order->update_meta_data('_chargeguard_challenge_requested_at', time());
                 $order->save_meta_data();
 
-                $message = __('for your security, we sent a verification code to your email. please enter it in the "verification code" field below and place your order again.', 'chargeguard-woocommerce');
+                $message = __('For your security, we sent a verification code to your email. Please enter it in the "Verification code" field below and place your order again.', 'chargeguard-woocommerce');
 
-                if (class_exists('\automattic\woocommerce\storeapi\exceptions\routeexception')) {
-                    throw new \automattic\woocommerce\storeapi\exceptions\routeexception(
+                if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                    throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
                         'chargeguard_challenge_required',
                         $message,
                         400
                     );
                 }
-                throw new \exception($message);
+                throw new \Exception($message);
             }
         }
 
