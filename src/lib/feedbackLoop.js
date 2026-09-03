@@ -261,27 +261,7 @@ async function updateSignalStat(merchantId, signalType, signalValue, isWin, dbCl
   `;
 }
 
-// ─── Update Merchant Profile (simplified, no transaction) ─────────────────
-// Only increments the counters atomically. merchantWeightRatio is computed
-// dynamically at read time in signalWeights.js to avoid transaction timeouts.
-async function updateMerchantProfile(merchantId, isWin) {
-  const now = new Date();
-  await db.merchantProfile.upsert({
-    where: { merchantId },
-    create: {
-      merchantId,
-      wonDisputes: isWin ? 1 : 0,
-      lostDisputes: isWin ? 0 : 1,
-      totalDisputes: 1,
-      merchantWeightRatio: 0.0,
-    },
-    update: {
-      wonDisputes: isWin ? { increment: 1 } : undefined,
-      lostDisputes: isWin ? undefined : { increment: 1 },
-      totalDisputes: { increment: 1 },
-    },
-  });
-}
+
 // ─── Calculate Contributing Signals ───────────────────────────────────────
 // O(n) — contributions are calculated during scoring, not after
 // Returns top 5 signals by contribution magnitude
@@ -479,14 +459,6 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
         },
       });
 
-      // 2.5 تحديث CardHash.blockCount إذا كان الاحتيال مؤكداً
-      if (isFraud && order.cardHash) {
-        await tx.cardHash.update({
-          where: { cardHash: order.cardHash },
-          data: { blockCount: { increment: 1 } },
-        });
-      }
-
       // 4. تحديث SignalStat (للتاجر وللعام)
       if (signals.length > 0) {
         const uniqueSignals = [...new Map(signals.map(s => [`${s.type}:${s.value}`, s])).values()];
@@ -508,6 +480,22 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
         }
       }
     });
+
+    // 2.5 تحديث CardHash.blockCount إذا كان الاحتيال مؤكداً — moved outside
+    // the M7 transaction (best-effort, not atomic with it): CardHash rows
+    // aren't guaranteed to exist for every order (e.g. cardHash wasn't
+    // populated at scoring time), and an update() on a missing row throws
+    // P2025 — inside a transaction, that unhandled rejection triggers a
+    // full rollback of merchantProfile + all SignalStat writes above, for
+    // a failure that has nothing to do with them. This block can now fail
+    // independently without losing the core accounting that already
+    // committed.
+    if (isFraud && order.cardHash) {
+      await db.cardHash.update({
+        where: { cardHash: order.cardHash },
+        data: { blockCount: { increment: 1 } },
+      }).catch(e => logger.error({ module: 'feedbackLoop', err: e, cardHash: order.cardHash }, 'CardHash blockCount update failed — non-critical, core accounting already committed'));
+    }
 
     // ── DisputeOutcome persistence (H1 fix) ─────────────────────────────
     // Writes the row that Tier-1 dispute-driven scoring signals

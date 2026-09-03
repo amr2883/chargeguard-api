@@ -181,7 +181,6 @@ function applyStepDecay(score, lastSeenAt) {
 // ─── Upsert Global Node ───────────────────────────────────────────────────
 // Global nodes: merchantId = null — مشتركة بين كل التجار
 // بس للـ DEVICE و IP و FINGERPRINT بس — مش EMAIL (privacy)
-
 async function upsertGlobalNode(type, rawValue, merchantId) {
   if (type === "EMAIL" || type === "ADDRESS") return null;
   if (!GLOBAL_TYPE_WEIGHTS[type]) return null;
@@ -193,7 +192,7 @@ async function upsertGlobalNode(type, rawValue, merchantId) {
   const now = new Date();
 
   try {
-    await prisma.identityNode.upsert({
+    const globalNode = await prisma.identityNode.upsert({
       where: {
         merchantId_type_hashedValue: {
           merchantId: 'global',
@@ -207,17 +206,56 @@ async function upsertGlobalNode(type, rawValue, merchantId) {
         hashedValue,
         maskedValue,
         totalTransactions: 1,
-        merchantsSeen: 1,
-        recentMerchants: 1,
+        // [Double-count fix] merchantsSeen/recentMerchants يبدأوا من صفر
+        // هنا عمدًا — مصدر العدّ الوحيد دلوقتي هو منطق
+        // IdentityNodeMerchant تحت (يحصل بعد هذا الـ upsert مباشرة، لكل
+        // استدعاء بما فيهم أول مرة). كتابتهم هنا كـ 1 يدويًا كانت
+        // بتتضاعف مع الـ increment الجديد في أول ظهور للـ node.
+        merchantsSeen: 0,
+        recentMerchants: 0,
         firstSeen: now,
         lastSeen: now,
       },
       update: {
         totalTransactions: { increment: 1 },
         lastSeen: now,
-        // merchantsSeen و recentMerchants لا يتم تحديثهما – مقبول لـ MVP
+        // merchantsSeen و recentMerchants بيتحدثوا تحت بناءً على جدول
+        // IdentityNodeMerchant الفعلي (Cross-merchant fix) — مش بيتجمدوا
+        // على القيمة الأولى زي قبل كده.
       },
     });
+
+    // [Cross-merchant fix] لو التاجر ده أول مرة يتربط بالـ node ده، سجّل
+    // العلاقة وزوّد العداد الحقيقي. create() هتفشل بـ P2002 (unique
+    // violation) لو العلاقة موجودة بالفعل — بنستخدم ده كإشارة "مش
+    // جديد" بدل عمل count() مكلفة على كل استدعاء (الدالة دي بتتنادى على
+    // كل أوردر عبر buildGraphFromOrder، مش بس وقت الحظر).
+    if (merchantId) {
+      try {
+        await prisma.identityNodeMerchant.create({
+          data: { nodeId: globalNode.id, merchantId },
+        });
+        await prisma.identityNode.update({
+          where: { id: globalNode.id },
+          data: {
+            merchantsSeen: { increment: 1 },
+            // ملاحظة تصميمية: recentMerchants هنا بتتزود زي merchantsSeen
+            // بالظبط (مش نافذة 30 يوم حقيقية) — تبسيط متعمد لتجنب أي
+            // عملية decay/recount دورية في هذه المرحلة الأولى.
+            recentMerchants: { increment: 1 },
+          },
+        });
+      } catch (linkErr) {
+        if (linkErr.code === 'P2002') {
+          await prisma.identityNodeMerchant.update({
+            where: { nodeId_merchantId: { nodeId: globalNode.id, merchantId } },
+            data: { lastSeenAt: now },
+          });
+        } else {
+          throw linkErr;
+        }
+      }
+    }
   } catch (err) {
     logger.error({ module: 'identityGraph', err }, 'upsertGlobalNode error');
   }
