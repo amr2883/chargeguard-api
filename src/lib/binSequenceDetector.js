@@ -1002,13 +1002,25 @@ async function getBINStats(tenantId) {
         );
         cursor = nextCursor;
         if (keys.length > 0) {
-          const values = await redisClient.mget(keys);
-          for (const raw of values) {
-            if (!raw) continue;
-            try {
-              tallyEntry(JSON.parse(raw));
-            } catch (parseErr) {
-              logger.error({ module: 'binSequenceDetector', err: parseErr.message }, 'Failed to parse Redis value during getBINStats scan');
+          // [getBINStats Redis-path fix] Layer 4 keys (`${tenantId}:entity:${entity}`)
+          // and Layer 5 keys (`${tenantId}:cardfp:${entity}`) match this
+          // tenant-prefix SCAN but hold a different shape ({ prefixes } /
+          // { fingerprints }, no `bins`) — tallyEntry() assumes the Layer
+          // 1-3 shape and throws (Object.values(undefined)) on them. That
+          // throw was being swallowed by this block's outer try/catch,
+          // silently falling through to the near-empty in-memory store for
+          // the rest of this tenant's stats. Same filter the in-memory
+          // fallback loop below already applies — now applied here too.
+          const filteredKeys = keys.filter(k => !k.includes(':entity:') && !k.includes(':cardfp:'));
+          if (filteredKeys.length > 0) {
+            const values = await redisClient.mget(filteredKeys);
+            for (const raw of values) {
+              if (!raw) continue;
+              try {
+                tallyEntry(JSON.parse(raw));
+              } catch (parseErr) {
+                logger.error({ module: 'binSequenceDetector', err: parseErr.message }, 'Failed to parse Redis value during getBINStats scan');
+              }
             }
           }
         }

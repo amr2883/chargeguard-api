@@ -2111,4 +2111,93 @@ async function sendDowngradeEmail(tenant, { previousPlanLabel, renewUrl }) {
   throw lastError;
 }
 
-module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail, sendDowngradeEmail, sendQuotaExceededEmail };
+// ══════════════════════════════════════════════════════════════════════════════
+// sendChallengeOtpEmail — كود تحقق 6 أرقام لمرحلة "challenge" في خط الدفاع
+// المتدرّج ضد هجوم Low-and-Slow (soft → challenge → block). يُرسل من:
+// POST /challenge/request في routes/risk.js.
+//
+// RETRIES مختلف عمدًا عن باقي دوال هذا الملف (2 بدل 3، 3s بدل 5s): كود الـ
+// OTP صالح لـ 10 دقايق فقط والعميل واقف فعليًا ينتظر أمام صفحة الدفع —
+// محاولة ثالثة بعد تأخير تراكمي أطول تستهلك من نافذة الصلاحية القصيرة من
+// غير فائدة حقيقية تذكر، بخلاف باقي الإيميلات في هذا الملف (تأكيد حساب،
+// فواتير، تقارير) اللي معلوماتها صالحة لفترة طويلة ومفيش ضغط وقت مماثل.
+// ══════════════════════════════════════════════════════════════════════════════
+async function sendChallengeOtpEmail(email, otp) {
+  // L5-style escaping — otp is server-generated (crypto.randomInt-based
+  // digits, see routes/risk.js), not user input, but escaped anyway for
+  // defense-in-depth consistency with every other value interpolated into
+  // HTML in this file.
+  const otpSafe = escapeHtml(otp);
+
+  const RETRIES = 2;
+  const RETRY_DELAY_MS = 3000;
+  const RETRYABLE_ERRORS = [429, 500, 502, 503, 504];
+  let lastError;
+
+  for (let attempt = 1; attempt <= RETRIES; attempt++) {
+    try {
+      console.log(`[ChallengeOtp] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      await sendViaGmail({
+        from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
+        to: email,
+        subject: `🔐 Your ChargeGuard verification code`,
+        html: `
+          <div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;max-width:600px;margin:0 auto;background:#ffffff;">
+
+            <!-- Header -->
+            <div style="background:#0b1121;padding:24px 32px;border-radius:12px 12px 0 0;">
+              <table cellpadding="0" cellspacing="0" style="width:100%;"><tr>
+                <td style="vertical-align:middle;">
+                  <table cellpadding="0" cellspacing="0"><tr>
+                    <td style="padding-right:10px;vertical-align:middle;">
+                      <div style="width:32px;height:32px;background:linear-gradient(135deg,#f97316,#ea580c);border-radius:8px;text-align:center;line-height:32px;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="white" xmlns="http://www.w3.org/2000/svg" style="vertical-align:middle;">
+                          <path d="M12 2L4 6v6c0 5.25 3.5 10.15 8 11.4C16.5 22.15 20 17.25 20 12V6L12 2zm-1 13l-3-3 1.4-1.4L11 12.2l4.6-4.6L17 9l-6 6z"/>
+                        </svg>
+                      </div>
+                    </td>
+                    <td style="vertical-align:middle;">
+                      <span style="font-size:20px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">Charge<span style="color:#f97316;">Guard</span></span>
+                    </td>
+                  </tr></table>
+                </td>
+                <td style="text-align:right;vertical-align:middle;">
+                  <span style="font-size:11px;color:#64748b;letter-spacing:0.08em;text-transform:uppercase;">Verification Code</span>
+                </td>
+              </tr></table>
+            </div>
+
+            <!-- Body -->
+            <div style="padding:32px;background:#ffffff;border:1px solid #e2e8f0;border-top:none;text-align:center;">
+              <p style="font-size:15px;color:#475569;margin:0 0 24px;line-height:1.6;">Enter this code to complete your order:</p>
+
+              <div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:20px;margin-bottom:20px;display:inline-block;">
+                <span style="font-family:'Courier New',Courier,monospace;font-size:32px;font-weight:800;letter-spacing:0.15em;color:#0f172a;">${otpSafe}</span>
+              </div>
+
+              <p style="font-size:13px;color:#94a3b8;margin:0;">This code expires in 10 minutes. If you didn't request this, you can safely ignore this email.</p>
+            </div>
+
+            <!-- Footer -->
+            <div style="background:#f8fafc;padding:20px 32px;border:1px solid #e2e8f0;border-top:none;border-radius:0 0 12px 12px;">
+              <p style="font-size:12px;color:#94a3b8;margin:0;line-height:1.6;">This code is required to protect this store from automated fraud attempts. It was requested during a checkout on a store protected by ChargeGuard.</p>
+            </div>
+
+          </div>
+        `,
+      });
+      console.log(`[ChallengeOtp] ✅ Sent successfully to: ${email}`);
+      return;
+    } catch (err) {
+      lastError = err;
+      const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
+      console.error(`[ChallengeOtp] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
+      console.log(`[ChallengeOtp] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
+    }
+  }
+  throw lastError;
+}
+
+module.exports = { sendApiKeyEmail, sendRotatedKeyEmail, sendAttackAlertEmail, sendWeeklySummaryEmail, sendConfirmationEmail, sendWelcomeWithKeyEmail, sendMonthlyReportEmail, sendPaypalAlertEmail, sendPaypalWeeklyReportEmail, sendRenewalReminderEmail, sendGracePeriodEmail, sendSubscriptionConfirmationEmail, sendDowngradeEmail, sendQuotaExceededEmail, sendChallengeOtpEmail };
