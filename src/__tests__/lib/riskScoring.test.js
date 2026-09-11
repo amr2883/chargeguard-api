@@ -20,7 +20,8 @@ jest.mock('../../lib/patternSharing', () => ({
 }));
 jest.mock('../../lib/signalWeights', () => ({
   getWeightsForMerchant: jest.fn(),
-  getStaticWeight: jest.fn(),
+  getStaticWeight: jest.requireActual('../../lib/signalWeights').getStaticWeight,
+  getLearnedMultiplier: jest.requireActual('../../lib/signalWeights').getLearnedMultiplier,
 }));
 jest.mock('../../lib/logger', () => ({
   info: jest.fn(),
