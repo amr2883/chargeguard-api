@@ -1050,15 +1050,4 @@ async function getBINStats(tenantId) {
   return { activePrefixes, blockedPrefixes, totalActiveBINs };
 }
 
-// ⚠️ TEMP DIAGNOSTIC — REMOVE AFTER USE
-function getRedisDiagnostics() {
-  return {
-    REDIS_URL_set: Boolean(process.env.REDIS_URL),
-    usingRedis,
-    redisClientExists: Boolean(redisClient),
-    redisClientStatus: redisClient ? redisClient.status : null,
-    wouldUseRedis: usingRedis && redisClient && redisClient.status === 'ready',
-  };
-}
-
-module.exports = { checkBINSequence, checkCardFingerprintVelocity, recordBINAttempt, recordEntityPrefixAttempt, recordCardFingerprintAttempt, getBINStats, getRedisDiagnostics, THRESHOLDS };
+module.exports = { checkBINSequence, checkCardFingerprintVelocity, recordBINAttempt, recordEntityPrefixAttempt, recordCardFingerprintAttempt, getBINStats, THRESHOLDS };

@@ -109,12 +109,6 @@ app.use((err, req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
 });
-
-// ⚠️ TEMP DIAGNOSTIC — REMOVE AFTER USE
-app.get('/api/debug/redis-status', (req, res) => {
-  const { getRedisDiagnostics } = require('./lib/binSequenceDetector');
-  res.json(getRedisDiagnostics());
-});
 app.get('/metrics', async (req, res) => {
   res.set('Content-Type', prometheus.registry.contentType);
   res.end(await prometheus.registry.metrics());
