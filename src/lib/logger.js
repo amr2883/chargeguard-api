@@ -20,7 +20,7 @@
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };
 
-const configuredLevel = (process.env.LOG_LEVEL || 'debug').toLowerCase();
+const configuredLevel = (process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'warn' : 'debug')).toLowerCase();
 const threshold = LEVELS.hasOwnProperty(configuredLevel)
   ? LEVELS[configuredLevel]
   : LEVELS.debug; // fall back safely if LOG_LEVEL is set to something unrecognized

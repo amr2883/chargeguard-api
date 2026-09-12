@@ -43,7 +43,7 @@ describe('velocityDetector — T3c', () => {
 
       const result = await checkVelocity({ ip, merchantId });
       expect(result.blocked).toBe(true);
-      expect(result.reason).toEqual(expect.stringContaining('IP'));
+      expect(result.reason).toEqual(expect.stringContaining('velocity_ip_blocked'));
     });
 
     it('does not count attempts outside the 10-minute window', async () => {
@@ -97,7 +97,7 @@ describe('velocityDetector — T3c', () => {
 
       const result = await checkVelocity({ deviceFingerprint, merchantId });
       expect(result.blocked).toBe(true);
-      expect(result.reason).toEqual(expect.stringContaining('Device'));
+      expect(result.reason).toEqual(expect.stringContaining('velocity_device_blocked'));
     });
   });
 
