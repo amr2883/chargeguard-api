@@ -20,7 +20,7 @@ const bin = (prefix, suffix) => `${prefix}${suffix}`;
 
 describe('binSequenceDetector — T3b', () => {
   describe('Layer 1: BIN prefix velocity', () => {
-    it('does NOT trigger with 7 unique BINs from the same prefix (below threshold)', () => {
+    it('does NOT trigger with 7 unique BINs from the same prefix (below threshold)', async () => {
       const tenantId = uniqueTenant('layer1-below');
       const prefix = '4111';
       let lastResult;
@@ -28,7 +28,7 @@ describe('binSequenceDetector — T3b', () => {
       for (let i = 0; i < THRESHOLDS.UNIQUE_BINS_PER_PREFIX - 1; i++) {
         // Widely spaced suffixes so this scenario can never accidentally
         // satisfy Layer 2 (sequential scan) as a side effect.
-        lastResult = checkBINSequence({
+        lastResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, 1000 + i * 1000),
           ipAddress: '10.0.0.1',
@@ -39,13 +39,13 @@ describe('binSequenceDetector — T3b', () => {
       expect(lastResult.layer).toBeNull();
     });
 
-    it('triggers on the Nth unique BIN from the same prefix within the window', () => {
+    it('triggers on the Nth unique BIN from the same prefix within the window', async () => {
       const tenantId = uniqueTenant('layer1-trigger');
       const prefix = '4111';
       let lastResult;
 
       for (let i = 0; i < THRESHOLDS.UNIQUE_BINS_PER_PREFIX; i++) {
-        lastResult = checkBINSequence({
+        lastResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, 1000 + i * 1000),
           ipAddress: '10.0.0.1',
@@ -66,7 +66,7 @@ describe('binSequenceDetector — T3b', () => {
       expect(lastResult.riskAddition).toBe(35);
     });
 
-    it('does not count BINs outside the 10-minute window', () => {
+    it('does not count BINs outside the 10-minute window', async () => {
       const tenantId = uniqueTenant('layer1-window');
       const prefix = '4111';
       const now = Date.now();
@@ -76,12 +76,12 @@ describe('binSequenceDetector — T3b', () => {
         // 7 BINs recorded 11 minutes ago — outside the window.
         dateNowSpy.mockReturnValue(now - 11 * 60 * 1000);
         for (let i = 0; i < THRESHOLDS.UNIQUE_BINS_PER_PREFIX - 1; i++) {
-          recordBINAttempt({ tenantId, bin: bin(prefix, 1000 + i * 1000), entity: '10.0.0.1' });
+          await recordBINAttempt({ tenantId, bin: bin(prefix, 1000 + i * 1000), entity: '10.0.0.1' });
         }
 
         // Back to "now" — only the 1 fresh BIN below should be active.
         dateNowSpy.mockReturnValue(now);
-        const result = checkBINSequence({ tenantId, bin: bin(prefix, 9999), ipAddress: '10.0.0.1' });
+        const result = await checkBINSequence({ tenantId, bin: bin(prefix, 9999), ipAddress: '10.0.0.1' });
 
         expect(result.blocked).toBe(false);
       } finally {
@@ -91,7 +91,7 @@ describe('binSequenceDetector — T3b', () => {
   });
 
   describe('Layer 2: Sequential scan detection', () => {
-    it('triggers when 5+ BINs have ascending suffixes with diff <= 2', () => {
+    it('triggers when 5+ BINs have ascending suffixes with diff <= 2', async () => {
       const tenantId = uniqueTenant('layer2-trigger');
       const prefix = '4222';
       // Diffs: 1, 2, 1, 2 — a streak of 5, all under THRESHOLDS.UNIQUE_BINS_PER_PREFIX (8)
@@ -101,7 +101,7 @@ describe('binSequenceDetector — T3b', () => {
       let lastResult;
 
       for (const suffix of suffixes) {
-        lastResult = checkBINSequence({
+        lastResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, suffix),
           ipAddress: '10.0.0.2',
@@ -113,14 +113,14 @@ describe('binSequenceDetector — T3b', () => {
       expect(lastResult.riskAddition).toBe(40);
     });
 
-    it('does NOT trigger when suffix gaps exceed 2 (not a sequential pattern)', () => {
+    it('does NOT trigger when suffix gaps exceed 2 (not a sequential pattern)', async () => {
       const tenantId = uniqueTenant('layer2-nonseq');
       const prefix = '4223';
       const suffixes = [100, 200, 300, 400, 500]; // gaps of 100 — not sequential
       let lastResult;
 
       for (const suffix of suffixes) {
-        lastResult = checkBINSequence({
+        lastResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, suffix),
           ipAddress: '10.0.0.2',
@@ -132,7 +132,7 @@ describe('binSequenceDetector — T3b', () => {
   });
 
   describe('Layer 3: Cross-entity linking', () => {
-    it('triggers when >= 6 distinct entities share >= 4 BINs from the same prefix', () => {
+    it('triggers when >= 6 distinct entities share >= 4 BINs from the same prefix', async () => {
       const tenantId = uniqueTenant('layer3-trigger');
       const prefix = '4333';
       // 4 distinct BINs (B1..B4), spaced far apart to avoid any accidental
@@ -153,7 +153,7 @@ describe('binSequenceDetector — T3b', () => {
 
       let lastResult;
       for (const c of calls) {
-        lastResult = checkBINSequence({ tenantId, bin: c.bin, ipAddress: c.entity });
+        lastResult = await checkBINSequence({ tenantId, bin: c.bin, ipAddress: c.entity });
       }
 
       expect(lastResult.blocked).toBe(true);
@@ -161,7 +161,7 @@ describe('binSequenceDetector — T3b', () => {
       expect(lastResult.riskAddition).toBe(30);
     });
 
-    it('does NOT trigger with < 6 distinct entities even if >= 4 BINs are shared', () => {
+    it('does NOT trigger with < 6 distinct entities even if >= 4 BINs are shared', async () => {
       const tenantId = uniqueTenant('layer3-below');
       const prefix = '4334';
       const bins = [1000, 5000, 9000, 13000].map((s) => bin(prefix, s));
@@ -175,7 +175,7 @@ describe('binSequenceDetector — T3b', () => {
 
       let lastResult;
       for (const c of calls) {
-        lastResult = checkBINSequence({ tenantId, bin: c.bin, ipAddress: c.entity });
+        lastResult = await checkBINSequence({ tenantId, bin: c.bin, ipAddress: c.entity });
       }
 
       expect(lastResult.blocked).toBe(false);
@@ -183,7 +183,7 @@ describe('binSequenceDetector — T3b', () => {
   });
 
   describe('Tenant isolation (CWE-653 fix)', () => {
-    it("Tenant A's attack does not block or appear in Tenant B's stats", () => {
+    it("Tenant A's attack does not block or appear in Tenant B's stats", async () => {
       const tenantA = uniqueTenant('isolation-a');
       const tenantB = uniqueTenant('isolation-b');
       const prefix = '4111'; // deliberately the SAME prefix for both tenants
@@ -191,7 +191,7 @@ describe('binSequenceDetector — T3b', () => {
       // Trigger a Layer 1 block for Tenant A only.
       let resultA;
       for (let i = 0; i < THRESHOLDS.UNIQUE_BINS_PER_PREFIX; i++) {
-        resultA = checkBINSequence({
+        resultA = await checkBINSequence({
           tenantId: tenantA,
           bin: bin(prefix, 1000 + i * 1000),
           ipAddress: '10.0.0.1',
@@ -200,7 +200,7 @@ describe('binSequenceDetector — T3b', () => {
       expect(resultA.blocked).toBe(true);
 
       // Tenant B, same prefix, fresh BIN — must be completely unaffected.
-      const resultB = checkBINSequence({
+      const resultB = await checkBINSequence({
         tenantId: tenantB,
         bin: bin(prefix, 999),
         ipAddress: '10.0.0.99',
@@ -208,8 +208,8 @@ describe('binSequenceDetector — T3b', () => {
       expect(resultB.blocked).toBe(false);
       expect(resultB.riskAddition).toBe(0);
 
-      const statsA = getBINStats(tenantA);
-      const statsB = getBINStats(tenantB);
+      const statsA = await getBINStats(tenantA);
+      const statsB = await getBINStats(tenantB);
 
       expect(statsA.blockedPrefixes).toBe(1);
       expect(statsB.blockedPrefixes).toBe(0);
@@ -220,7 +220,7 @@ describe('binSequenceDetector — T3b', () => {
   });
 
   describe('Block lifecycle', () => {
-    it('blocks for 1 hour, then clears once the block expires', () => {
+    it('blocks for 1 hour, then clears once the block expires', async () => {
       const tenantId = uniqueTenant('lifecycle');
       const prefix = '4444';
       const T0 = Date.now();
@@ -231,7 +231,7 @@ describe('binSequenceDetector — T3b', () => {
         dateNowSpy.mockReturnValue(T0);
         let triggerResult;
         for (let i = 0; i < THRESHOLDS.UNIQUE_BINS_PER_PREFIX; i++) {
-          triggerResult = checkBINSequence({
+          triggerResult = await checkBINSequence({
             tenantId,
             bin: bin(prefix, 1000 + i * 1000),
             ipAddress: '10.0.0.5',
@@ -242,7 +242,7 @@ describe('binSequenceDetector — T3b', () => {
 
         // 2. The very next call (same instant) hits the "already blocked" branch —
         //    a different response shape (layer 0, riskAddition 50, generic reason).
-        const nextCallResult = checkBINSequence({
+        const nextCallResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, 999999),
           ipAddress: '10.0.0.5',
@@ -254,7 +254,7 @@ describe('binSequenceDetector — T3b', () => {
 
         // 3. 30 minutes later — still within the 1-hour block window.
         dateNowSpy.mockReturnValue(T0 + 30 * 60 * 1000);
-        const midResult = checkBINSequence({
+        const midResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, 888888),
           ipAddress: '10.0.0.5',
@@ -266,7 +266,7 @@ describe('binSequenceDetector — T3b', () => {
         //    cleared internally; we assert on observed behavior, not on
         //    internal field state.
         dateNowSpy.mockReturnValue(T0 + 61 * 60 * 1000);
-        const expiredResult = checkBINSequence({
+        const expiredResult = await checkBINSequence({
           tenantId,
           bin: bin(prefix, 777777),
           ipAddress: '10.0.0.5',
@@ -280,30 +280,30 @@ describe('binSequenceDetector — T3b', () => {
   });
 
   describe('Edge cases', () => {
-    it('treats a BIN shorter than 4 digits as a no-op (no store mutation, no crash)', () => {
+    it('treats a BIN shorter than 4 digits as a no-op (no store mutation, no crash)', async () => {
       const tenantId = uniqueTenant('edge-short-bin');
 
-      const result = checkBINSequence({ tenantId, bin: '12', ipAddress: '10.0.0.1' });
+      const result = await checkBINSequence({ tenantId, bin: '12', ipAddress: '10.0.0.1' });
 
       expect(result).toEqual({ blocked: false, riskAddition: 0, reason: null });
 
-      const stats = getBINStats(tenantId);
+      const stats = await getBINStats(tenantId);
       expect(stats).toEqual({ activePrefixes: 0, blockedPrefixes: 0, totalActiveBINs: 0 });
     });
 
-    it('falls back to deviceFingerprint as the entity when ipAddress is absent', () => {
+    it('falls back to deviceFingerprint as the entity when ipAddress is absent', async () => {
       const tenantId = uniqueTenant('edge-device-fallback');
       const prefix = '4555';
 
       // Should not throw, and should still be trackable via getBINStats.
-      const result = checkBINSequence({
+      const result = await checkBINSequence({
         tenantId,
         bin: bin(prefix, 1),
         deviceFingerprint: 'device-abc',
       });
 
       expect(result.blocked).toBe(false);
-      expect(getBINStats(tenantId).totalActiveBINs).toBe(1);
+      expect((await getBINStats(tenantId)).totalActiveBINs).toBe(1);
     });
   });
 });
