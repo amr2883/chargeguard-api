@@ -315,7 +315,7 @@ describe('economic override branches (integration via calculateRiskScore)', () =
       amount: 60000,
       ipAddress: blacklistedIp,
       ipPenalty: 0,
-      blacklist: [{ ip: blacklistedIp }],
+      blacklist: [{ type: 'IP', value: blacklistedIp }],
     });
 
     expect(result.score).toBe(10);

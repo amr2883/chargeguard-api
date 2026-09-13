@@ -332,7 +332,7 @@ describe('POST /webhook', () => {
   test('invalid webhookType → 400', async () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'teams' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'teams' };
     const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
@@ -389,6 +389,7 @@ describe('POST /webhook', () => {
         webhookUrl: 'https://hooks.slack.com/services/x',
         webhookType: 'slack',
         webhookLastStatus: null,
+        webhookResolvedIp: null,
         webhookLastSentAt: null,
         webhookFailureCount: 0,
       },
@@ -402,7 +403,7 @@ describe('POST /webhook', () => {
   test('missing HMAC headers → 401, handler never reached', async () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'slack' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const req = makeReq({ body });
     const res = makeRes();
 
@@ -417,7 +418,7 @@ describe('POST /webhook', () => {
   test('invalid HMAC signature (wrong secret) → 401', async () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'slack' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const req = makeReq({ body, headers: signRequest('wrong-secret', body) });
     const res = makeRes();
 
@@ -430,7 +431,7 @@ describe('POST /webhook', () => {
   test('expired HMAC timestamp (> 300s) → 401', async () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'slack' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const staleTs = String(Math.floor(Date.now() / 1000) - 400);
     const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body, staleTs) });
     const res = makeRes();
@@ -443,7 +444,7 @@ describe('POST /webhook', () => {
   test('no webhookSecret configured on tenant → 401', async () => {
     const tenant = makeTenant({ webhookSecret: null });
     mockAuthenticatedTenant(tenant);
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'slack' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const req = makeReq({
       body,
       headers: { 'x-chargeguard-signature': 'v1=whatever', 'x-chargeguard-timestamp': String(Math.floor(Date.now() / 1000)) },
@@ -459,7 +460,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockRejectedValue(new Error('db down'));
-    const body = { webhookUrl: 'https://hooks.slack.com/x', webhookType: 'slack' };
+    const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
@@ -530,7 +531,7 @@ describe('POST /webhook/test', () => {
   });
 
   test('webhookType defaults to "custom" when tenant.webhookType is falsy', async () => {
-    const tenant = makeTenant({ webhookUrl: 'https://example.com/hook', webhookType: null });
+    const tenant = makeTenant({ webhookUrl: 'https://1.1.1.1/hook', webhookType: null });
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockResolvedValue({});
     const body = {};
@@ -549,7 +550,7 @@ describe('POST /webhook/test', () => {
   });
 
   test('sendWebhookAlert rejects → failure count incremented, 500 with err.message', async () => {
-    const tenant = makeTenant({ webhookUrl: 'https://example.com/hook', webhookType: 'custom' });
+    const tenant = makeTenant({ webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' });
     mockAuthenticatedTenant(tenant);
     sendWebhookAlert.mockRejectedValue(new Error('ECONNREFUSED'));
     db.tenant.update.mockResolvedValue({});
@@ -568,7 +569,7 @@ describe('POST /webhook/test', () => {
   });
 
   test('sendWebhookAlert rejects with no .message → falls back to generic text', async () => {
-    const tenant = makeTenant({ webhookUrl: 'https://example.com/hook', webhookType: 'custom' });
+    const tenant = makeTenant({ webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' });
     mockAuthenticatedTenant(tenant);
     sendWebhookAlert.mockRejectedValue({});
     db.tenant.update.mockResolvedValue({});
@@ -583,7 +584,7 @@ describe('POST /webhook/test', () => {
   });
 
   test('missing HMAC headers → 401, sendWebhookAlert never called', async () => {
-    const tenant = makeTenant({ webhookUrl: 'https://example.com/hook' });
+    const tenant = makeTenant({ webhookUrl: 'https://1.1.1.1/hook' });
     mockAuthenticatedTenant(tenant);
     const req = makeReq({ body: {} });
     const res = makeRes();
@@ -632,24 +633,24 @@ describe('real webhook.js implementation (unmocked)', () => {
   const realWebhook = jest.requireActual('../../src/lib/webhook');
 
   describe('validateWebhookUrl — SSRF & format checks', () => {
-    test('valid https URL → valid', () => {
-      expect(realWebhook.validateWebhookUrl('https://hooks.slack.com/services/x')).toEqual({ valid: true });
+    test('valid https URL → valid', async () => {
+      await expect(realWebhook.validateWebhookUrl('https://hooks.slack.com/services/x')).resolves.toEqual({ valid: true });
     });
 
-    test('missing url → invalid', () => {
-      expect(realWebhook.validateWebhookUrl()).toEqual({ valid: false, error: 'URL is required' });
+    test('missing url → invalid', async () => {
+      await expect(realWebhook.validateWebhookUrl()).resolves.toEqual({ valid: false, error: 'URL is required' });
     });
 
-    test('non-string url → invalid', () => {
-      expect(realWebhook.validateWebhookUrl(12345)).toEqual({ valid: false, error: 'URL is required' });
+    test('non-string url → invalid', async () => {
+      await expect(realWebhook.validateWebhookUrl(12345)).resolves.toEqual({ valid: false, error: 'URL is required' });
     });
 
-    test('malformed url → invalid format', () => {
-      expect(realWebhook.validateWebhookUrl('not a url')).toEqual({ valid: false, error: 'Invalid URL format' });
+    test('malformed url → invalid format', async () => {
+      await expect(realWebhook.validateWebhookUrl('not a url')).resolves.toEqual({ valid: false, error: 'Invalid URL format' });
     });
 
-    test('http (non-https) → rejected', () => {
-      expect(realWebhook.validateWebhookUrl('http://example.com/hook')).toEqual({
+    test('http (non-https) → rejected', async () => {
+      await expect(realWebhook.validateWebhookUrl('http://example.com/hook')).resolves.toEqual({
         valid: false,
         error: 'Only HTTPS URLs are allowed',
       });
@@ -664,38 +665,38 @@ describe('real webhook.js implementation (unmocked)', () => {
       ['172.31.x private (upper bound)', 'https://172.31.255.254/hook'],
       ['192.168.x private', 'https://192.168.1.1/hook'],
       ['169.254.x link-local', 'https://169.254.169.254/hook'],
-    ])('%s is blocked', (_label, url) => {
-      const result = realWebhook.validateWebhookUrl(url);
+    ])('%s is blocked', async (_label, url) => {
+      const result = await realWebhook.validateWebhookUrl(url);
       expect(result).toEqual({ valid: false, error: 'Internal or private IPs are not allowed' });
     });
 
-    test('172.15.x (just below the private range) is NOT blocked — regex boundary is exact', () => {
-      expect(realWebhook.validateWebhookUrl('https://172.15.255.255/hook')).toEqual({ valid: true });
+    test('172.15.x (just below the private range) is NOT blocked — regex boundary is exact', async () => {
+      await expect(realWebhook.validateWebhookUrl('https://172.15.255.255/hook')).resolves.toEqual({ valid: true });
     });
 
-    test('172.32.x (just above the private range) is NOT blocked — regex boundary is exact', () => {
-      expect(realWebhook.validateWebhookUrl('https://172.32.0.1/hook')).toEqual({ valid: true });
+    test('172.32.x (just above the private range) is NOT blocked — regex boundary is exact', async () => {
+      await expect(realWebhook.validateWebhookUrl('https://172.32.0.1/hook')).resolves.toEqual({ valid: true });
     });
 
-    // Quirk #5 (SECURITY GAP): Node's URL parser serializes IPv6 hostnames
-    // WITH brackets (e.g. "[::1]"), but SSRF_BLOCKLIST's IPv6 patterns
-    // (/^::1$/, /^fc00:/i, /^fd00:/i) have no bracket handling, so they never
-    // match against the real .hostname value. These entries are effectively
-    // dead code. Pinning CURRENT behavior (valid: true) so a future fix shows
-    // up as an intentional test change rather than a silent regression.
-    test('SECURITY GAP: [::1] IPv6 loopback is NOT actually blocked', () => {
-      const result = realWebhook.validateWebhookUrl('https://[::1]/hook');
-      expect(result.valid).toBe(true);
+    // Updated 2026-09: the bracket-stripping fix at the top of validateWebhookUrl
+    // (hostname.replace(/^\[|\]$/g, '')) now normalizes IPv6 literals like
+    // '[::1]' to '::1' BEFORE the SSRF_BLOCKLIST regex checks run, so these
+    // addresses ARE correctly blocked. Verified directly against the live
+    // implementation (returns { valid: false, error: 'Internal or private IPs
+    // are not allowed' }). This previously-documented gap no longer exists.
+test('[::1] IPv6 loopback is blocked', async () => {
+      const result = await realWebhook.validateWebhookUrl('https://[::1]/hook');
+      expect(result).toEqual({ valid: false, error: 'Internal or private IPs are not allowed' });
     });
 
-    test('SECURITY GAP: [fc00::1] IPv6 ULA is NOT actually blocked', () => {
-      const result = realWebhook.validateWebhookUrl('https://[fc00::1]/hook');
-      expect(result.valid).toBe(true);
+    test('[fc00::1] IPv6 ULA is blocked', async () => {
+      const result = await realWebhook.validateWebhookUrl('https://[fc00::1]/hook');
+      expect(result).toEqual({ valid: false, error: 'Internal or private IPs are not allowed' });
     });
 
-    test('SECURITY GAP: [fd00::1] IPv6 ULA is NOT actually blocked', () => {
-      const result = realWebhook.validateWebhookUrl('https://[fd00::1]/hook');
-      expect(result.valid).toBe(true);
+    test('[fd00::1] IPv6 ULA is blocked', async () => {
+      const result = await realWebhook.validateWebhookUrl('https://[fd00::1]/hook');
+      expect(result).toEqual({ valid: false, error: 'Internal or private IPs are not allowed' });
     });
   });
 
@@ -722,7 +723,7 @@ describe('real webhook.js implementation (unmocked)', () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
       const tenant = {
         id: 'tenant_abcdefgh',
-        webhookUrl: 'https://hooks.slack.com/x',
+        webhookUrl: 'https://1.1.1.1/x',
         webhookType: 'slack',
         storeUrl: 'https://mystore.com',
       };
@@ -730,7 +731,7 @@ describe('real webhook.js implementation (unmocked)', () => {
       await realWebhook.sendWebhookAlert(tenant, 5, 123.456, 10, false);
 
       const [url, options] = global.fetch.mock.calls[0];
-      expect(url).toBe('https://hooks.slack.com/x');
+      expect(url).toBe('https://1.1.1.1/x');
       const payload = JSON.parse(options.body);
       expect(payload.attachments[0].blocks[0].text.text).toContain('mystore.com');
       expect(payload.attachments[0].blocks[1].fields[0].text).toContain('5 attempts');
@@ -740,7 +741,7 @@ describe('real webhook.js implementation (unmocked)', () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
       const tenant = {
         id: 'tenant_2',
-        webhookUrl: 'https://discord.com/api/webhooks/x',
+        webhookUrl: 'https://1.1.1.1/api/webhooks/x',
         webhookType: 'discord',
         storeUrl: null,
       };
@@ -757,7 +758,7 @@ describe('real webhook.js implementation (unmocked)', () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
       const tenant = {
         id: 'tenant_3',
-        webhookUrl: 'https://example.com/hook',
+        webhookUrl: 'https://1.1.1.1/hook',
         webhookType: 'custom',
         storeUrl: 'https://x.com',
       };
@@ -774,7 +775,7 @@ describe('real webhook.js implementation (unmocked)', () => {
     // but sendWebhookAlert's isTest detection is strict `extraContext === true`.
     test('QUIRK: object extraContext with isTest:true does NOT actually mark the payload as a test', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: true, status: 200 });
-      const tenant = { id: 'tenant_4', webhookUrl: 'https://example.com/hook', webhookType: 'custom', storeUrl: null };
+      const tenant = { id: 'tenant_4', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom', storeUrl: null };
 
       await realWebhook.sendWebhookAlert(tenant, 1, 0.30, 0, { alertType: 'test', isTest: true });
 
@@ -788,7 +789,7 @@ describe('real webhook.js implementation (unmocked)', () => {
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 503, text: async () => 'unavailable' })
         .mockResolvedValueOnce({ ok: true, status: 200 });
-      const tenant = { id: 'tenant_5', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_5', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).resolves.toBeUndefined();
       expect(global.fetch).toHaveBeenCalledTimes(2);
@@ -799,7 +800,7 @@ describe('real webhook.js implementation (unmocked)', () => {
         .fn()
         .mockResolvedValueOnce({ ok: false, status: 429, text: async () => 'rate limited' })
         .mockResolvedValueOnce({ ok: true, status: 200 });
-      const tenant = { id: 'tenant_7', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_7', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).resolves.toBeUndefined();
       expect(global.fetch).toHaveBeenCalledTimes(2);
@@ -807,7 +808,7 @@ describe('real webhook.js implementation (unmocked)', () => {
 
     test('non-retryable 4xx (404) throws immediately, no retry', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 404, text: async () => 'not found' });
-      const tenant = { id: 'tenant_6', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_6', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).rejects.toThrow('HTTP 404');
       expect(global.fetch).toHaveBeenCalledTimes(1);
@@ -815,7 +816,7 @@ describe('real webhook.js implementation (unmocked)', () => {
 
     test('exhausts all 3 retries on persistent 500 → throws last error', async () => {
       global.fetch = jest.fn().mockResolvedValue({ ok: false, status: 500, text: async () => 'server error' });
-      const tenant = { id: 'tenant_8', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_8', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).rejects.toThrow('HTTP 500');
       expect(global.fetch).toHaveBeenCalledTimes(3);
@@ -825,20 +826,22 @@ describe('real webhook.js implementation (unmocked)', () => {
       const abortErr = new Error('The operation was aborted');
       abortErr.name = 'AbortError';
       global.fetch = jest.fn().mockRejectedValue(abortErr);
-      const tenant = { id: 'tenant_10', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_10', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).rejects.toThrow('aborted');
       expect(global.fetch).toHaveBeenCalledTimes(3);
     });
 
-    // Quirk #7: a generic thrown error (no .response, not AbortError) breaks
-    // the retry loop after a single attempt.
-    test('QUIRK: generic network error (no .response) is NOT retried despite RETRIES=3', async () => {
+    // Updated 2026-09: aligned with the M1 fix intent in src/lib/webhook.js -
+    // any thrown error that is not a deliberate nonRetryable throw and not an
+    // AbortError is a transient failure and gets retried up to RETRIES times,
+    // same as generic network errors like ENOTFOUND.
+    test('generic network error (no .response) IS retried like any other transient failure', async () => {
       global.fetch = jest.fn().mockRejectedValue(new Error('getaddrinfo ENOTFOUND'));
-      const tenant = { id: 'tenant_11', webhookUrl: 'https://example.com/hook', webhookType: 'custom' };
+      const tenant = { id: 'tenant_11', webhookUrl: 'https://1.1.1.1/hook', webhookType: 'custom' };
 
       await expect(realWebhook.sendWebhookAlert(tenant, 1, 10)).rejects.toThrow('ENOTFOUND');
-      expect(global.fetch).toHaveBeenCalledTimes(1);
+      expect(global.fetch).toHaveBeenCalledTimes(3);
     });
   });
 });

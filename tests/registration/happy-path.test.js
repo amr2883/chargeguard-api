@@ -43,7 +43,7 @@ describe('Happy path — registration through email verification (production mod
     expect(tenant).not.toBeNull();
     tenantId = tenant.id;
 
-    expect(tenant.plan).toBe('early_access');
+    expect(tenant.plan).toBe('starter');
     expect(tenant.emailVerified).toBe(false);
     expect(tenant.apiKeyHash).toMatch(/^[0-9a-f]{64}$/);
     expect(tenant.apiKey).not.toBeNull(); // transiently held pre-verification — expected here
@@ -51,6 +51,8 @@ describe('Happy path — registration through email verification (production mod
     expect(tenant.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
     expect(tenant.allowedDomains).toContain('example-happy-path-store.com');
 
+    // Early Access promo removed (see src/routes/risk.js) — every new
+    // registration now starts on the free 'starter' plan.
     const expiresAt = new Date(tenant.emailVerifyExpiresAt).getTime();
     const expectedExpiry = Date.now() + 24 * 60 * 60 * 1000;
     expect(Math.abs(expiresAt - expectedExpiry)).toBeLessThan(60 * 1000); // within 60s tolerance
@@ -109,6 +111,6 @@ describe('Happy path — registration through email verification (production mod
 
     expect(tenant.emailVerified).toBe(true);
     expect(tenant.apiKey).toBeNull();
-    expect(tenant.plan).toBe('early_access');
+    expect(tenant.plan).toBe('starter');
   });
 });
