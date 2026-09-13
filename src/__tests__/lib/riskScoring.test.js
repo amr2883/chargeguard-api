@@ -70,7 +70,7 @@ describe('riskScoring.js', () => {
   });
 
   test('should apply blacklist penalty', async () => {
-    const blacklistEntry = { email: 'test@example.com' };
+    const blacklistEntry = { type: 'EMAIL', value: 'test@example.com' };
     const result = await calculateRiskScore(createOrder(), allOrders, disputes, [blacklistEntry], null, false);
     expect(result.score).toBeLessThan(100);
     expect(result.flags.some(f => f.text.includes('fraud blacklist'))).toBe(true);
@@ -90,7 +90,7 @@ describe('riskScoring.js', () => {
 
     const result = await calculateRiskScore(order, ordersWithSameDevice, disputes, blacklist, null, false);
     expect(result.score).toBeLessThan(85);
-    expect(result.flags.some(f => f.text.includes('Device fingerprint linked to'))).toBe(true);
+    expect(result.flags.some(f => f.text === 'device_velocity_blocked')).toBe(true);
   });
 
   test('should survive when IP and BIN intelligence fail (timeout/null)', async () => {
@@ -128,7 +128,8 @@ describe('riskScoring.js', () => {
            createdAt: new Date(now - (4 - i) * 60000).toISOString(),
       riskLevel: i === 1 ? null : (i <= 2 ? 'low' : 'medium'),
       decision: i === 1 ? null : (i <= 2 ? 'approve' : 'review'),
-      payment_details: { card_bin: '411111' }, // BIN موحد لاختبار BIN Velocity
+      payment_details: { card_bin: '411111' },
+        cardBinPrefix: '411111', // BIN موحد لاختبار BIN Velocity
       });
     }
 
@@ -153,8 +154,8 @@ describe('riskScoring.js', () => {
 
     expect(result.score).toBeLessThanOrEqual(30);
     expect(result.decision).toMatch(/Block/);
-    expect(result.flags.some(f => f.text.includes('Device fingerprint linked to 4 orders'))).toBe(true);
-    expect(result.flags.some(f => f.text.includes('4 orders from same IP'))).toBe(true);
-    expect(result.flags.some(f => f.text.includes('BIN attack pattern detected'))).toBe(true);
+    expect(result.flags.some(f => f.text === 'device_velocity_blocked')).toBe(true);
+    expect(result.flags.some(f => f.text === 'ip_velocity_high')).toBe(true);
+    expect(result.flags.some(f => f.text === 'bin_velocity_high' || f.text === 'bin_velocity_high_prepaid')).toBe(true);
   });
 });

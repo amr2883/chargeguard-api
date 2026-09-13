@@ -507,7 +507,9 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       // since the redirect target is only known at request time.
       if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
         console.error(`${label} ❌ Refused to follow redirect response — not retrying`);
-        throw new Error('Webhook URL returned a redirect; redirects are not followed for security reasons.');
+        const redirectErr = new Error('Webhook URL returned a redirect; redirects are not followed for security reasons.');
+        redirectErr.nonRetryable = true;
+        throw redirectErr;
       }
 
       if (response.ok) {
@@ -518,17 +520,26 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       // Non-retryable client errors
       if (response.status >= 400 && response.status < 500 && response.status !== 429) {
         console.error(`${label} ❌ Failed with ${response.status} — not retrying`);
-        throw new Error(`HTTP ${response.status}: ${await response.text().catch(() => '')}`);
+        const clientErr = new Error(`HTTP ${response.status}: ${await response.text().catch(() => '')}`);
+        clientErr.nonRetryable = true;
+        throw clientErr;
       }
 
       if (!RETRYABLE_CODES.has(response.status) || attempt === RETRIES) {
-        throw new Error(`HTTP ${response.status}: ${await response.text().catch(() => '')}`);
+        const statusErr = new Error(`HTTP ${response.status}: ${await response.text().catch(() => '')}`);
+        statusErr.nonRetryable = true;
+        throw statusErr;
       }
 
       console.warn(`${label} ⚠️ Attempt ${attempt} failed with ${response.status}`);
 
     } catch (err) {
       lastError = err;
+
+      if (err.nonRetryable) {
+        console.error(`${label} Non-retryable error on attempt ${attempt} - stopping immediately, no further retries.`);
+        break;
+      }
 
       // M1 fix: native fetch() never attaches err.response — that's an
       // Axios convention this code incorrectly assumed. Any thrown

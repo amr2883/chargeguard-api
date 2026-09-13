@@ -342,7 +342,7 @@ describe('risk floor — hasCriticalSignal', () => {
     // blacklist match: -80. raw = 100-80 = 20 (<40).
     const result = await runFloor({
       amount: 50,
-      blacklist: [{ ip: '203.0.113.10' }],
+      blacklist: [{ type: 'IP', value: '203.0.113.10' }],
     });
     expect(result.score).toBe(20);
     expect(result.decision).toBe('High Risk — Block');
