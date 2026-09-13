@@ -288,9 +288,9 @@ describe('economic override branches (integration via calculateRiskScore)', () =
     expect(result.economicData.fraudProb).toBeCloseTo(Number(expectedEcon.fraudProb.toFixed(4)), 3);
     expect(result.economicData.baseThreshold).toBeCloseTo(Number(expectedEcon.baseThreshold.toFixed(2)), 1);
 
-    const overrideFlag = result.flags.find((f) => f.text.includes('fraud probability'));
+    const overrideFlag = result.flags.find((f) => f.text === 'economic_risk_block');
     expect(overrideFlag).toBeDefined();
-    expect(overrideFlag.text).toContain('above safe limit');
+    expect(overrideFlag.severity).toBe('high');
   });
 
   test('Override 1 does NOT fire when fraudProb <= 0.25, even though the absolute expected loss is large', async () => {
