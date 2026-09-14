@@ -28,8 +28,16 @@ ChargeGuard is a smart, multi-layered defense system built specifically for WooC
 
 1. Upload the `woocommerce-chargeguard` folder to the `/wp-content/plugins/` directory.
 2. Activate the plugin through the 'Plugins' menu in WordPress.
-3. Go to the **WooCommerce > Settings > ChargeGuard** page and enter your API Key and Merchant ID.
-4. The firewall is now active and protecting your checkout.
+3. Go to the **WooCommerce > Settings > ChargeGuard** page and enter your API Key and Merchant ID (sent in your welcome email).
+4. Save changes. The firewall is now active and protecting your checkout.
+
+= Confirm It Is Working =
+
+Visit your store checkout page and try placing a test order using a disposable email address (for example anything@mailinator.com). The order should be blocked, confirming the firewall is active.
+
+= Need Help? =
+
+Reply to your welcome email or contact support@chargeguard.app.
 
 == Frequently Asked Questions ==
 
