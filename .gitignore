@@ -54,3 +54,6 @@ jscpd-report/
 audit.ps1
 cleanup.ps1
 jscpd-report/
+
+audit_report_*.txt
+chargeguard-woocommerce*.zip
