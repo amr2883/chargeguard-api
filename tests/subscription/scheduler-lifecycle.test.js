@@ -42,6 +42,11 @@
 //     find "grace period ended" tenants without a separate field.
 // ══════════════════════════════════════════════════════════════════════════════
 
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/email', () => ({
   sendRenewalReminderEmail: jest.fn().mockResolvedValue(undefined),
   sendGracePeriodEmail: jest.fn().mockResolvedValue(undefined),

@@ -28,6 +28,11 @@
  *     STARTUP_DELAY_MS the simulated "now" lands exactly on our target date.
  */
 
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/db', () => ({
   tenant: {},
   alertLog: {},

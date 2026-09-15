@@ -25,6 +25,11 @@
  *     the check function directly.
  */
 
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/db', () => ({
   tenant: {},
   blockedAttempt: {},
