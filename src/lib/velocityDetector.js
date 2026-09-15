@@ -1,11 +1,11 @@
-﻿// src/lib/velocityDetector.js
-// ╪╖╪ذ┘é╪ر ┘â╪┤┘ ╪│╪▒╪╣╪ر ┘à╪ص╪د┘ê┘╪د╪ز ╪د┘╪»┘╪╣ ظ¤ persistent via CardTestAttempt (Prisma)
+// src/lib/velocityDetector.js
+// Velocity / repeated-attempt detection layer — persisted via CardTestAttempt (Prisma)
 
 const crypto = require('crypto');
 const db     = require('./db');
 const logger = require('./logger');
 
-const FAILURE_WINDOW_MS = 10 * 60 * 1000; // 10 ╪»┘é╪د╪خ┘é
+const FAILURE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 const BLOCK_DURATION_MS = 60 * 60 * 1000; // 1 ╪│╪د╪╣╪ر
 
 const THRESHOLDS = {
@@ -26,7 +26,7 @@ const REVIEW_THRESHOLDS = {
   DEVICE: 12,
 };
 
-// ظ¤ظ¤ظ¤ DB-Error Fallback Store ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤ظ¤
+// — DB-Error Fallback Store — 
 // Used ONLY when the authoritative CardTestAttempt count query below
 // throws (transient DB blip, Prisma timeout, schema mismatch, etc.).
 // Mirrors two existing patterns in this codebase rather than inventing a
@@ -36,8 +36,8 @@ const REVIEW_THRESHOLDS = {
 // (class-dynamic-firewall.php resolve_api_unavailable_decision()).
 //
 // Without this, a DB error on this one table silently asserted "this
-// request is clean" (blocked: false) ظ¤ a positive claim, not a neutral
-// one ظ¤ which is a stronger and more dangerous failure mode than simply
+// request is clean" (blocked: false) — a positive claim, not a neutral
+// one — which is a stronger and more dangerous failure mode than simply
 // having no opinion. This fallback ensures a DB error degrades detection
 // rather than disabling it.
 //
@@ -45,7 +45,7 @@ const REVIEW_THRESHOLDS = {
 // in-memory fallback): this store is per-process, not shared across
 // instances. Under horizontal scaling, an attacker could in principle
 // split traffic across instances to stay under each instance's local
-// threshold ظ¤ but only during an actual DB outage affecting this table,
+// threshold — but only during an actual DB outage affecting this table,
 // which is itself a narrow and transient window, not the steady-state
 // detection posture. A future improvement, if this ever needs
 // hardening further, is to reuse binSequenceDetector.js's existing Redis
@@ -65,7 +65,7 @@ function dbErrorFallbackRecordAndCheck(key, threshold, now) {
   return fresh.length >= threshold;
 }
 
-// Periodic sweep so this Map never grows unbounded ظ¤ same cleanup
+// Periodic sweep so this Map never grows unbounded — same cleanup
 // pattern used by binSequenceDetector.js's memoryStore.
 setInterval(() => {
   const now = Date.now();
@@ -76,7 +76,7 @@ setInterval(() => {
   }
 }, 5 * 60 * 1000).unref();
 
-// GDPR-safe hashing ظ¤ ┘┘╪│ ┘┘à╪╖ risk.js
+// GDPR-safe hashing — same salted-hash approach used in risk.js
 const SECRET_SALT = process.env.SECRET_SALT;
 if (!SECRET_SALT) {
   throw new Error('[velocityDetector] SECRET_SALT environment variable is required');
@@ -113,7 +113,7 @@ async function recordFailedAttempt({ ip, deviceFingerprint, merchantId = 'unknow
  * @returns {Promise<{blocked: boolean, reason: string|null, dbError?: boolean}>}
  *   dbError is present and true only when the authoritative DB query
  *   failed and this result came from the in-memory fallback path
- *   instead ظ¤ see DB-Error Fallback Store above. Absent (undefined) on
+ * instead — see DB-Error Fallback Store above. Absent (undefined) on
  *   every normal, successfully-scored path, so existing callers that
  *   only read `.blocked` are unaffected.
  */
@@ -179,7 +179,7 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown', st
       }
     }
   } catch (err) {
-    // Was previously: log and return { blocked: false, reason: null } ظ¤
+ // Was previously: log and return { blocked: false, reason: null } — 
     // structurally identical to a genuine pass, which meant a DB error
     // silently asserted "clean" rather than "unknown". This is the last
     // of the three independent fail-open paths (circuit breaker, quota
@@ -192,7 +192,7 @@ async function checkVelocity({ ip, deviceFingerprint, merchantId = 'unknown', st
     // this table, per the DB errors this function can actually throw).
     logger.error(
       { module: 'velocityDetector', err, ip: ip ? 'present' : 'absent', deviceFingerprint: deviceFingerprint ? 'present' : 'absent' },
-      'checkVelocity DB error ظ¤ using in-memory fallback rate limit instead of failing open'
+ 'checkVelocity DB error — using in-memory fallback rate limit instead of failing open'
     );
 
     try {
