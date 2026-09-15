@@ -31,6 +31,11 @@
 jest.mock('../../src/lib/reportDataService', () => ({
   buildMonthlyReportData: jest.fn(),
 }));
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/email', () => ({
   sendMonthlyReportEmail: jest.fn(),
 }));

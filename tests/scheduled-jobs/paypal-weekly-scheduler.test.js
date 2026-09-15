@@ -50,6 +50,11 @@
  *   to let the dispatch's promise chain settle before asserting.
  */
 
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/db', () => ({}));
 
 jest.mock('../../src/lib/email', () => ({

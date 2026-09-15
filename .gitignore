@@ -37,3 +37,20 @@ set_blacklist.php
 status_breakdown.php
 stripe.exe
 wp-patch.php
+
+# --- Added by cleanup script 2026-09-15 ---
+*.csv
+tree_output*
+project_structure*
+file_as_base64*
+*_report*.txt
+*_report*.csv
+check_encoding*.ps1
+fix_*encoding*.ps1
+fix_test.ps1
+
+jscpd-report/
+
+audit.ps1
+cleanup.ps1
+jscpd-report/

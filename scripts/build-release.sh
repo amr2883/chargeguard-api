@@ -16,6 +16,10 @@ PLUGIN_DIR="woocommerce-chargeguard"
 BUILD_DIR="build"
 ZIP_NAME="chargeguard-woocommerce-${VERSION}.zip"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/stage-release.sh
+source "${SCRIPT_DIR}/lib/stage-release.sh"
+
 if [ ! -d "$PLUGIN_DIR" ]; then
   echo "Error: ${PLUGIN_DIR} directory not found. Run this from the repo root."
   exit 1
@@ -29,23 +33,20 @@ rm -f "${PLUGIN_DIR}/chargeguard-woocommerce.php.bak"
 
 echo "==> Verifying version bump"
 if ! grep -q "Version:.*${VERSION}" "${PLUGIN_DIR}/chargeguard-woocommerce.php"; then
-  echo "Error: version bump failed — check the sed pattern against the actual header line."
+  echo "Error: version bump failed -- check the sed pattern against the actual header line."
   exit 1
 fi
 
 echo "==> Installing production Composer dependencies (no dev deps in the shipped ZIP)"
 (cd "$PLUGIN_DIR" && composer install --no-dev --optimize-autoloader)
 
-echo "==> Packaging"
-rm -rf "$BUILD_DIR"
-mkdir -p "$BUILD_DIR/woocommerce-chargeguard"
-rsync -a \
-  --exclude='.git' \
-  --exclude='node_modules' \
-  --exclude='.DS_Store' \
-  "$PLUGIN_DIR/" "$BUILD_DIR/woocommerce-chargeguard/"
+# .distignore-driven staging + forbidden-file safety net (shared with
+# build-release-local.sh via scripts/lib/stage-release.sh).
+stage_release "$PLUGIN_DIR" "${BUILD_DIR}/${PLUGIN_DIR}"
 
-(cd "$BUILD_DIR" && zip -r -X "../${ZIP_NAME}" woocommerce-chargeguard >/dev/null)
+echo "==> Compressing"
+rm -f "${ZIP_NAME}"
+(cd "$BUILD_DIR" && zip -r -X "../${ZIP_NAME}" "$PLUGIN_DIR" >/dev/null)
 
 echo "==> Computing checksum"
 CHECKSUM=$(shasum -a 256 "${ZIP_NAME}" | awk '{print $1}')

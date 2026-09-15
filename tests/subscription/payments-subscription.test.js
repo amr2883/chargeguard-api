@@ -37,6 +37,11 @@
 //     which are reserved for the scheduler test file).
 // ══════════════════════════════════════════════════════════════════════════════
 
+jest.mock('../../src/lib/distributedLock', () => ({
+  acquireLock: jest.fn().mockResolvedValue(true),
+  INSTANCE_ID: 'test-instance',
+}));
+
 jest.mock('../../src/lib/db', () => ({
   tenant: {
     findUnique: jest.fn(),
