@@ -1129,7 +1129,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
           error: 'Request blocked due to suspicious request velocity',
           reason: 'device_velocity_blocked',
           decision: 'block',
-          flags: [{ severity: 'critical', text: 'device_velocity_blocked' }]
+          flags: [{ severity: 'critical', code: 'device_velocity_blocked', text: 'device_velocity_blocked' }]
         });
       }
     } else if (ipAddress) {
@@ -1520,7 +1520,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       const isNewCustomerComputed = computed.isNewCustomer || false;
       const amountAnomaly = (computed.orderMultiple || 0) >= 3;
 
-      const shippingMismatchFlag = riskResult.flags.find(f => f.text === 'shipping_billing_mismatch');
+      const shippingMismatchFlag = riskResult.flags.find(f => f.code === 'shipping_billing_mismatch');
       const shippingBillingMismatch = !!shippingMismatchFlag;
 
       const signalsSnapshot = {
@@ -2924,7 +2924,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
           error: 'Request blocked due to suspicious request velocity',
           reason: 'device_velocity_blocked',
           decision: 'block',
-          flags: [{ severity: 'critical', text: 'device_velocity_blocked' }]
+          flags: [{ severity: 'critical', code: 'device_velocity_blocked', text: 'device_velocity_blocked' }]
         });
       }
     } else if (extracted.ipAddress) {
