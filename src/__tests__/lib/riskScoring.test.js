@@ -90,7 +90,7 @@ describe('riskScoring.js', () => {
 
     const result = await calculateRiskScore(order, ordersWithSameDevice, disputes, blacklist, null, false);
     expect(result.score).toBeLessThan(85);
-    expect(result.flags.some(f => f.text === 'device_velocity_blocked')).toBe(true);
+    expect(result.flags.some(f => f.code === 'device_velocity_blocked')).toBe(true);
   });
 
   test('should survive when IP and BIN intelligence fail (timeout/null)', async () => {
@@ -154,8 +154,8 @@ describe('riskScoring.js', () => {
 
     expect(result.score).toBeLessThanOrEqual(30);
     expect(result.decision).toMatch(/Block/);
-    expect(result.flags.some(f => f.text === 'device_velocity_blocked')).toBe(true);
-    expect(result.flags.some(f => f.text === 'ip_velocity_high')).toBe(true);
-    expect(result.flags.some(f => f.text === 'bin_velocity_high' || f.text === 'bin_velocity_high_prepaid')).toBe(true);
+    expect(result.flags.some(f => f.code === 'device_velocity_blocked')).toBe(true);
+    expect(result.flags.some(f => f.code === 'ip_velocity_high')).toBe(true);
+    expect(result.flags.some(f => f.code === 'bin_velocity_high' || f.code === 'bin_velocity_high_prepaid')).toBe(true);
   });
 });

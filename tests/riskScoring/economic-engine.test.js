@@ -288,7 +288,7 @@ describe('economic override branches (integration via calculateRiskScore)', () =
     expect(result.economicData.fraudProb).toBeCloseTo(Number(expectedEcon.fraudProb.toFixed(4)), 3);
     expect(result.economicData.baseThreshold).toBeCloseTo(Number(expectedEcon.baseThreshold.toFixed(2)), 1);
 
-    const overrideFlag = result.flags.find((f) => f.text === 'economic_risk_block');
+    const overrideFlag = result.flags.find((f) => f.code === 'economic_risk_block');
     expect(overrideFlag).toBeDefined();
     expect(overrideFlag.severity).toBe('high');
   });

@@ -235,7 +235,7 @@ describe('Tier 1 — blacklist', () => {
     const order = makeOrder({ email: 'blocked@example.com' });
     const result = await runScoring({
       order,
-      blacklist: [{ email: 'blocked@example.com' }],
+      blacklist: [{ type: 'EMAIL', value: 'blocked@example.com', normalizedValue: 'blocked@example.com' }],
     });
     expect(result.flags.some((f) => f.severity === 'critical' && f.text.includes('fraud blacklist'))).toBe(true);
     expect(result.score).toBe(20);
@@ -245,7 +245,7 @@ describe('Tier 1 — blacklist', () => {
     const order = makeOrder({ ipAddress: '198.51.100.9' });
     const result = await runScoring({
       order,
-      blacklist: [{ ip: '198.51.100.9' }],
+      blacklist: [{ type: 'IP', value: '198.51.100.9', normalizedValue: '198.51.100.9' }],
     });
     expect(result.flags.some((f) => f.severity === 'critical' && f.text.includes('fraud blacklist'))).toBe(true);
     expect(result.score).toBe(20);
@@ -255,7 +255,7 @@ describe('Tier 1 — blacklist', () => {
     const order = makeOrder({ deviceFingerprint: 'device-abc-123' });
     const result = await runScoring({
       order,
-      blacklist: [{ deviceId: 'device-abc-123' }],
+      blacklist: [{ type: 'DEVICE_FINGERPRINT', value: 'device-abc-123', normalizedValue: 'device-abc-123' }],
     });
     expect(result.flags.some((f) => f.severity === 'critical' && f.text.includes('fraud blacklist'))).toBe(true);
     expect(result.score).toBe(20);
@@ -265,7 +265,7 @@ describe('Tier 1 — blacklist', () => {
     const order = makeOrder({ email: 'clean@example.com', ipAddress: '203.0.113.10' });
     const result = await runScoring({
       order,
-      blacklist: [{ email: 'someoneelse@example.com', ip: '9.9.9.9', deviceId: 'other-device' }],
+      blacklist: [{ type: 'EMAIL', value: 'someoneelse@example.com', normalizedValue: 'someoneelse@example.com' }],
     });
     expect(result.flags.some((f) => f.text.includes('fraud blacklist'))).toBe(false);
   });
@@ -346,7 +346,7 @@ describe('Tier 1 — stacking', () => {
     const result = await runScoring({
       order,
       disputes,
-      blacklist: [{ email: 'blocked@example.com' }],
+      blacklist: [{ type: 'EMAIL', value: 'blocked@example.com', normalizedValue: 'blocked@example.com' }],
     });
     const criticalFlags = result.flags.filter((f) => f.severity === 'critical');
     expect(criticalFlags.length).toBeGreaterThanOrEqual(3);
