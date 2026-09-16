@@ -57,3 +57,6 @@ jscpd-report/
 
 audit_report_*.txt
 chargeguard-woocommerce*.zip
+
+*.bak
+.env.backup*
