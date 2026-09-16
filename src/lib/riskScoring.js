@@ -174,6 +174,13 @@ async function calculateRiskScore(
                              //   skip expensive external intel (IP/email/BIN),
                              //   everything else still runs at full strength.
 ) {
+  // Defense-in-depth: order.amount قد يوصل كـ string من أي مسار (JSON body
+  // بدون type coercion). نطبّعه هنا مرة واحدة عشان .toFixed() والمقارنات
+  // العددية في باقي الدالة تفضل آمنة مهما كان مصدر الاستدعاء.
+  const _rawAmount = order.amount;
+  const _n = typeof _rawAmount === "number" ? _rawAmount : parseFloat(_rawAmount);
+  order.amount = Number.isFinite(_n) && _n >= 0 ? _n : 0;
+
     let score = 100;
   let sameIPOrders = [];
   let sameEmailOrders = [];
@@ -274,21 +281,21 @@ async function calculateRiskScore(
     score -= 40;
     flags.push({
       severity: "critical",
-      text: "bot_detected",
+      code: "bot_detected", text: `Automated browser detected — bot score: ${pixelBotScore} (threshold: 80)`,
     });
     topSignals.push({ type: "BOT", value: "suspicious", contribution: -40 });
   } else if (pixelBotScore >= 80) {
     score -= 40;
     flags.push({
       severity: "critical",
-      text: "bot_detected",
+      code: "bot_detected", text: `Strong bot signals detected — bot score: ${pixelBotScore}/100 (threshold: 80)`,
     });
     topSignals.push({ type: "BOT", value: "suspicious", contribution: -40 });
   } else if (pixelBotScore >= 20) {
     score -= 15;
     flags.push({
       severity: "medium",
-      text: "bot_suspicious",
+      code: "bot_suspicious", text: `Suspicious browser behavior detected — bot score: ${pixelBotScore}/100 (threshold: 20)`,
     });
     topSignals.push({ type: "BOT", value: "elevated", contribution: -15 });
   }
@@ -342,7 +349,7 @@ async function calculateRiskScore(
       : 1.0;
     const disputePenalty = Math.round(60 * earlyDeviceTrustFactor);
     score -= disputePenalty;
-    flags.push({ severity: earlyDeviceTrustFactor >= 0.75 ? "critical" : "high", text: "device_dispute_history" });
+    flags.push({ severity: earlyDeviceTrustFactor >= 0.75 ? "critical" : "high", code: "device_dispute_history", text: `Device fingerprint linked to ${deviceDisputes.length} lost dispute${deviceDisputes.length > 1 ? "s" : ""}` });
     topSignals.push({ type: "DEVICE_DISPUTE", value: "lost", contribution: -disputePenalty });
   }
 
@@ -351,7 +358,7 @@ async function calculateRiskScore(
   );
   if (ipDisputes.length >= 3) {
     score -= 50;
-    flags.push({ severity: "critical", text: "ip_dispute_network" });
+    flags.push({ severity: "critical", code: "ip_dispute_network", text: `IP address linked to ${ipDisputes.length} disputes across network` });
     topSignals.push({ type: "IP_DISPUTE_NETWORK", value: ipDisputes.length, contribution: -50 });
   }
 
@@ -413,7 +420,7 @@ async function calculateRiskScore(
     // signalsSnapshot كانت دايمًا false. نفس السبب الجذري لـ Bug #10
     // (SHIPPING_BILLING_MISMATCH learning signal ميت) — التوحيد بيحل
     // الاتنين مرة واحدة.
-    flags.push({ severity: "high", text: "shipping_billing_mismatch" });
+    flags.push({ severity: "high", code: "shipping_billing_mismatch", text: "shipping_billing_mismatch" });
   }
 
 
@@ -453,7 +460,7 @@ async function calculateRiskScore(
       highValuePenaltyApplied = true;
       flags.push({
         severity: "high",
-        text: "order_value_extreme_anomaly",
+        code: "order_value_extreme_anomaly", text: `Order value (${order.amount.toFixed(0)}) is ${Math.round(orderMultiple)}x above store average — extreme anomaly${isNewCustomer ? " from new customer" : ""}`,
       });
       topSignals.push({ type: "HIGH_VALUE", value: "extreme", contribution: -penalty });
     } else if (orderMultiple >= 3) {
@@ -463,7 +470,10 @@ async function calculateRiskScore(
       highValuePenaltyApplied = true;
       flags.push({
         severity,
-        text: isNewCustomer ? "new_customer_high_value_order" : "high_value_order",
+        code: isNewCustomer ? "new_customer_high_value_order" : "high_value_order",
+        text: isNewCustomer
+          ? `New customer with order ${Math.round(orderMultiple)}x above store average`
+          : `Order value ${Math.round(orderMultiple)}x above store average`,
       });
       topSignals.push({ type: "HIGH_VALUE", value: isNewCustomer ? "new_customer" : "returning", contribution: -penalty });
     }
@@ -479,7 +489,7 @@ async function calculateRiskScore(
   );
   if (emailDisputes.length > 0) {
     score -= 30;
-    flags.push({ severity: "high", text: "email_dispute_history" });
+    flags.push({ severity: "high", code: "email_dispute_history", text: `Email linked to ${emailDisputes.length} previous dispute${emailDisputes.length > 1 ? "s" : ""}` });
     topSignals.push({ type: "EMAIL_DISPUTE", value: "lost", contribution: -30 });
   }
 // ─── Authenticated Account Signal ────────────────────────────────────────
@@ -510,7 +520,7 @@ async function calculateRiskScore(
       score -= 15;
       flags.push({
         severity: "high",
-        text: "email_similarity_match",
+        code: "email_similarity_match", text: `Email closely resembles ${similar.similarEmail.length} dispute${similar.similarEmail.length > 1 ? "s" : ""} — possible identity mutation`,
       });
     }
 
@@ -518,7 +528,7 @@ async function calculateRiskScore(
       score -= 10;
       flags.push({
         severity: "medium",
-        text: "ip_subnet_similarity",
+        code: "ip_subnet_similarity", text: `IP address in same subnet as ${similar.similarIP.length} previous dispute${similar.similarIP.length > 1 ? "s" : ""} — network proximity flag`,
       });
     }
 
@@ -526,7 +536,7 @@ async function calculateRiskScore(
       score -= 10;
       flags.push({
         severity: "medium",
-        text: "address_similarity_match",
+        code: "address_similarity_match", text: `Shipping address similar to ${similar.similarAddr.length} previous dispute${similar.similarAddr.length > 1 ? "s" : ""} — possible address mutation`,
       });
     }
   } catch (simErr) {
@@ -542,7 +552,7 @@ async function calculateRiskScore(
       score -= cardPenalty;
       flags.push({
         severity: cardPenalty > 30 ? 'critical' : 'high',
-        text: 'card_reuse_detected',
+        code: "card_reuse_detected", text: `Same card used ${cardHashRecord.attemptCount} times (blocked ${cardHashRecord.blockCount} times)`,
       });
       topSignals.push({ type: 'CARD_HASH', value: 'repeated', contribution: -cardPenalty });
     }
@@ -605,7 +615,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       const disposableDomains = ["tempmail.com", "guerrillamail.com", "mailinator.com", "throwam.com", "trashmail.com", "fakeinbox.com"];
       if (disposableDomains.includes(emailDomain)) {
         score -= 35;
-        flags.push({ severity: "critical", text: "disposable_email_domain" });
+        flags.push({ severity: "critical", code: "disposable_email_domain", text: `Disposable email address detected (${emailDomain}) — high fraud risk` });
       }
     }
   } else if (emailIntelSettled.status === 'rejected') {
@@ -698,17 +708,17 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   if (deviceVelocityCount >= 3) {
     const penalty = Math.round(getW("DEVICE_VELOCITY", "CRITICAL"));
     score -= penalty;
-    flags.push({ severity: "critical", text: "device_velocity_blocked" });
+    flags.push({ severity: "critical", code: "device_velocity_blocked", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "critical", contribution: -penalty });
   } else if (deviceVelocityCount === 2) {
     const penalty = Math.round(getW("DEVICE_VELOCITY", "HIGH"));
     score -= penalty;
-    flags.push({ severity: "high", text: "device_velocity_blocked" });
+    flags.push({ severity: "high", code: "device_velocity_blocked", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "high", contribution: -penalty });
   } else if (deviceVelocityCount === 1) {
     const penalty = Math.round(getW("DEVICE_VELOCITY", "MEDIUM"));
     score -= penalty;
-    flags.push({ severity: "medium", text: "device_velocity_blocked" });
+    flags.push({ severity: "medium", code: "device_velocity_blocked", text: `Device fingerprint linked to ${deviceVelocityCount + 1} orders in last hour — card testing pattern detected` });
     topSignals.push({ type: "DEVICE_VELOCITY", value: "medium", contribution: -penalty });
   }
 
@@ -728,7 +738,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     const ipVelocityMultiplier = getLearnedMultiplier(getW, 'IP_VELOCITY', 'HIGH');
     const ipVelocityPenalty = Math.min(Math.round(15 * ipVelocityMultiplier * Math.log2(ipVelocityCount + 1)), 35);
     score -= ipVelocityPenalty;
-    flags.push({ severity: "high", text: "ip_velocity_high" });
+    flags.push({ severity: "high", code: "ip_velocity_high", text: `${ipVelocityCount + 1} orders from same IP in last 24 hours` });
     topSignals.push({ type: "IP_VELOCITY", value: ipVelocityCount, contribution: -ipVelocityPenalty });
   }
 
@@ -753,7 +763,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   if (ipVelocityCount >= 10) {
     const burstPenalty = Math.round(getW("IP_BURST", "TRUE"));
     score -= burstPenalty;
-    flags.push({ severity: "critical", text: "sustained_ip_burst" });
+    flags.push({ severity: "critical", code: "sustained_ip_burst", text: "sustained_ip_burst" });
     topSignals.push({ type: "IP_BURST", value: ipVelocityCount, contribution: -burstPenalty });
   }
 
@@ -764,7 +774,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     const emailVelocityMultiplier = getLearnedMultiplier(getW, 'EMAIL_VELOCITY', 'HIGH');
     const emailVelocityPenalty = Math.min(Math.round(12 * emailVelocityMultiplier * Math.log2(emailVelocityCount + 1)), 30);
     score -= emailVelocityPenalty;
-    flags.push({ severity: "high", text: "email_velocity_high" });
+    flags.push({ severity: "high", code: "email_velocity_high", text: `${emailVelocityCount + 1} orders from same email in last 6 hours — velocity attack pattern` });
     topSignals.push({ type: "EMAIL_VELOCITY", value: emailVelocityCount, contribution: -emailVelocityPenalty });
   }
 
@@ -853,17 +863,17 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     if (binCount10min >= 2) {
       const penalty = Math.round(10 * prepaidMultiplier * bin10minMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
+      flags.push({ severity: "high", code: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high", text: `${binCount10min + 1} orders from same BIN prefix in 10 minutes — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
       topSignals.push({ type: "BIN_VELOCITY_10MIN", value: binCount10min, contribution: -penalty });
     } else if (binCount1h >= 3) {
       const penalty = Math.round(15 * prepaidMultiplier * bin1hMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
+      flags.push({ severity: "high", code: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high", text: `${binCount1h + 1} orders from same BIN prefix in 1 hour — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
       topSignals.push({ type: "BIN_VELOCITY_1H", value: binCount1h, contribution: -penalty });
     } else if (binCount24h >= 5) {
       const penalty = Math.round(25 * prepaidMultiplier * bin24hMultiplier);
       score -= penalty;
-      flags.push({ severity: "high", text: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high" });
+      flags.push({ severity: "high", code: isPrepaidCard ? "bin_velocity_high_prepaid" : "bin_velocity_high", text: `${binCount24h + 1} orders from same BIN prefix in 24 hours — BIN attack pattern detected${isPrepaidCard ? ' (prepaid card)' : ''}` });
       topSignals.push({ type: "BIN_VELOCITY_24H", value: binCount24h, contribution: -penalty });
     }
   }
@@ -893,12 +903,12 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       // much signal against a forger who rotates on every request anyway.
       const firstTimePenalty = Math.round(15 * deviceTrustFactor);
       score -= firstTimePenalty;
-      flags.push({ severity: "medium", text: "first_time_device_high_value" });
+      flags.push({ severity: "medium", code: "first_time_device_high_value", text: `First-time device with order ${order.amount.toFixed(0)} — no transaction history` });
     } else if (deviceAgeHours < 24 && order.amount >= 200) {
       // Device شفناه من أقل من 24 ساعة + أوردر كبير
       const newDevicePenalty = Math.round(10 * deviceTrustFactor);
       score -= newDevicePenalty;
-      flags.push({ severity: "medium", text: "new_device_high_value" });
+      flags.push({ severity: "medium", code: "new_device_high_value", text: `New device (${Math.round(deviceAgeHours)}h old) with high-value order` });
     }
   }
 
@@ -907,7 +917,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     // ملاحظة: مش بنعاقب كل عميل جديد — بس مع high value
     if (!highValuePenaltyApplied) {
       score -= 10;
-      flags.push({ severity: "medium", text: "new_customer_high_value" });
+      flags.push({ severity: "medium", code: "new_customer_high_value", text: `First order from this email with value ${order.amount.toFixed(0)} — no purchase history` });
     }
   }
 
@@ -1002,7 +1012,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       if (spanDays < 3 && prevGoodOrders.length >= 3) {
         // 3+ orders في أقل من 3 أيام = suspicious pattern
         score -= 10;
-        flags.push({ severity: "medium", text: "trust_farming_pattern" });
+        flags.push({ severity: "medium", code: "trust_farming_pattern", text: `Rapid order history (${prevGoodOrders.length} orders in ${Math.round(spanDays * 24)}h) — possible trust farming pattern` });
       }
     }
   } else if (prevGoodOrders.length >= 1) {
@@ -1034,7 +1044,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
   const orderHour = new Date(order.createdAt || Date.now()).getHours();
   if (orderHour >= 2 && orderHour <= 5) {
     score -= 10;
-    flags.push({ severity: "medium", text: "unusual_order_hour" });
+    flags.push({ severity: "medium", code: "unusual_order_hour", text: `Order placed at ${orderHour}:00 AM — unusual hour (high fraud period)` });
   }
 
   // High value check — بس لو مش اتحسب قبل كده في الـ orderMultiple block
@@ -1044,7 +1054,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     score -= penalty;
     flags.push({
       severity: isNewCustomer ? "high" : "medium",
-      text: isNewCustomer ? "new_customer_high_value_order" : "high_value_order",
+      code: isNewCustomer ? "new_customer_high_value_order" : "high_value_order", text: `Order value ${Math.round(orderMultiple)}x above store average${isNewCustomer ? " — new customer" : ""}`,
     });
   }
 
@@ -1053,7 +1063,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       const items = JSON.parse(order.lineItems);
       if (items.length > 10) {
         score -= 10;
-        flags.push({ severity: "medium", text: "large_order_item_count" });
+        flags.push({ severity: "medium", code: "large_order_item_count", text: `Unusually large order — ${items.length} different items` });
       }
     } catch { /* skip */ }
   }
@@ -1090,7 +1100,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
 
         flags.push({
           severity: graphRisk > 60 ? "critical" : "high",
-          text: "identity_graph_risk",
+          code: "identity_graph_risk", text: `Identity graph: device connected to ${graphPath.length} suspicious identit${graphPath.length > 1 ? "ies" : "y"}${tierLabel} — network risk ${Math.round(graphRisk)}/100`,
         });
         topSignals.push({ type: "GRAPH", value: graphMatchTier, contribution: -graphPenalty });
       } else if (graphRisk > 0 && graphPath.length > 0) {
@@ -1108,7 +1118,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
           score -= 20;
           flags.push({
             severity: "critical",
-            text: "cross_merchant_fraud_network",
+            code: "cross_merchant_fraud_network", text: `Device active across ${earlyWarningNode.merchantsSeen} merchants in last 24h — coordinated fraud network signal`,
           });
           topSignals.push({ type: "CROSS_MERCHANT", value: earlyWarningNode.merchantsSeen, contribution: -20 });
         }
@@ -1314,7 +1324,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       decisionBg    = "#FFF4F4";
       flags.push({
         severity: "high",
-        text: "economic_risk_block",
+        code: "economic_risk_block", text: `Economic risk: ${safeLoss.toFixed(0)} potential loss on ${orderAmount} order — ${(fraudProb * 100).toFixed(1)}% fraud probability, ${(safeLoss / baseThreshold).toFixed(1)}x above safe limit (${baseThreshold.toFixed(0)})`,
       });
       topSignals.push({ type: "ECONOMIC", value: "high_loss_block", contribution: -15 });
     }
@@ -1326,7 +1336,7 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
       decisionBg    = "#FFF4E5";
       flags.push({
         severity: "medium",
-        text: "economic_risk_review",
+        code: "economic_risk_review", text: `Economic risk: ${safeLoss.toFixed(0)} potential loss on ${orderAmount} order — ${(safeLoss / baseThreshold).toFixed(1)}x above safe limit (${baseThreshold.toFixed(0)})`,
       });
       topSignals.push({ type: "ECONOMIC", value: "high_loss_review", contribution: -10 });
     }
