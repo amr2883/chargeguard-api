@@ -1,4 +1,4 @@
-﻿// @ts-nocheck
+// @ts-nocheck
 'use strict';
 
 const express = require('express');
@@ -17,6 +17,7 @@ const { isAgency, FREE_PLANS } = require('../lib/planAccess');
 const { fetchRemoteConfig, setRemoteConfigKey } = require('../lib/remoteConfig');
 const emergencyPause = require('../lib/emergencyPause');
 const crypto = require('crypto');
+const logger = require('../lib/logger');
 // ── دالة الحماية من XSS ──────────────────────────────────────
 const escapeHtml = (str) =>
   String(str ?? '')
@@ -73,7 +74,7 @@ const logAdminAction = async (tenantId, action, note, result, adminUserId = null
     });
   } catch (err) {
     // Audit log failure must never block the actual admin action's response
-    console.error('[Admin] Audit log write failed:', err.message);
+    logger.error({ module: 'admin', tenantId, action, error: err.message }, 'Audit log write failed');
   }
 };
 
@@ -158,7 +159,7 @@ const authAdmin = (req, res, next) => {
   }
 
   if (!expected) {
-    console.error('[Admin] ADMIN_SECRET is not set in environment variables');
+    logger.error({ module: 'admin' }, 'ADMIN_SECRET is not set in environment variables');
     return res.status(503).send('Service Unavailable');
   }
 
@@ -169,7 +170,7 @@ const authAdmin = (req, res, next) => {
   if (!valid) {
     recordFailedAttempt(ip);
     const rec = attempts.get(ip);
-    console.warn(`[Admin] failed access attempt from ${ip} (${rec.count}/${MAX_TRIES})`);
+    logger.warn({ module: 'admin', ip, count: rec.count, maxTries: MAX_TRIES }, 'Failed admin access attempt');
     return res.status(401).send('Unauthorized');
   }
 
@@ -1143,7 +1144,7 @@ router.get('/', rateLimitAdmin, authAdmin, async (req, res) => {
       { status: status || 'all', search: search || '', plan: plan || 'all', nearQuota }));
 
   } catch (err) {
-    console.error('[Admin] خطأ في جلب البيانات:', err.message);
+    logger.error({ module: 'admin', error: err.message }, 'Error fetching tenant list data');
     res.status(500).send('Internal Server Error');
   }
 });
@@ -1198,7 +1199,7 @@ router.get('/actions', rateLimitAdmin, authAdmin, async (req, res) => {
       })),
     });
   } catch (err) {
-    console.error('[Admin] audit log fetch error:', err.message);
+    logger.error({ module: 'admin', error: err.message }, 'Audit log fetch error');
     res.status(500).json({ success: false, message: 'Internal Server Error' });
   }
 });
@@ -1319,7 +1320,7 @@ router.get('/tenants/:id/orders', rateLimitAdmin, authAdmin, async (req, res) =>
     res.json({ success: true, total, limit, offset, orders: withCorrelation });
 
   } catch (err) {
-    console.error('[Admin] orders fetch error:', err.message);
+    logger.error({ module: 'admin', tenantId, error: err.message }, 'Orders fetch error');
     logAdminAction(tenantId, 'view-orders', logNote, { success: false, code: 'INTERNAL_ERROR' }).catch(() => {});
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1395,7 +1396,7 @@ router.post('/tenants/:id/orders/:orderId/override', rateLimitAdmin, authAdmin, 
       order: { orderId, merchantId: tenantId, previousDecision: oldDecision, decision },
     });
   } catch (err) {
-    console.error('[Admin] override-order error:', err.message);
+    logger.error({ module: 'admin', tenantId, orderId, error: err.message }, 'Override order error');
     await logAdminAction(tenantId, 'override-order', `orderId=${orderId}`, { success: false, code: 'INTERNAL_ERROR' });
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1409,7 +1410,7 @@ router.post('/tenants/:id/suspend', rateLimitAdmin, authAdmin, express.json(), a
     await logAdminAction(id, 'suspend', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] suspend error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Suspend tenant error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1423,7 +1424,7 @@ router.post('/tenants/:id/reactivate', rateLimitAdmin, authAdmin, express.json()
     await logAdminAction(id, 'reactivate', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] reactivate error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Reactivate tenant error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1437,7 +1438,7 @@ router.post('/tenants/:id/downgrade', rateLimitAdmin, authAdmin, express.json(),
     await logAdminAction(id, 'downgrade', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] downgrade error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Downgrade tenant error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1451,7 +1452,7 @@ router.post('/tenants/:id/extend-grace', rateLimitAdmin, authAdmin, express.json
     await logAdminAction(id, 'extend-grace', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] extend-grace error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Extend grace period error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1465,7 +1466,7 @@ router.post('/tenants/:id/set-plan', rateLimitAdmin, authAdmin, express.json(), 
     await logAdminAction(id, 'set-plan', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] set-plan error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Set plan error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1481,7 +1482,7 @@ router.post('/tenants/:id/reset-quota', rateLimitAdmin, authAdmin, express.json(
     await logAdminAction(id, 'reset-quota', note, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] reset-quota error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Reset quota error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1506,7 +1507,7 @@ router.post('/tenants/:id/pause', rateLimitAdmin, authAdmin, express.json(), asy
     await logAdminAction(tenantId, 'pause-blocking', `expiresAt=${row.expiresAt.toISOString()}${note ? ` | note: ${note}` : ''}`, { success: true, code: 'PAUSED' }, req.adminUser?.id);
     res.json({ success: true, code: 'PAUSED', message: `Blocking paused for this tenant until ${row.expiresAt.toISOString()}`, expiresAt: row.expiresAt });
   } catch (err) {
-    console.error('[Admin] pause error:', err.message);
+    logger.error({ module: 'admin', tenantId, error: err.message }, 'Pause tenant error');
     await logAdminAction(tenantId, 'pause-blocking', note, { success: false, code: 'INTERNAL_ERROR' }, req.adminUser?.id);
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1522,7 +1523,7 @@ router.post('/tenants/:id/unpause', rateLimitAdmin, authAdmin, express.json(), a
     await logAdminAction(tenantId, 'unpause-blocking', note, { success: true, code }, req.adminUser?.id);
     res.json({ success: true, code, message: wasActive ? 'Blocking resumed for this tenant' : 'No active pause was found for this tenant' });
   } catch (err) {
-    console.error('[Admin] unpause error:', err.message);
+    logger.error({ module: 'admin', tenantId, error: err.message }, 'Unpause tenant error');
     await logAdminAction(tenantId, 'unpause-blocking', note, { success: false, code: 'INTERNAL_ERROR' }, req.adminUser?.id);
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1546,7 +1547,7 @@ router.post('/pause-all', rateLimitAdmin, authAdmin, express.json(), async (req,
     await logAdminAction(null, 'pause-all', `expiresAt=${row.expiresAt.toISOString()}${note ? ` | note: ${note}` : ''}`, { success: true, code: 'PAUSED_ALL' }, req.adminUser?.id);
     res.json({ success: true, code: 'PAUSED_ALL', message: `ALL tenants paused until ${row.expiresAt.toISOString()}`, expiresAt: row.expiresAt });
   } catch (err) {
-    console.error('[Admin] pause-all error:', err.message);
+    logger.error({ module: 'admin', error: err.message }, 'Pause all error');
     await logAdminAction(null, 'pause-all', note, { success: false, code: 'INTERNAL_ERROR' }, req.adminUser?.id);
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1561,7 +1562,7 @@ router.post('/unpause-all', rateLimitAdmin, authAdmin, express.json(), async (re
     await logAdminAction(null, 'unpause-all', note, { success: true, code }, req.adminUser?.id);
     res.json({ success: true, code, message: wasActive ? 'Global pause lifted' : 'No active global pause was found' });
   } catch (err) {
-    console.error('[Admin] unpause-all error:', err.message);
+    logger.error({ module: 'admin', error: err.message }, 'Unpause all error');
     await logAdminAction(null, 'unpause-all', note, { success: false, code: 'INTERNAL_ERROR' }, req.adminUser?.id);
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1575,7 +1576,7 @@ router.get('/tenants/:id/config', rateLimitAdmin, authAdmin, async (req, res) =>
     await logAdminAction(id, 'view-config', null, { success: result.success, code: result.code });
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] view-config error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'View config error');
     await logAdminAction(id, 'view-config', null, { success: false, code: 'INTERNAL_ERROR' });
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
@@ -1592,7 +1593,7 @@ router.post('/tenants/:id/config-key', rateLimitAdmin, authAdmin, express.json()
     await logAdminAction(id, 'set-config-key', null, result);
     res.status(httpStatusFor(result.code)).json(result);
   } catch (err) {
-    console.error('[Admin] set-config-key error:', err.message);
+    logger.error({ module: 'admin', tenantId: id, error: err.message }, 'Set config key error');
     res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
   }
 });
@@ -1652,7 +1653,7 @@ const buildAddEntryHandler = (listName, model, validTypes, action) =>
         await logAdminAction(tenantId, action, logNote, { success: false, code: 'DUPLICATE_ENTRY' });
         return res.status(409).json({ success: false, code: 'DUPLICATE_ENTRY', message: `This entry already exists in the ${listName}` });
       }
-      console.error(`[Admin] ${action} error:`, err.message);
+      logger.error({ module: 'admin', tenantId, action, error: err.message }, 'List entry operation error');
       await logAdminAction(tenantId, action, logNote, { success: false, code: 'INTERNAL_ERROR' });
       res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
     }
@@ -1673,7 +1674,7 @@ const buildRemoveEntryHandler = (listName, model, action) =>
       await logAdminAction(tenantId, action, `Removed ${existing.type} entry from ${listName}`, { success: true, code: 'REMOVED' });
       res.json({ success: true, code: 'REMOVED', message: `${listName} entry deleted` });
     } catch (err) {
-      console.error(`[Admin] ${action} error:`, err.message);
+      logger.error({ module: 'admin', tenantId, action, error: err.message }, 'List entry operation error');
       await logAdminAction(tenantId, action, logNote, { success: false, code: 'INTERNAL_ERROR' });
       res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
     }
@@ -1700,7 +1701,7 @@ const buildListEntriesHandler = (model, validTypes) =>
       res.setHeader('Cache-Control', 'no-store');
       res.json({ success: true, entries });
     } catch (err) {
-      console.error('[Admin] list entries error:', err.message);
+      logger.error({ module: 'admin', tenantId, error: err.message }, 'List entries error');
       res.status(500).json({ success: false, code: 'INTERNAL_ERROR', message: 'Internal Server Error' });
     }
   };
