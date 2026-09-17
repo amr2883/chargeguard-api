@@ -484,7 +484,7 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
     const delay = RETRY_DELAY_MS * Math.pow(2, attempt - 1); // exponential backoff
 
     try {
-      console.log(`${label} 📡 Attempt ${attempt}/${RETRIES} — POST to ${type}`);
+      logger.debug({ tenantId: tenant.id, type, attempt, retries: RETRIES }, 'Webhook delivery attempt');
 
       const controller = new AbortController();
       const timeoutId  = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -506,20 +506,20 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       // classic SSRF vector that a literal or DNS check alone cannot catch,
       // since the redirect target is only known at request time.
       if (response.type === 'opaqueredirect' || (response.status >= 300 && response.status < 400)) {
-        console.error(`${label} ❌ Refused to follow redirect response — not retrying`);
+        logger.error({ tenantId: tenant.id, type }, 'Webhook refused to follow redirect response - not retrying');
         const redirectErr = new Error('Webhook URL returned a redirect; redirects are not followed for security reasons.');
         redirectErr.nonRetryable = true;
         throw redirectErr;
       }
 
       if (response.ok) {
-        console.log(`${label} ✅ Sent successfully — ${response.status}`);
+        logger.info({ tenantId: tenant.id, type, status: response.status }, 'Webhook sent successfully');
         return;
       }
 
       // Non-retryable client errors
       if (response.status >= 400 && response.status < 500 && response.status !== 429) {
-        console.error(`${label} ❌ Failed with ${response.status} — not retrying`);
+        logger.error({ tenantId: tenant.id, type, status: response.status }, 'Webhook failed - not retrying');
         const clientErr = new Error(`HTTP ${response.status}: ${await response.text().catch(() => '')}`);
         clientErr.nonRetryable = true;
         throw clientErr;
@@ -531,13 +531,13 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
         throw statusErr;
       }
 
-      console.warn(`${label} ⚠️ Attempt ${attempt} failed with ${response.status}`);
+      logger.warn({ tenantId: tenant.id, type, attempt, status: response.status }, 'Webhook attempt failed, will retry');
 
     } catch (err) {
       lastError = err;
 
       if (err.nonRetryable) {
-        console.error(`${label} Non-retryable error on attempt ${attempt} - stopping immediately, no further retries.`);
+        logger.error({ tenantId: tenant.id, type, attempt }, 'Webhook non-retryable error - stopping immediately');
         break;
       }
 
@@ -551,9 +551,9 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       // here that isn't an AbortError should be retried like any other
       // transient failure, up to the attempt cap.
       if (err.name === 'AbortError') {
-        console.error(`${label} ❌ Attempt ${attempt} timed out after ${FETCH_TIMEOUT_MS}ms`);
+        logger.error({ tenantId: tenant.id, type, attempt, timeoutMs: FETCH_TIMEOUT_MS }, 'Webhook attempt timed out');
       } else {
-        console.warn(`${label} ⚠️ Attempt ${attempt} failed: ${err.message}`);
+        logger.warn({ tenantId: tenant.id, type, attempt, error: err.message }, 'Webhook attempt failed');
       }
 
       if (attempt === RETRIES) {
@@ -562,12 +562,12 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
     }
 
     if (attempt < RETRIES) {
-      console.log(`${label} ⏳ Retrying in ${delay / 1000}s...`);
+      logger.debug({ tenantId: tenant.id, type, attempt, delayMs: delay }, 'Retrying webhook delivery');
       await new Promise(res => setTimeout(res, delay));
     }
   }
 
-  console.error(`${label} ❌ All ${RETRIES} attempts failed. Last error:`, lastError?.message);
+  logger.error({ tenantId: tenant.id, type, attempts: RETRIES, error: lastError?.message }, 'All webhook delivery attempts failed');
   throw lastError;
 }
 
