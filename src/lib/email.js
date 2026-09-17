@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const logger = require('./logger');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
 const { isProOrAbove } = require('./planAccess');
@@ -144,21 +145,21 @@ async function sendApiKeyEmail(email, apiKey) {
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[ApiKeyEmail] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      logger.debug({ label: 'ApiKeyEmail', attempt, retries: RETRIES, email }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
         subject: '🔑 Your ChargeGuard API Key',
         html,
       });
-      console.log(`[ApiKeyEmail] ✅ Sent successfully to: ${email}`);
+      logger.info({ label: 'ApiKeyEmail', email }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[ApiKeyEmail] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'ApiKeyEmail', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[ApiKeyEmail] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'ApiKeyEmail', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -198,21 +199,21 @@ async function sendRotatedKeyEmail(email, newApiKey) {
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[RotatedKeyEmail] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      logger.debug({ label: 'RotatedKeyEmail', attempt, retries: RETRIES, email }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
         subject: '🔑 Your ChargeGuard API Key Has Been Rotated',
         html,
       });
-      console.log(`[RotatedKeyEmail] ✅ Rotation email sent to: ${email}`);
+      logger.info({ label: 'RotatedKeyEmail', email }, 'Rotation email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[RotatedKeyEmail] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'RotatedKeyEmail', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[RotatedKeyEmail] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'RotatedKeyEmail', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -249,7 +250,7 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[AttackAlert] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      logger.debug({ label: 'AttackAlert', attempt, retries: RETRIES }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
@@ -342,14 +343,14 @@ async function sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinu
     `,
   });
 
-  console.log(`[AttackAlert] ✅ Alert sent to ${tenant.email} — ${attackCount} attacks, ${savedFormatted} saved`);
+  logger.info({ label: 'AttackAlert', tenantId: tenant.id, attackCount, savedFormatted }, 'Attack alert email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[AttackAlert] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'AttackAlert', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[AttackAlert] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'AttackAlert', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -591,21 +592,21 @@ async function sendWeeklySummaryEmail({
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[WeeklySummary] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      logger.debug({ label: 'WeeklySummary', attempt, retries: RETRIES }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to:   tenant.email,
         subject,
         html: fullHtml,
       });
-      console.log(`[WeeklySummary] ✅ Sent to ${tenant.email}`);
+      logger.info({ label: 'WeeklySummary', tenantId: tenant.id }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[WeeklySummary] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'WeeklySummary', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[WeeklySummary] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'WeeklySummary', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -613,7 +614,7 @@ async function sendWeeklySummaryEmail({
 }
 
 async function sendConfirmationEmail(email, confirmUrl) {
-  console.log('[Email] Sending confirmation email to:', email);
+  logger.info({ label: 'Email', email }, 'Sending confirmation email');
   // L5 fix: escaped sibling of confirmUrl, used in both href and text below.
   const confirmUrlSafe = escapeHtml(confirmUrl);
 
@@ -624,7 +625,7 @@ async function sendConfirmationEmail(email, confirmUrl) {
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[Confirmation] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      logger.debug({ label: 'Confirmation', attempt, retries: RETRIES }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
@@ -698,14 +699,14 @@ async function sendConfirmationEmail(email, confirmUrl) {
           </div>
         `
       });
-      console.log(`[Confirmation] ✅ Sent successfully to: ${email}`);
+      logger.info({ label: 'Confirmation', email }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[Confirmation] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'Confirmation', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[Confirmation] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'Confirmation', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1017,7 +1018,7 @@ async function sendMonthlyReportEmail({ tenant, reportData, downloadUrl }) {
         subject: `📋 Your ${monthName} ${year} Security Report — ${storeDisplay}`,
         html:    fullHtml,
       });
-      console.log(`[MonthlyReport] ✅ Sent to ${tenant.email} — ${monthName} ${year}`);
+      logger.info({ label: 'MonthlyReport', tenantId: tenant.id, monthName, year }, 'Monthly report email sent successfully');
       return;
     } catch (err) {
       lastError = err;
@@ -1210,21 +1211,21 @@ async function sendPaypalWeeklyReportEmail({
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[PaypalWeekly] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      logger.debug({ label: 'PaypalWeekly', attempt, retries: RETRIES }, 'Email delivery attempt');
       await sendViaGmail({
         from:    `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to:      tenant.email,
         subject,
         html:    fullHtml,
       });
-      console.log(`[PaypalWeekly] ✅ Sent to ${tenant.email}`);
+      logger.info({ label: 'PaypalWeekly', tenantId: tenant.id }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[PaypalWeekly] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'PaypalWeekly', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[PaypalWeekly] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'PaypalWeekly', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1345,21 +1346,21 @@ async function sendRenewalReminderEmail(tenant, { daysRemaining, planLabel, rene
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[RenewalReminder] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      logger.debug({ label: 'RenewalReminder', attempt, retries: RETRIES, tenantId: tenant.id }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
         subject,
         html,
       });
-      console.log(`[RenewalReminder] ✅ Sent to ${tenant.email} — ${daysRemaining} days remaining`);
+      logger.info({ label: 'RenewalReminder', tenantId: tenant.id, daysRemaining }, 'Renewal reminder email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[RenewalReminder] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'RenewalReminder', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[RenewalReminder] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'RenewalReminder', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1473,21 +1474,21 @@ async function sendGracePeriodEmail(tenant, { planLabel, graceEndsAt, gracePerio
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[GracePeriod] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      logger.debug({ label: 'GracePeriod', attempt, retries: RETRIES, tenantId: tenant.id }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
         subject: `⏳ ChargeGuard grace period active — renew by ${graceDateStr}`,
         html,
       });
-      console.log(`[GracePeriod] ✅ Sent to ${tenant.email}`);
+      logger.info({ label: 'GracePeriod', tenantId: tenant.id }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[GracePeriod] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'GracePeriod', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[GracePeriod] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'GracePeriod', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1589,21 +1590,21 @@ async function sendQuotaExceededEmail(tenant, { limit, monthlyCount, quotaResetD
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[QuotaExceeded] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      logger.debug({ label: 'QuotaExceeded', attempt, retries: RETRIES, tenantId: tenant.id }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
         subject: `⚠️ ${storeDisplay} reached its monthly protection limit`,
         html,
       });
-      console.log(`[QuotaExceeded] ✅ Sent to ${tenant.email}`);
+      logger.info({ label: 'QuotaExceeded', tenantId: tenant.id }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[QuotaExceeded] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'QuotaExceeded', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[QuotaExceeded] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'QuotaExceeded', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1611,7 +1612,7 @@ async function sendQuotaExceededEmail(tenant, { limit, monthlyCount, quotaResetD
 }
 
 async function sendWelcomeWithKeyEmail(email, apiKey) {
-  console.log('[Email] Sending welcome+key email after verification to:', email);
+  logger.info({ label: 'Email', email }, 'Sending welcome and key email after verification');
   await sendApiKeyEmail(email, apiKey);
 }
 
@@ -1681,7 +1682,7 @@ async function sendPaypalAlertEmail(tenant, alertData) {
   let lastError;
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[PaypalAlert] 📡 Attempt ${attempt}/${RETRIES} — sending via Gmail API`);
+      logger.debug({ label: 'PaypalAlert', attempt, retries: RETRIES }, 'Email delivery attempt');
       await sendViaGmail({
         from:    `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to:      tenant.email,
@@ -1786,14 +1787,14 @@ async function sendPaypalAlertEmail(tenant, alertData) {
 
 </div>`,
       });
-      console.log(`[PaypalAlert] ✅ Sent to ${tenant.email} — txn #${txnDisplay}, score ${riskScore}`);
+      logger.info({ label: 'PaypalAlert', tenantId: tenant.id, txnDisplay, riskScore }, 'PayPal alert email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[PaypalAlert] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'PaypalAlert', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[PaypalAlert] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'PaypalAlert', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -1962,21 +1963,21 @@ async function sendSubscriptionConfirmationEmail(email, {
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[ConfirmationEmail] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      logger.debug({ label: 'ConfirmationEmail', attempt, retries: RETRIES, email }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
         subject: `✅ Payment confirmed — ${planLabel} is now active`,
         html,
       });
-      console.log(`[ConfirmationEmail] ✅ Sent to ${email} — plan: ${planLabel}, until: ${endDateStr}`);
+      logger.info({ label: 'ConfirmationEmail', email, planLabel, endDateStr }, 'Subscription confirmation email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[ConfirmationEmail] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'ConfirmationEmail', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[ConfirmationEmail] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'ConfirmationEmail', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -2090,21 +2091,21 @@ async function sendDowngradeEmail(tenant, { previousPlanLabel, renewUrl }) {
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[Downgrade] 📡 Attempt ${attempt}/${RETRIES} → ${tenant.email}`);
+      logger.debug({ label: 'Downgrade', attempt, retries: RETRIES, tenantId: tenant.id }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: tenant.email,
         subject: `Your ChargeGuard plan has been downgraded to Starter`,
         html,
       });
-      console.log(`[Downgrade] ✅ Sent to ${tenant.email}`);
+      logger.info({ label: 'Downgrade', tenantId: tenant.id }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[Downgrade] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'Downgrade', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[Downgrade] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'Downgrade', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
@@ -2136,7 +2137,7 @@ async function sendChallengeOtpEmail(email, otp) {
 
   for (let attempt = 1; attempt <= RETRIES; attempt++) {
     try {
-      console.log(`[ChallengeOtp] 📡 Attempt ${attempt}/${RETRIES} → ${email}`);
+      logger.debug({ label: 'ChallengeOtp', attempt, retries: RETRIES, email }, 'Email delivery attempt');
       await sendViaGmail({
         from: `"ChargeGuard" <${process.env.GMAIL_FROM}>`,
         to: email,
@@ -2186,14 +2187,14 @@ async function sendChallengeOtpEmail(email, otp) {
           </div>
         `,
       });
-      console.log(`[ChallengeOtp] ✅ Sent successfully to: ${email}`);
+      logger.info({ label: 'ChallengeOtp', email }, 'Email sent successfully');
       return;
     } catch (err) {
       lastError = err;
       const code = err?.response?.status || err?.status || err?.code || 'UNKNOWN';
-      console.error(`[ChallengeOtp] ❌ Attempt ${attempt} failed — code: ${code}, message: ${err.message}`);
+      logger.error({ label: 'ChallengeOtp', attempt, code, error: err.message }, 'Email delivery attempt failed');
       if (!RETRYABLE_ERRORS.includes(Number(code)) || attempt === RETRIES) break;
-      console.log(`[ChallengeOtp] ⏳ Retrying in ${RETRY_DELAY_MS / 1000}s...`);
+      logger.debug({ label: 'ChallengeOtp', attempt, delayMs: RETRY_DELAY_MS }, 'Retrying email delivery');
       await new Promise(res => setTimeout(res, RETRY_DELAY_MS));
     }
   }
