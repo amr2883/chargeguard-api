@@ -23,6 +23,7 @@
 const db                          = require('../lib/db');
 const { sendWeeklySummaryEmail }   = require('../lib/email');
 const { acquireLock }              = require('../lib/distributedLock');
+const logger = require('../lib/logger');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const SCHEDULER_INTERVAL_MS  = 60 * 60 * 1000;  // check every hour
@@ -72,11 +73,11 @@ async function runWeeklySummaryCheck(prisma) {
 
   const lock = await acquireLock('scheduler:weeklySummary', 120_000);
   if (!lock) {
-    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    logger.debug({ module: 'weeklySummaryScheduler' }, 'Lock not acquired, skipping this tick');
     return;
   }
 
-  console.log(`${label} 📅 Sunday 09:xx UTC — running weekly summary check`);
+  logger.info({ module: 'weeklySummaryScheduler' }, 'Sunday 09:xx UTC - running weekly summary check');
 
   // Compute week boundaries (stable for the entire run)
   const currentWeekStart = getCurrentWeekStart(now);
@@ -89,16 +90,16 @@ async function runWeeklySummaryCheck(prisma) {
       select: { id: true, email: true, storeUrl: true },
     });
   } catch (err) {
-    console.error(`${label} ❌ Failed to fetch tenants:`, err.message);
+    logger.error({ module: 'weeklySummaryScheduler', error: err.message }, 'Failed to fetch tenants');
     return;
   }
 
   if (!tenants.length) {
-    console.log(`${label} ℹ️  No active tenants found.`);
+    logger.info({ module: 'weeklySummaryScheduler' }, 'No active tenants found');
     return;
   }
 
-  console.log(`${label} 👥 Processing ${tenants.length} tenant(s)`);
+  logger.info({ module: 'weeklySummaryScheduler', tenantCount: tenants.length }, 'Processing tenants');
 
   for (let i = 0; i < tenants.length; i++) {
     const tenant = tenants[i];
@@ -106,7 +107,7 @@ async function runWeeklySummaryCheck(prisma) {
       await processTenant(prisma, tenant, currentWeekStart, prevWeekStart, label);
     } catch (err) {
       // One tenant failing must never abort the loop for others
-      console.error(`${label} ❌ Unhandled error for tenant ${tenant.id}:`, err.message);
+      logger.error({ module: 'weeklySummaryScheduler', tenantId: tenant.id, error: err.message }, 'Unhandled error for tenant');
     }
 
     // Courtesy delay to avoid hammering SMTP between tenants
@@ -119,7 +120,7 @@ async function runWeeklySummaryCheck(prisma) {
     }
   }
 
-  console.log(`${label} ✅ Weekly summary check complete`);
+  logger.info({ module: 'weeklySummaryScheduler' }, 'Weekly summary check complete');
 }
 
 /**
@@ -144,7 +145,7 @@ async function processTenant(prisma, tenant, currentWeekStart, prevWeekStart, la
   });
 
   if (alreadySent) {
-    console.log(`${label} ⏭️  ${tenant.email} — weekly_summary already sent this week, skipping`);
+    logger.debug({ module: 'weeklySummaryScheduler', tenantEmail: tenant.email }, 'weekly_summary already sent this week, skipping');
     return;
   }
 
@@ -244,7 +245,7 @@ async function processTenant(prisma, tenant, currentWeekStart, prevWeekStart, la
 
   // ── Step 8: Send email (or skip) ─────────────────────────────────────────
   if (!shouldSendEmail) {
-    console.log(`${label} 🤫 ${tenant.email} — ${QUIET_STREAK_THRESHOLD} consecutive quiet weeks, skipping email`);
+    logger.debug({ module: 'weeklySummaryScheduler', tenantEmail: tenant.email, quietStreakThreshold: QUIET_STREAK_THRESHOLD }, 'Consecutive quiet weeks, skipping email');
     return;
   }
 
@@ -264,10 +265,10 @@ async function processTenant(prisma, tenant, currentWeekStart, prevWeekStart, la
   sendWeeklySummaryEmail(emailPayload)
     .then(() => {
       const kind = thisWeekCount > 0 ? 'full' : 'quiet';
-      console.log(`${label} 📬 ${kind} summary sent → ${tenant.email} (${thisWeekCount} attacks)`);
+      logger.info({ module: 'weeklySummaryScheduler', kind, tenantEmail: tenant.email, attackCount: thisWeekCount }, 'Weekly summary sent');
     })
     .catch(err => {
-      console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'weeklySummaryScheduler', tenantEmail: tenant.email, error: err.message }, 'Email failed');
     });
 }
 
@@ -281,7 +282,7 @@ async function processTenant(prisma, tenant, currentWeekStart, prevWeekStart, la
  */
 function startWeeklySummaryScheduler(prisma) {
   setTimeout(() => {
-    console.log(`[${new Date().toISOString()}] 📅 Weekly Summary Scheduler started (checks every hour, sends Sundays 09:xx UTC)`);
+    logger.info({ module: 'weeklySummaryScheduler' }, 'Weekly summary scheduler started - checks every hour, sends Sundays 09:xx UTC');
 
     runWeeklySummaryCheck(prisma);
     setInterval(() => runWeeklySummaryCheck(prisma), SCHEDULER_INTERVAL_MS);
