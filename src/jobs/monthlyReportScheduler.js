@@ -32,6 +32,7 @@
 const { buildMonthlyReportData }  = require('../lib/reportDataService');
 const { sendMonthlyReportEmail }  = require('../lib/email');
 const { acquireLock }             = require('../lib/distributedLock');
+const logger = require('../lib/logger');
 
 // ─── Tuneable Constants ──────────────────────────────────────────────────────
 // Thought: group every magic number here so ops can tune without reading logic.
@@ -119,13 +120,11 @@ async function runMonthlyReportCheck(prisma) {
 
   const lock = await acquireLock('scheduler:monthlyReport', 300_000);
   if (!lock) {
-    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    logger.debug({ module: 'monthlyReportScheduler' }, 'Lock not acquired, skipping this tick');
     return;
   }
 
-  console.log(
-    `${label} 📊 1st of month, 10:xx UTC — generating ${reportMonth}/${reportYear} reports`
-  );
+  logger.info({ module: 'monthlyReportScheduler', reportMonth, reportYear }, '1st of month, 10:xx UTC - generating reports');
 
   // ── Fetch all active tenants ─────────────────────────────────────────────
   // Thought: we select the minimum fields needed. 'plan' is required by
@@ -137,16 +136,16 @@ async function runMonthlyReportCheck(prisma) {
       select: { id: true, email: true, storeUrl: true, plan: true },
     });
   } catch (err) {
-    console.error(`${label} ❌ Failed to fetch tenants:`, err.message);
+    logger.error({ module: 'monthlyReportScheduler', error: err.message }, 'Failed to fetch tenants');
     return;
   }
 
   if (!tenants.length) {
-    console.log(`${label} ℹ️  No active tenants found.`);
+    logger.info({ module: 'monthlyReportScheduler' }, 'No active tenants found');
     return;
   }
 
-  console.log(`${label} 👥 Processing ${tenants.length} tenant(s) for ${reportMonth}/${reportYear}`);
+  logger.info({ module: 'monthlyReportScheduler', tenantCount: tenants.length, reportMonth, reportYear }, 'Processing tenants for monthly report');
 
   // ── Process tenants sequentially ─────────────────────────────────────────
   // Thought: sequential (not parallel) for two reasons:
@@ -162,7 +161,7 @@ async function runMonthlyReportCheck(prisma) {
       // One tenant failing must NEVER abort the loop for the others.
       // processTenant has its own inner catch that updates status to 'failed',
       // so reaching here means something truly unexpected happened.
-      console.error(`${label} ❌ Unhandled error for tenant ${tenant.id}:`, err.message);
+      logger.error({ module: 'monthlyReportScheduler', tenantId: tenant.id, error: err.message }, 'Unhandled error for tenant');
     }
 
     // Courtesy delay between tenants — skip after the last one
@@ -171,7 +170,7 @@ async function runMonthlyReportCheck(prisma) {
     }
   }
 
-  console.log(`${label} ✅ Monthly report run complete for ${reportMonth}/${reportYear}`);
+  logger.info({ module: 'monthlyReportScheduler', reportMonth, reportYear }, 'Monthly report run complete');
 }
 
 /**
@@ -184,7 +183,7 @@ async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportY
     select: { id: true },
   });
   if (existingReady) {
-    console.log(`${label} ⏭️  ${logCtx} — already ready for ${reportMonth}/${reportYear}, skipping`);
+    logger.debug({ module: 'monthlyReportScheduler', logCtx, reportMonth, reportYear }, 'Report already ready, skipping');
     return null;
   }
 
@@ -199,7 +198,7 @@ async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportY
       select: { id: true },
     });
   } catch (err) {
-    console.error(`${label} ❌ ${logCtx} — failed to create generating record:`, err.message);
+    logger.error({ module: 'monthlyReportScheduler', logCtx, error: err.message }, 'Failed to create generating record');
     return null;
   }
 
@@ -221,17 +220,14 @@ async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportY
       },
     });
 
-    console.log(
-      `${label} ✅ ${logCtx} — record ready ` +
-      `(${reportData.totalAttacks} attacks, $${reportData.totalProtected.toFixed(2)} protected)`
-    );
+    logger.info({ module: 'monthlyReportScheduler', logCtx, totalAttacks: reportData.totalAttacks, totalProtected: reportData.totalProtected }, 'Report record ready');
     return reportData;
   } catch (err) {
-    console.error(`${label} ❌ ${logCtx} — report generation failed:`, err.message);
+    logger.error({ module: 'monthlyReportScheduler', logCtx, error: err.message }, 'Report generation failed');
     try {
       await prisma.monthlyReport.update({ where: { id: reportRecord.id }, data: { status: 'failed' } });
     } catch (updateErr) {
-      console.error(`${label} ⚠️  ${logCtx} — could not update record to 'failed':`, updateErr.message);
+      logger.error({ module: 'monthlyReportScheduler', logCtx, error: updateErr.message }, 'Could not update record to failed');
     }
     throw err;
   }
@@ -275,7 +271,7 @@ async function processTenant(prisma, tenant, reportMonth, reportYear, label) {
     try {
       await generateOneReport(prisma, tenant.id, store.id, reportMonth, reportYear, label, `${tenant.email} / ${storeLabel}`);
     } catch (err) {
-      console.error(`${label} ❌ Unhandled per-store error for ${tenant.id}/${store.id}:`, err.message);
+      logger.error({ module: 'monthlyReportScheduler', tenantId: tenant.id, storeId: store.id, error: err.message }, 'Unhandled per-store error');
     }
     if (i < stores.length - 1) {
       await new Promise(res => setTimeout(res, STORE_DELAY_MS));
@@ -285,10 +281,10 @@ async function processTenant(prisma, tenant, reportMonth, reportYear, label) {
   const downloadUrl = buildDownloadUrl(tenant.id, reportMonth, reportYear);
   sendMonthlyReportEmail({ tenant, reportData, downloadUrl })
     .then(() => {
-      console.log(`${label} 📬 Email sent → ${tenant.email} (${reportData.monthName} ${reportYear})`);
+      logger.info({ module: 'monthlyReportScheduler', tenantId: tenant.id, monthName: reportData.monthName, reportYear }, 'Monthly report email sent');
     })
     .catch(err => {
-      console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'monthlyReportScheduler', tenantId: tenant.id, error: err.message }, 'Monthly report email failed');
     });
 }
 
@@ -306,10 +302,7 @@ async function processTenant(prisma, tenant, reportMonth, reportYear, label) {
  */
 function startMonthlyReportScheduler(prisma) {
   setTimeout(() => {
-    console.log(
-      `[${new Date().toISOString()}] 📊 Monthly Report Scheduler started ` +
-      `(checks every hour, runs on 1st of month 10:xx UTC)`
-    );
+    logger.info({ module: 'monthlyReportScheduler' }, 'Monthly report scheduler started - checks every hour, runs on 1st of month 10:xx UTC');
 
     // Run immediately on first tick after delay, then on interval.
     // Thought: running immediately on startup is safe because the gate inside
