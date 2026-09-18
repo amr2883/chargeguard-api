@@ -23,6 +23,7 @@
 
 const { sendPaypalWeeklyReportEmail } = require('../lib/email');
 const { acquireLock }                 = require('../lib/distributedLock');
+const logger = require('../lib/logger');
 const { SAVINGS_PER_ATTACK }          = require('../lib/constants');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
@@ -64,11 +65,11 @@ async function runPaypalWeeklyReportCheck(prisma) {
 
   const lock = await acquireLock('scheduler:paypalWeekly', 120_000);
   if (!lock) {
-    console.log(`${label} 🔒 lock not acquired, skipping this tick`);
+    logger.debug({ module: 'paypalWeeklyReportScheduler' }, 'Lock not acquired, skipping this tick');
     return;
   }
 
-  console.log(`${label} 📅 Sunday 09:3x UTC — running PayPal weekly shield check`);
+  logger.info({ module: 'paypalWeeklyReportScheduler' }, 'Sunday 09:3x UTC - running PayPal weekly shield check');
 
   const currentWeekStart = getCurrentWeekStart(now);
   const prevWeekStart    = getPrevWeekStart(currentWeekStart);
@@ -80,22 +81,22 @@ async function runPaypalWeeklyReportCheck(prisma) {
       select: { id: true, email: true, storeUrl: true },
     });
   } catch (err) {
-    console.error(`${label} ❌ Failed to fetch tenants:`, err.message);
+    logger.error({ module: 'paypalWeeklyReportScheduler', error: err.message }, 'Failed to fetch tenants');
     return;
   }
 
   if (!tenants.length) {
-    console.log(`${label} ℹ️  No active tenants found.`);
+    logger.info({ module: 'paypalWeeklyReportScheduler' }, 'No active tenants found');
     return;
   }
 
-  console.log(`${label} 👥 Processing ${tenants.length} tenant(s)`);
+  logger.info({ module: 'paypalWeeklyReportScheduler', tenantCount: tenants.length }, 'Processing tenants');
 
   for (const tenant of tenants) {
     try {
       await processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekStart, label);
     } catch (err) {
-      console.error(`${label} ❌ Unhandled error for tenant ${tenant.id}:`, err.message);
+      logger.error({ module: 'paypalWeeklyReportScheduler', tenantId: tenant.id, error: err.message }, 'Unhandled error for tenant');
     }
 
     if (tenants.indexOf(tenant) < tenants.length - 1) {
@@ -103,7 +104,7 @@ async function runPaypalWeeklyReportCheck(prisma) {
     }
   }
 
-  console.log(`${label} ✅ PayPal weekly shield check complete`);
+  logger.info({ module: 'paypalWeeklyReportScheduler' }, 'PayPal weekly shield check complete');
 }
 
 // ── Per-tenant processing ───────────────────────────────────────────────────
@@ -122,7 +123,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   });
 
   if (alreadySent) {
-    console.log(`${label} ⏭️  ${tenant.email} — paypal_weekly_shield already sent this week, skipping`);
+    logger.debug({ module: 'paypalWeeklyReportScheduler', tenantEmail: tenant.email }, 'paypal_weekly_shield already sent this week, skipping');
     return;
   }
 
@@ -152,7 +153,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   // ── Step 3: Skip if tenant has zero PayPal transactions at all ────────────
   // Don't send the report to stores that aren't using PayPal integration yet
   if (paypalTxnCount === 0) {
-    console.log(`${label} ⏭️  ${tenant.email} — no PayPal transactions this week, skipping`);
+    logger.debug({ module: 'paypalWeeklyReportScheduler', tenantEmail: tenant.email }, 'No PayPal transactions this week, skipping');
     return;
   }
 
@@ -261,7 +262,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
       });
     }
   } catch (err) {
-    console.error(`${label} ⚠️  ${tenant.email} — per-store PayPal breakdown failed:`, err.message);
+    logger.error({ module: 'paypalWeeklyReportScheduler', tenantEmail: tenant.email, error: err.message }, 'Per-store PayPal breakdown failed');
   }
 
   // ── Step 9: Send email ────────────────────────────────────────────────────
@@ -278,10 +279,10 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
   })
     .then(() => {
       const kind = thisWeekSuspicious > 0 ? 'full' : 'quiet';
-      console.log(`${label} 📬 PayPal ${kind} shield report sent → ${tenant.email} (${thisWeekSuspicious} suspicious)`);
+      logger.info({ module: 'paypalWeeklyReportScheduler', kind, tenantEmail: tenant.email, suspiciousCount: thisWeekSuspicious }, 'PayPal shield report sent');
     })
     .catch(err => {
-      console.error(`${label} ❌ Email failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'paypalWeeklyReportScheduler', tenantEmail: tenant.email, error: err.message }, 'Email failed');
     });
 }
 
@@ -295,7 +296,7 @@ async function processPaypalTenant(prisma, tenant, currentWeekStart, prevWeekSta
  */
 function startPaypalWeeklyReportScheduler(prisma) {
   setTimeout(() => {
-    console.log(`[${new Date().toISOString()}] 🛡️  PayPal Weekly Shield Scheduler started (checks every hour, sends Sundays 09:30 UTC)`);
+    logger.info({ module: 'paypalWeeklyReportScheduler' }, 'PayPal weekly shield scheduler started - checks every hour, sends Sundays 09:30 UTC');
 
     runPaypalWeeklyReportCheck(prisma);
     setInterval(() => runPaypalWeeklyReportCheck(prisma), SCHEDULER_INTERVAL_MS);
