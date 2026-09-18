@@ -14,6 +14,7 @@ const { sendAttackAlertEmail, sendPaypalAlertEmail } = require('./email');
 const { sendWebhookAlert }    = require('./webhook');
 const db                      = require('./db');
 const { isProOrAbove }        = require('./planAccess');
+const logger = require('./logger');
 
 /**
  * Sends attack alert to all configured channels for a single tenant.
@@ -31,14 +32,14 @@ async function notifyTenant(tenant, attackCount, savedAmount, windowMinutes = 10
   // Email — always sent
   promises.push(
     sendAttackAlertEmail(tenant, attackCount, savedAmount, windowMinutes)
-      .catch(err => console.error(`[Notify] Email failed for ${tenant.email}:`, err.message))
+      .catch(err => logger.error({ module: 'notify', fn: 'notifyTenant', tenantEmail: tenant.email, error: err.message }, 'Email failed'))
   );
 
   // Webhook — only if configured
   if (tenant.webhookUrl) {
     promises.push(
       sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes)
-        .catch(err => console.error(`[Notify] Webhook failed for ${tenant.id}:`, err.message))
+        .catch(err => logger.error({ module: 'notify', fn: 'notifyTenant', tenantId: tenant.id, error: err.message }, 'Webhook failed'))
     );
   }
 
@@ -62,7 +63,7 @@ async function notifyBINSequenceAlert(tenant, alert) {
   // Defense-in-depth: risk.js's call site has no plan check of its own,
   // so this is the only gate standing between detection and dispatch.
   if (!isProOrAbove(tenant.plan)) {
-    console.log(`[Notify] BIN sequence alert suppressed for ${tenant.id} — plan '${tenant.plan}' is not Pro/Agency`);
+    logger.info({ module: 'notify', fn: 'notifyBINSequenceAlert', tenantId: tenant.id, plan: tenant.plan }, 'BIN sequence alert suppressed - plan not Pro/Agency');
     return;
   }
 
@@ -84,12 +85,12 @@ async function notifyBINSequenceAlert(tenant, alert) {
       const cooldownMs = 30 * 60 * 1000;
       if (elapsed < cooldownMs) {
         const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
-        console.log(`[Notify] BIN alert suppressed for ${tenant.id} — cooldown (${remaining}m remaining)`);
+        logger.debug({ module: 'notify', fn: 'notifyBINSequenceAlert', tenantId: tenant.id, remainingMinutes: remaining }, 'BIN alert suppressed - cooldown active');
         return;
       }
     }
   } catch (err) {
-    console.error(`[Notify] Cooldown check failed for ${tenant.id}:`, err.message);
+    logger.error({ module: 'notify', fn: 'notifyBINSequenceAlert', tenantId: tenant.id, error: err.message }, 'Cooldown check failed');
     // Fail open — بنكمل الإرسال لو الـ DB check فشل
   }
 
@@ -117,7 +118,7 @@ async function notifyBINSequenceAlert(tenant, alert) {
         layer:      alert.layer,
         riskAddition: alert.riskAddition,
       }
-    ).catch(err => console.error(`[Notify] BIN email failed for ${tenant.email}:`, err.message))
+    ).catch(err => logger.error({ module: 'notify', fn: 'notifyBINSequenceAlert', tenantEmail: tenant.email, error: err.message }, 'BIN email failed'))
   );
 
   // ── Webhook ────────────────────────────────────────────────────────
@@ -140,7 +141,7 @@ async function notifyBINSequenceAlert(tenant, alert) {
           layer:      alert.layer,
           riskAddition: alert.riskAddition,
         }
-      ).catch(err => console.error(`[Notify] BIN webhook failed for ${tenant.id}:`, err.message))
+      ).catch(err => logger.error({ module: 'notify', fn: 'notifyBINSequenceAlert', tenantId: tenant.id, error: err.message }, 'BIN webhook failed'))
     );
   }
 
@@ -150,7 +151,7 @@ async function notifyBINSequenceAlert(tenant, alert) {
   await db.tenant.update({
     where: { id: tenant.id },
     data:  { lastAlertSentAt: new Date() },
-  }).catch(err => console.error(`[Notify] Failed to update lastAlertSentAt:`, err.message));
+  }).catch(err => logger.error({ module: 'notify', fn: 'notifyBINSequenceAlert', error: err.message }, 'Failed to update lastAlertSentAt'));
 }
 
 /**
@@ -173,7 +174,7 @@ async function notifyPaypalAlert(tenant, alertData) {
   // risk.js's /enrich call site has no plan check of its own, so this
   // is the only gate standing between detection and dispatch.
   if (!isProOrAbove(tenant.plan)) {
-    console.log(`[Notify] PayPal alert suppressed for ${tenant.id} — plan '${tenant.plan}' is not Pro/Agency`);
+    logger.info({ module: 'notify', fn: 'notifyPaypalAlert', tenantId: tenant.id, plan: tenant.plan }, 'PayPal alert suppressed - plan not Pro/Agency');
     return;
   }
 
@@ -181,7 +182,7 @@ async function notifyPaypalAlert(tenant, alertData) {
 
   // ── Tier check — suppress low-risk silently ───────────────────────
   if (riskScore < 70) {
-    console.log(`[Notify] PayPal alert suppressed for ${tenant.id} — score ${riskScore} below threshold`);
+    logger.debug({ module: 'notify', fn: 'notifyPaypalAlert', tenantId: tenant.id, riskScore }, 'PayPal alert suppressed - score below threshold');
     return;
   }
 
@@ -201,7 +202,7 @@ async function notifyPaypalAlert(tenant, alertData) {
         const elapsed = Date.now() - new Date(tenantData[COOLDOWN_FIELD]).getTime();
         if (elapsed < cooldownMs) {
           const remaining = Math.ceil((cooldownMs - elapsed) / 60000);
-          console.log(`[Notify] PayPal alert suppressed for ${tenant.id} — cooldown (${remaining}m remaining)`);
+          logger.debug({ module: 'notify', fn: 'notifyPaypalAlert', tenantId: tenant.id, remainingMinutes: remaining }, 'PayPal alert suppressed - cooldown active');
           return;
         }
       }
@@ -212,7 +213,7 @@ async function notifyPaypalAlert(tenant, alertData) {
         tenant.webhookType = tenantData.webhookType;
       }
     } catch (err) {
-      console.error(`[Notify] PayPal cooldown check failed for ${tenant.id}:`, err.message);
+      logger.error({ module: 'notify', fn: 'notifyPaypalAlert', tenantId: tenant.id, error: err.message }, 'PayPal cooldown check failed');
       // Fail open — send the alert if DB check fails
     }
   }
@@ -222,7 +223,7 @@ async function notifyPaypalAlert(tenant, alertData) {
   // ── Email ─────────────────────────────────────────────────────────
   promises.push(
     sendPaypalAlertEmail(tenant, alertData)
-      .catch(err => console.error(`[Notify] PayPal email failed for ${tenant.email}:`, err.message))
+      .catch(err => logger.error({ module: 'notify', fn: 'notifyPaypalAlert', tenantEmail: tenant.email, error: err.message }, 'PayPal email failed'))
   );
 
   // ── Webhook ───────────────────────────────────────────────────────
@@ -242,7 +243,7 @@ async function notifyPaypalAlert(tenant, alertData) {
           amount:       alertData.amount,
           flags:        alertData.flags,
         }
-      ).catch(err => console.error(`[Notify] PayPal webhook failed for ${tenant.id}:`, err.message))
+      ).catch(err => logger.error({ module: 'notify', fn: 'notifyPaypalAlert', tenantId: tenant.id, error: err.message }, 'PayPal webhook failed'))
     );
   }
 
@@ -253,7 +254,7 @@ async function notifyPaypalAlert(tenant, alertData) {
     await db.tenant.update({
       where: { id: tenant.id },
       data:  { [COOLDOWN_FIELD]: new Date() },
-    }).catch(err => console.error(`[Notify] Failed to update ${COOLDOWN_FIELD}:`, err.message));
+    }).catch(err => logger.error({ module: 'notify', fn: 'notifyPaypalAlert', cooldownField: COOLDOWN_FIELD, error: err.message }, 'Failed to update cooldown timestamp'));
   }
 }
 
