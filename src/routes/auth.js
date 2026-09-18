@@ -215,7 +215,7 @@ router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => 
     return res.status(200).json(buildResponse());
 
   } catch (err) {
-    logger.error('Auth connect error:', err);
+    logger.error({ module: 'auth', error: err.message }, 'Auth connect error');
     return res.status(200).json(buildResponse());
   }
 });
@@ -361,7 +361,7 @@ router.get('/connect/confirm', async (req, res) => {
     ));
 
   } catch (err) {
-    logger.error('Connect confirm error:', err);
+    logger.error({ module: 'auth', error: err.message }, 'Connect confirm error');
     return res.status(500).send(renderResultPage(
       'Server Error', 'Something went wrong',
       'Please return to your WordPress admin and try connecting again. If the problem persists, contact support.'
@@ -647,7 +647,7 @@ router.get('/verify', async (req, res) => {
     return res.status(200).json({ valid: true });
 
   } catch (err) {
-    logger.error('Auth verify error:', err);
+    logger.error({ module: 'auth', error: err.message }, 'Auth verify error');
     return res.status(500).json({ error: 'Internal server error' });
   }
 });
