@@ -14,6 +14,7 @@
 
 const { sendRenewalReminderEmail, sendGracePeriodEmail, sendDowngradeEmail } = require('../lib/email');
 const { acquireLock } = require('../lib/distributedLock');
+const logger = require('../lib/logger');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -94,7 +95,7 @@ const processRenewalReminders = async (db) => {
     },
   });
 
-  console.log(`[SubscriptionScheduler] 📅 Found ${tenantsToRemind.length} tenants approaching renewal`);
+  logger.info({ module: 'subscriptionScheduler', count: tenantsToRemind.length }, 'Found tenants approaching renewal');
 
   for (const tenant of tenantsToRemind) {
     try {
@@ -111,7 +112,7 @@ const processRenewalReminders = async (db) => {
       if (!shouldRemind) continue;
 
       if (!canSendEmail(tenant.lastRenewalReminderSentAt)) {
-        console.log(`[SubscriptionScheduler] ⏭️  Skipping reminder for ${tenant.email} — cooldown active`);
+        logger.debug({ module: 'subscriptionScheduler', tenantId: tenant.id, email: tenant.email }, 'Skipping renewal reminder - cooldown active');
         continue;
       }
 
@@ -133,11 +134,11 @@ const processRenewalReminders = async (db) => {
         data:  { lastRenewalReminderSentAt: new Date() },
       });
 
-      console.log(`[SubscriptionScheduler] ✅ Renewal reminder sent to ${tenant.email} — ${daysLeft} days left`);
+      logger.info({ module: 'subscriptionScheduler', tenantId: tenant.id, daysLeft }, 'Renewal reminder sent');
 
     } catch (err) {
       // خطأ في تاجر واحد لا يوقف الـ loop كاملاً
-      console.error(`[SubscriptionScheduler] ❌ Reminder failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'subscriptionScheduler', tenantId: tenant.id, error: err.message }, 'Renewal reminder failed');
     }
   }
 };
@@ -168,7 +169,7 @@ const processExpiredToGrace = async (db) => {
   });
 
   if (expiredTenants.length > 0) {
-    console.log(`[SubscriptionScheduler] ⚠️  Found ${expiredTenants.length} expired subscriptions → moving to grace_period`);
+    logger.info({ module: 'subscriptionScheduler', count: expiredTenants.length }, 'Found expired subscriptions, moving to grace period');
   }
 
   for (const tenant of expiredTenants) {
@@ -187,7 +188,7 @@ const processExpiredToGrace = async (db) => {
         },
       });
 
-      console.log(`[SubscriptionScheduler] 🔄 ${tenant.email} → grace_period (ends ${graceEndsAt.toISOString()})`);
+      logger.info({ module: 'subscriptionScheduler', tenantId: tenant.id, graceEndsAt }, 'Tenant moved to grace period');
 
       // إرسال إيميل Grace Period (مع cooldown)
       if (canSendEmail(tenant.lastGracePeriodNoticeSentAt)) {
@@ -204,11 +205,11 @@ const processExpiredToGrace = async (db) => {
           data:  { lastGracePeriodNoticeSentAt: new Date() },
         });
 
-        console.log(`[SubscriptionScheduler] ✅ Grace period notice sent to ${tenant.email}`);
+        logger.info({ module: 'subscriptionScheduler', tenantId: tenant.id }, 'Grace period notice sent');
       }
 
     } catch (err) {
-      console.error(`[SubscriptionScheduler] ❌ Grace period processing failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'subscriptionScheduler', tenantId: tenant.id, error: err.message }, 'Grace period processing failed');
     }
   }
 };
@@ -234,7 +235,7 @@ const processGraceToExpired = async (db) => {
   });
 
   if (graceExpiredTenants.length > 0) {
-    console.log(`[SubscriptionScheduler] 🔻 Found ${graceExpiredTenants.length} grace periods ended → downgrading to free`);
+    logger.info({ module: 'subscriptionScheduler', count: graceExpiredTenants.length }, 'Found expired grace periods, downgrading to free');
   }
 
   for (const tenant of graceExpiredTenants) {
@@ -261,7 +262,7 @@ const processGraceToExpired = async (db) => {
         }),
       ]);
 
-     console.log(`[SubscriptionScheduler] ⬇️  ${tenant.email} downgraded: ${tenant.plan} → starter (grace ended), ${deactivatedStores.count} store(s) deactivated`);
+     logger.info({ module: 'subscriptionScheduler', tenantId: tenant.id, previousPlan: tenant.plan, deactivatedStores: deactivatedStores.count }, 'Tenant downgraded after grace period ended');
 
 if (canSendEmail(tenant.lastDowngradeNoticeSentAt)) {
   const previousPlanLabel = PLAN_LABELS[tenant.plan] || tenant.plan;
@@ -278,16 +279,16 @@ if (canSendEmail(tenant.lastDowngradeNoticeSentAt)) {
       data:  { lastDowngradeNoticeSentAt: new Date() },
     });
 
-    console.log(`[SubscriptionScheduler] ✅ Downgrade notice sent to ${tenant.email}`);
+    logger.info({ module: 'subscriptionScheduler', tenantId: tenant.id }, 'Downgrade notice sent');
   } catch (emailErr) {
     // Email failure must never roll back or retry-block the plan downgrade
     // itself — the transaction above already committed. Log and move on,
     // same tolerance as every other email call in this file.
-    console.error(`[SubscriptionScheduler] ❌ Downgrade email failed for ${tenant.email}:`, emailErr.message);
+    logger.error({ module: 'subscriptionScheduler', tenantId: tenant.id, error: emailErr.message }, 'Downgrade email failed');
   }
 }
     } catch (err) {
-      console.error(`[SubscriptionScheduler] ❌ Downgrade failed for ${tenant.email}:`, err.message);
+      logger.error({ module: 'subscriptionScheduler', tenantId: tenant.id, error: err.message }, 'Downgrade failed');
     }
   }
 };
@@ -321,11 +322,11 @@ const cleanupExpiredSessions = async (db) => {
     });
 
     if (deletedExpired.count > 0) {
-      console.log(`[SubscriptionScheduler] 🧹 Cleaned ${deletedExpired.count} expired checkout sessions`);
+      logger.info({ module: 'subscriptionScheduler', count: deletedExpired.count }, 'Cleaned expired checkout sessions');
     }
   } catch (err) {
     // الـ cleanup فشل — مش مشكلة كبيرة، سيحدث في الـ run التالي
-    console.error(`[SubscriptionScheduler] ❌ Session cleanup failed:`, err.message);
+    logger.error({ module: 'subscriptionScheduler', error: err.message }, 'Session cleanup failed');
   }
 };
 
@@ -337,11 +338,11 @@ const runSubscriptionCycle = async (db) => {
 
   const lock = await acquireLock('scheduler:subscription', 120_000);
   if (!lock) {
-    console.log('[SubscriptionScheduler] 🔒 lock not acquired, skipping this tick');
+    logger.debug({ module: 'subscriptionScheduler' }, 'Lock not acquired, skipping this tick');
     return;
   }
 
-  console.log(`[SubscriptionScheduler] 🔄 Starting subscription cycle — ${new Date().toISOString()}`);
+  logger.info({ module: 'subscriptionScheduler' }, 'Starting subscription cycle');
 
   try {
     // الترتيب مهم:
@@ -353,11 +354,11 @@ const runSubscriptionCycle = async (db) => {
     await cleanupExpiredSessions(db);
 
     const duration = Date.now() - startTime;
-    console.log(`[SubscriptionScheduler] ✅ Cycle completed in ${duration}ms`);
+    logger.info({ module: 'subscriptionScheduler', durationMs: duration }, 'Subscription cycle completed');
 
   } catch (err) {
     // خطأ غير متوقع في الـ cycle كاملة
-    console.error(`[SubscriptionScheduler] 💥 Cycle failed:`, err.message, err.stack);
+    logger.error({ module: 'subscriptionScheduler', error: err.message, stack: err.stack }, 'Subscription cycle failed');
   }
 };
 
@@ -371,7 +372,7 @@ const startSubscriptionScheduler = (db) => {
   // تأخير أولي لمنع ضغط الـ startup
   // (الـ schedulers الأخرى تنتظر 5 دقائق — نحن ننتظر 2)
   setTimeout(() => {
-    console.log(`[SubscriptionScheduler] 🚀 Started — running every ${INTERVAL_MS / 60000} minutes`);
+    logger.info({ module: 'subscriptionScheduler', intervalMinutes: INTERVAL_MS / 60000 }, 'Subscription scheduler started');
 
     // شغّل مرة واحدة فوراً عند البدء لاكتشاف أي حالات مكدسة
     runSubscriptionCycle(db);
