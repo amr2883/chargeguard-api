@@ -25,6 +25,7 @@
  * reintroduce the duplicate-send bug this helper exists to fix.
  */
 
+const logger = require('./logger');
 let Redis = null;
 try {
   Redis = require('ioredis');
@@ -42,23 +43,16 @@ if (process.env.REDIS_URL && Redis) {
   });
 
   redisClient.on('error', (err) => {
-    console.error(`[distributedLock] Redis connection error: ${err.message}`);
+    logger.error({ module: 'distributedLock', fn: 'redisClient.on(error)', error: err.message }, 'Redis connection error');
   });
 
   redisClient.on('connect', () => {
-    console.log('[distributedLock] Redis connected — distributed scheduler locking active');
+    logger.info({ module: 'distributedLock', fn: 'redisClient.on(connect)' }, 'Redis connected - distributed scheduler locking active');
   });
 } else if (!Redis) {
-  console.warn(
-    '[distributedLock] ioredis module not installed — distributed locking is DISABLED. ' +
-    'Install ioredis and set REDIS_URL before scaling horizontally.'
-  );
+  logger.warn({ module: 'distributedLock', fn: 'init' }, 'ioredis module not installed - distributed locking is DISABLED. Install ioredis and set REDIS_URL before scaling horizontally.');
 } else {
-  console.warn(
-    '[distributedLock] REDIS_URL not set — distributed locking is DISABLED. ' +
-    'If this backend runs more than one instance, schedulers WILL send duplicate ' +
-    'alerts/reports. Set REDIS_URL before scaling horizontally.'
-  );
+  logger.warn({ module: 'distributedLock', fn: 'init' }, 'REDIS_URL not set - distributed locking is DISABLED. If this backend runs more than one instance, schedulers WILL send duplicate alerts/reports. Set REDIS_URL before scaling horizontally.');
 }
 
 // Unique per-process identifier, useful for log correlation ("who holds this lock").
@@ -76,25 +70,25 @@ const INSTANCE_ID = process.env.RENDER_INSTANCE_ID || `pid-${process.pid}`;
 async function acquireLock(key, ttlMs) {
   if (!redisClient) {
     // Fail closed: no Redis configured means no safe coordination is possible.
-    console.warn(`[distributedLock] ${key} — no Redis client configured, skipping (fail-closed)`);
+    logger.warn({ module: 'distributedLock', fn: 'acquireLock', key }, 'No Redis client configured, skipping (fail-closed)');
     return false;
   }
 
   if (redisClient.status !== 'ready') {
-    console.warn(`[distributedLock] ${key} — Redis not ready (status: ${redisClient.status}), skipping (fail-closed)`);
+    logger.warn({ module: 'distributedLock', fn: 'acquireLock', key, redisStatus: redisClient.status }, 'Redis not ready, skipping (fail-closed)');
     return false;
   }
 
   try {
     const result = await redisClient.set(key, INSTANCE_ID, 'NX', 'PX', ttlMs);
     if (result === 'OK') {
-      console.log(`[distributedLock] ${key} — acquired by ${INSTANCE_ID} (ttl ${ttlMs}ms)`);
+      logger.debug({ module: 'distributedLock', fn: 'acquireLock', key, instanceId: INSTANCE_ID, ttlMs }, 'Lock acquired');
       return true;
     }
-    console.log(`[distributedLock] ${key} — lock not acquired, another instance is handling this run`);
+    logger.debug({ module: 'distributedLock', fn: 'acquireLock', key }, 'Lock not acquired - another instance is handling this run');
     return false;
   } catch (err) {
-    console.error(`[distributedLock] ${key} — Redis SET failed, skipping (fail-closed): ${err.message}`);
+    logger.error({ module: 'distributedLock', fn: 'acquireLock', key, error: err.message }, 'Redis SET failed, skipping (fail-closed)');
     return false;
   }
 }
