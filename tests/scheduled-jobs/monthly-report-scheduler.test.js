@@ -43,6 +43,7 @@ jest.mock('../../src/lib/email', () => ({
 const { startMonthlyReportScheduler } = require('../../src/jobs/monthlyReportScheduler');
 const { buildMonthlyReportData } = require('../../src/lib/reportDataService');
 const { sendMonthlyReportEmail } = require('../../src/lib/email');
+const { acquireLock } = require('../../src/lib/distributedLock');
 
 // ─── Constants mirrored from source (not exported) ──────────────────────────
 const STARTUP_DELAY_MS = 60 * 60 * 1000; // 1h
@@ -66,6 +67,8 @@ function makeReportData(overrides = {}) {
     totalProtected: 1234.56,
     totalFeesSaved: 210.1,
     securityScore: 87,
+    coreLayersActive: 4,
+    advancedLayersAvailable: 2,
     topCountry: 'US',
     topReason: 'card_testing',
     prevMonthAttacks: 30,
@@ -81,7 +84,11 @@ function makePrisma() {
     monthlyReport: {
       findFirst: jest.fn(),
       upsert: jest.fn(),
+      create: jest.fn(),
       update: jest.fn(),
+    },
+    store: {
+      findMany: jest.fn(),
     },
   };
 }
@@ -90,9 +97,12 @@ function applyPersistentDefaults(prisma, tenants = [makeTenant()]) {
   prisma.tenant.findMany.mockResolvedValue(tenants);
   prisma.monthlyReport.findFirst.mockResolvedValue(null); // no 'ready' record
   prisma.monthlyReport.upsert.mockResolvedValue({ id: 'report-1' });
+  prisma.monthlyReport.create.mockResolvedValue({ id: 'report-1' });
+  prisma.store.findMany.mockResolvedValue([]);
   prisma.monthlyReport.update.mockResolvedValue({});
   buildMonthlyReportData.mockResolvedValue(makeReportData());
   sendMonthlyReportEmail.mockResolvedValue(undefined);
+  acquireLock.mockResolvedValue(true); // resetAllMocks() wipes the factory default
 }
 
 // Time just before the 1h startup delay elapses, such that STARTUP_DELAY_MS
@@ -108,7 +118,7 @@ async function bootToFirstTick(prisma) {
 
 function errorLoggedContaining(substr) {
   return console.error.mock.calls.some(call =>
-    call.some(arg => typeof arg === 'string' && arg.includes(substr))
+    call.some(arg => typeof arg === 'string' && arg.toLowerCase().includes(substr.toLowerCase()))
   );
 }
 
@@ -161,7 +171,7 @@ describe('monthly-report-scheduler', () => {
     await bootToFirstTick(prisma);
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(buildMonthlyReportData).toHaveBeenCalledWith(prisma, 'tenant-1', 2, 2025);
+    expect(buildMonthlyReportData).toHaveBeenCalledWith(prisma, 'tenant-1', 2, 2025, null);
   });
 
   // 4. getReportPeriod January edge case → Dec of prior year
@@ -171,7 +181,7 @@ describe('monthly-report-scheduler', () => {
     await bootToFirstTick(prisma);
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(buildMonthlyReportData).toHaveBeenCalledWith(prisma, 'tenant-1', 12, 2024);
+    expect(buildMonthlyReportData).toHaveBeenCalledWith(prisma, 'tenant-1', 12, 2024, null);
   });
 
   // 5. existingReady found (status:'ready') → tenant skipped
@@ -181,34 +191,28 @@ describe('monthly-report-scheduler', () => {
     await bootToFirstTick(prisma);
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(prisma.monthlyReport.upsert).not.toHaveBeenCalled();
+    expect(prisma.monthlyReport.create).not.toHaveBeenCalled();
     expect(buildMonthlyReportData).not.toHaveBeenCalled();
     expect(sendMonthlyReportEmail).not.toHaveBeenCalled();
   });
 
   // 6. no existing record → upsert creates with status:'generating'
-  test('no existing ready record → upsert locks with status generating (create branch)', async () => {
+  test('no existing ready record → tenant-wide create locks with status generating (create branch)', async () => {
     jest.setSystemTime(timeBeforeStartup('2025-03-01T10:00:00.000Z'));
     await bootToFirstTick(prisma);
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(prisma.monthlyReport.upsert).toHaveBeenCalledWith({
-      where: {
-        tenantId_reportMonth_reportYear: {
-          tenantId: 'tenant-1',
-          reportMonth: 2,
-          reportYear: 2025,
-        },
-      },
-      create: {
+    expect(prisma.monthlyReport.create).toHaveBeenCalledWith({
+      data: {
         tenantId: 'tenant-1',
+        storeId: null,
         reportMonth: 2,
         reportYear: 2025,
         status: 'generating',
       },
-      update: { status: 'generating' },
       select: { id: true },
     });
+    expect(prisma.monthlyReport.upsert).not.toHaveBeenCalled();
   });
 
   // 7. stale 'failed'/'generating' record exists → upsert resets to 'generating' (retry)
@@ -219,20 +223,19 @@ describe('monthly-report-scheduler', () => {
     // the SAME where/create/update shape regardless of what's already there.
     // This test documents that quirk: the call args are identical to the
     // "no existing record" case; only the DB-side branch differs.
-    prisma.monthlyReport.findFirst.mockResolvedValue(null);
-    // Simulate upsert hitting its update branch by having it resolve as if
-    // it reset a pre-existing record.
-    prisma.monthlyReport.upsert.mockResolvedValue({ id: 'report-retried' });
+    prisma.monthlyReport.findFirst.mockResolvedValueOnce(null); // 'ready' check
+    prisma.monthlyReport.findFirst.mockResolvedValueOnce({ id: 'report-retried' }); // stale record lookup
 
     jest.setSystemTime(timeBeforeStartup('2025-03-01T10:00:00.000Z'));
     await bootToFirstTick(prisma);
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(prisma.monthlyReport.upsert).toHaveBeenCalledWith(
-      expect.objectContaining({
-        update: { status: 'generating' },
-      })
-    );
+    expect(prisma.monthlyReport.create).not.toHaveBeenCalled();
+    expect(prisma.monthlyReport.update).toHaveBeenCalledWith({
+      where: { id: 'report-retried' },
+      data: { status: 'generating' },
+      select: { id: true },
+    });
     // The retried record's id must be used downstream, not a stale one.
     expect(prisma.monthlyReport.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'report-retried' } })
@@ -241,7 +244,7 @@ describe('monthly-report-scheduler', () => {
 
   // 8. upsert (lock) itself throws → tenant aborted, no crash
   test('upsert throws → tenant aborted cleanly, no crash, no downstream calls', async () => {
-    prisma.monthlyReport.upsert.mockRejectedValue(new Error('lock write failed'));
+    prisma.monthlyReport.create.mockRejectedValue(new Error('lock write failed'));
     jest.setSystemTime(timeBeforeStartup('2025-03-01T10:00:00.000Z'));
 
     await bootToFirstTick(prisma);
@@ -269,7 +272,8 @@ describe('monthly-report-scheduler', () => {
         totalAttacks: reportData.totalAttacks,
         totalProtected: reportData.totalProtected,
         totalFeesSaved: reportData.totalFeesSaved,
-        securityScore: reportData.securityScore,
+        coreLayersActive: reportData.coreLayersActive,
+        advancedLayersAvailable: reportData.advancedLayersAvailable,
         topCountry: reportData.topCountry,
         topReason: reportData.topReason,
         prevMonthAttacks: reportData.prevMonthAttacks,
@@ -289,7 +293,7 @@ describe('monthly-report-scheduler', () => {
   test('buildMonthlyReportData throws → record marked failed, outer catch logs, loop continues to next tenant', async () => {
     const tenants = [makeTenant({ id: 'tenant-1', email: 'a@example.com' }), makeTenant({ id: 'tenant-2', email: 'b@example.com' })];
     prisma.tenant.findMany.mockResolvedValue(tenants);
-    prisma.monthlyReport.upsert
+    prisma.monthlyReport.create
       .mockResolvedValueOnce({ id: 'report-1' })
       .mockResolvedValueOnce({ id: 'report-2' });
     buildMonthlyReportData
@@ -310,7 +314,7 @@ describe('monthly-report-scheduler', () => {
 
     // Loop must continue: tenant 2 processed after the inter-tenant delay.
     await jest.advanceTimersByTimeAsync(TENANT_DELAY_MS);
-    expect(prisma.monthlyReport.upsert).toHaveBeenCalledTimes(2);
+    expect(prisma.monthlyReport.create).toHaveBeenCalledTimes(2);
     expect(sendMonthlyReportEmail).toHaveBeenCalledWith(
       expect.objectContaining({ tenant: expect.objectContaining({ id: 'tenant-2' }) })
     );
@@ -326,7 +330,7 @@ describe('monthly-report-scheduler', () => {
     await expect(bootToFirstTick(prisma)).resolves.not.toThrow();
     await jest.advanceTimersByTimeAsync(0);
 
-    expect(errorLoggedContaining("could not update record to 'failed'")).toBe(true);
+    expect(errorLoggedContaining('could not update record to failed')).toBe(true);
     // The unhandled-error catch in the outer loop still logs too.
     expect(errorLoggedContaining('Unhandled error for tenant')).toBe(true);
   });
@@ -345,7 +349,7 @@ describe('monthly-report-scheduler', () => {
     expect(prisma.monthlyReport.update).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ status: 'ready' }) })
     );
-    expect(errorLoggedContaining('Email failed for')).toBe(true);
+    expect(errorLoggedContaining('monthly report email failed')).toBe(true);
   });
 
   // 13. buildDownloadUrl uses RENDER_EXTERNAL_URL or fallback → both cases
@@ -388,15 +392,15 @@ describe('monthly-report-scheduler', () => {
 
     // Tenant 1 fully processed synchronously (relative to fake timers);
     // tenant 2 must still be untouched, blocked behind the 5s delay.
-    expect(prisma.monthlyReport.findFirst).toHaveBeenCalledTimes(1);
+    expect(buildMonthlyReportData.mock.calls.map((c) => c[1])).toEqual(['tenant-1']);
 
     // Advance right up to (but not past) the delay boundary.
     await jest.advanceTimersByTimeAsync(TENANT_DELAY_MS - 1);
-    expect(prisma.monthlyReport.findFirst).toHaveBeenCalledTimes(1);
+    expect(buildMonthlyReportData.mock.calls.map((c) => c[1])).toEqual(['tenant-1']);
 
     // Cross the boundary — tenant 2 now proceeds.
     await jest.advanceTimersByTimeAsync(1);
-    expect(prisma.monthlyReport.findFirst).toHaveBeenCalledTimes(2);
+    expect(buildMonthlyReportData.mock.calls.map((c) => c[1])).toEqual(['tenant-1', 'tenant-2']);
   });
 
   // 15. timer wiring → 1h startup delay, hourly
