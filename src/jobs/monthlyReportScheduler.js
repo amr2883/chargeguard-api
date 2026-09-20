@@ -189,14 +189,35 @@ async function generateOneReport(prisma, tenantId, storeId, reportMonth, reportY
 
   let reportRecord;
   try {
-    reportRecord = await prisma.monthlyReport.upsert({
-      where: {
-        tenantId_storeId_reportMonth_reportYear: { tenantId, storeId, reportMonth, reportYear },
-      },
-      create: { tenantId, storeId, reportMonth, reportYear, status: 'generating' },
-      update: { status: 'generating' },
-      select: { id: true },
-    });
+    if (storeId === null || storeId === undefined) {
+      // tenant-wide (storeId null): Prisma rejects null inside a compound-unique
+      // upsert, and Postgres does not treat NULLs as equal, so use find + create/update
+      // (backed by the partial unique index MonthlyReport_tenant_wide_unique).
+      const where = { tenantId, storeId: null, reportMonth, reportYear };
+      const existing = await prisma.monthlyReport.findFirst({ where, select: { id: true } });
+      if (existing) {
+        reportRecord = await prisma.monthlyReport.update({ where: { id: existing.id }, data: { status: 'generating' }, select: { id: true } });
+      } else {
+        try {
+          reportRecord = await prisma.monthlyReport.create({ data: { ...where, status: 'generating' }, select: { id: true } });
+        } catch (e) {
+          if (e && e.code === 'P2002') {
+            const again = await prisma.monthlyReport.findFirst({ where, select: { id: true } });
+            if (!again) throw e;
+            reportRecord = await prisma.monthlyReport.update({ where: { id: again.id }, data: { status: 'generating' }, select: { id: true } });
+          } else { throw e; }
+        }
+      }
+    } else {
+      reportRecord = await prisma.monthlyReport.upsert({
+        where: {
+          tenantId_storeId_reportMonth_reportYear: { tenantId, storeId, reportMonth, reportYear },
+        },
+        create: { tenantId, storeId, reportMonth, reportYear, status: 'generating' },
+        update: { status: 'generating' },
+        select: { id: true },
+      });
+    }
   } catch (err) {
     logger.error({ module: 'monthlyReportScheduler', logCtx, error: err.message }, 'Failed to create generating record');
     return null;
