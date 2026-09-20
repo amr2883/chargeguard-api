@@ -1995,7 +1995,7 @@ router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
  *                 success: { type: boolean }
  *                 entries: { type: array, items: { $ref: '#/components/schemas/BlacklistEntry' } }
  */
-router.get('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
+router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
    const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
