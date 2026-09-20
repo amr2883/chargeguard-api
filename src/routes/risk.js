@@ -1915,6 +1915,9 @@ router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
     prometheus.recordAccessControlAction('add', 'blacklist');
     res.json({ success: true, entry: blacklistEntry });
   } catch (error) {
+    if (error.code === 'P2002') {
+      return res.status(409).json({ error: 'This entry already exists in the blacklist' });
+    }
     logger.error({ module: 'risk', endpoint: 'blacklist-add', error: error.message, stack: error.stack }, 'Error adding blacklist entry');
     res.status(500).json(safeErrorPayload(error));
   }
