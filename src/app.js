@@ -60,6 +60,7 @@ app.use('/api/settings/country-overrides', express.raw({ type: 'application/json
 app.use('/api/stores', express.raw({ type: 'application/json' }));
 app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
 app.use('/api/auth/self-test', express.raw({ type: 'application/json' }));
+app.use('/api/risk/challenge', express.raw({ type: 'application/json' }));
 app.use(express.json());
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
