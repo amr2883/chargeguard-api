@@ -75,6 +75,7 @@ jest.mock('../../src/lib/prometheus', () => ({
 }));
 
 jest.mock('../../src/lib/logger', () => ({
+  debug: jest.fn(),
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),

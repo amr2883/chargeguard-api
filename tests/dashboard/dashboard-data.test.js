@@ -143,6 +143,7 @@ jest.mock('../../src/lib/email', () => ({
   sendRotatedKeyEmail: jest.fn().mockResolvedValue(undefined),
 }));
 jest.mock('../../src/lib/logger', () => ({
+  debug: jest.fn(),
   info: jest.fn(),
   warn: jest.fn(),
   error: jest.fn(),
