@@ -39,6 +39,25 @@ async function replayOnce() {
   }
 
   for (const row of rows) {
+    // Atomic claim: only one worker/sweep can flip this row from
+    // 'pending' to 'processing'. If another instance (or an overlapping
+    // sweep on the same instance) already claimed it, count will be 0
+    // and we skip it — this is what makes double-processing impossible,
+    // not just unlikely.
+    let claim;
+    try {
+      claim = await db.pendingEnrichment.updateMany({
+        where: { id: row.id, status: 'pending' },
+        data: { status: 'processing' },
+      });
+    } catch (err) {
+      logger.error({ module: 'replayPendingEnrichments', rowId: row.id, error: err.message }, 'Failed to claim row — will retry next sweep');
+      continue;
+    }
+    if (claim.count !== 1) {
+      continue; // lost the race to another worker/sweep — not an error
+    }
+
     try {
       // Expire rows nobody ever linked, tenant-scoped or not (legacy
       // rows created before the merchantId migration have merchantId
@@ -53,7 +72,9 @@ async function replayOnce() {
         select: { id: true },
       });
       if (!existingOrder) {
-        continue; // still not linked — try again next sweep
+        // Still not linked — release the claim so the next sweep can try again.
+        await db.pendingEnrichment.update({ where: { id: row.id }, data: { status: 'pending' } });
+        continue;
       }
 
       const tenant = await db.tenant.findUnique({ where: { id: row.merchantId }, select: { id: true, plan: true, countryOverrides: true, fraudIsolationMode: true } });
@@ -90,9 +111,24 @@ async function replayOnce() {
       // processEnrichment() itself deletes the row via its own
       // pendingEnrichment.deleteMany({ merchantId, orderId, status: 'pending' })
       // call on every success path — nothing further to do here except log.
+      //
+      // NOTE: that internal delete filters on status: 'pending', but we've
+      // since claimed this row to 'processing'. This is intentional and
+      // harmless: deleteMany with no matching rows is a no-op, and the row
+      // is explicitly deleted below instead so cleanup is guaranteed
+      // regardless of which status it's currently in.
+      await db.pendingEnrichment.deleteMany({ where: { id: row.id } });
+
       logger.info({ module: 'replayPendingEnrichments', rowId: row.id, orderId: row.orderId, status: result.status }, 'Replayed pending enrichment');
     } catch (err) {
       logger.error({ module: 'replayPendingEnrichments', rowId: row.id, error: err.message }, 'Replay attempt failed — will retry next sweep');
+      // Release the claim so this row is picked up again on the next
+      // sweep instead of being silently stuck on 'processing' forever.
+      try {
+        await db.pendingEnrichment.update({ where: { id: row.id }, data: { status: 'pending' } });
+      } catch (revertErr) {
+        logger.error({ module: 'replayPendingEnrichments', rowId: row.id, error: revertErr.message }, 'Failed to release claim after error — row may be stuck until manually reset');
+      }
     }
   }
 }
