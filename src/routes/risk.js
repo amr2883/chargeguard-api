@@ -3123,81 +3123,105 @@ router.post('/woocommerce-webhook', async (req, res) => {
     };
 
     // 12. Save order and risk evaluation
-    await db.order.upsert({
-      where: { merchantId_orderId: { merchantId, orderId: extracted.orderId } },
-      create: {
-        orderId: extracted.orderId,
-        merchantId,
-        // Same unconditional-attribution fix as /evaluate (Change 2a).
-        // req.storeId here comes from resolveStoreIdBestEffort() via
-        // X-WC-Webhook-Source, set earlier in this handler.
-        storeId: req.storeId ?? null,
-        amount: extracted.amount,
-        currency: 'USD',
-        email: extracted.email,
-        // [Bug #7 fix] راجع تعليق /evaluate فوق — نفس المنطق بالظبط.
-        normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
-        // [BIN Velocity fix] راجع webhookCardBinPrefix فوق.
-        cardBinPrefix: webhookCardBinPrefix,
-        ipAddress: extracted.ipAddress,
-        deviceFingerprint: riskRequest.deviceFingerprint,
-        riskScore: riskResult.score,
-        riskLevel: riskResult.riskLevel,
-        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        connectedRisk: riskResult.graphRisk || 0,
-        signalsSnapshot: JSON.stringify(signalsSnapshot),
-        fingerprintVersion: 'v3',
-      },
-      update: {
-        amount: extracted.amount,
-        email: extracted.email,
-        normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
-        cardBinPrefix: webhookCardBinPrefix,
-        ipAddress: extracted.ipAddress,
-        deviceFingerprint: riskRequest.deviceFingerprint,
-        riskScore: riskResult.score,
-        riskLevel: riskResult.riskLevel,
-        decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-        connectedRisk: riskResult.graphRisk || 0,
-        signalsSnapshot: JSON.stringify(signalsSnapshot),
-      },
-    });
+    // [Concurrency fix] الكتابة محمية بـ pg_advisory_xact_lock على
+    // (merchantId, orderId) + double-checked locking: بعد أخذ القفل نعيد
+    // فحص existingOrder. لو موجود بالفعل (طلب متزامن سبقنا وكتب أثناء
+    // انتظارنا القفل)، نتوقف عن الكتابة ونعتمد على نتيجته المخزَّنة بدل ما
+    // نكتب فوقها بنتيجتنا المحسوبة بشكل مستقل — هذا يمنع last-write-wins
+    // المؤكد بالاختبار (20 طلب متزامن، 90% ردوا score=70 لكن المخزَّن فعليًا
+    // 47). القفل transaction-scoped فيتحرر تلقائيًا عند commit/rollback.
+    // Trade-off موثق: هذا لا يمنع double-compute (كل طلب لسه بيحسب
+    // calculateRiskScore() بشكل مستقل قبل الوصول هنا) — فقط يضمن أن النتيجة
+    // النهائية المخزَّنة والمرجعة للعميل تكونان لنفس الحساب دائمًا.
+    let webhookRaceWinner = null; // لو راصدين race، هنا نحط نتيجة الفائز الفعلي
 
-    // Optionally save RiskEvaluation if decision is block or review
-    if (riskResult.decision.includes('Block') || riskResult.decision.includes('Review')) {
-      const savedOrder = await db.order.findUnique({ where: { merchantId_orderId: { merchantId, orderId: extracted.orderId } } });
-      if (savedOrder) {
-        await db.riskEvaluation.upsert({
-          where: { orderId: savedOrder.id },
-          create: {
-            orderId: savedOrder.id,
-            staticScore: riskResult.score,
-            learningScore: riskResult.score,
-            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
-            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
-            positiveSignals: JSON.stringify(riskResult.positives || []),
-            scoringVersion: riskResult.scoringVersion || 'v1.0',
-            fraudProb: riskResult.economicData?.fraudProb ?? null,
-            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
-            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
-            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
-            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
-          },
-          update: {
-            staticScore: riskResult.score,
-            learningScore: riskResult.score,
-            finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
-            topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
-            positiveSignals: JSON.stringify(riskResult.positives || []),
-            fraudProb: riskResult.economicData?.fraudProb ?? null,
-            expectedLoss: riskResult.economicData?.expectedLoss ?? null,
-            thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
-            decisionBefore: riskResult.economicData?.decisionBefore ?? null,
-            decisionAfter: riskResult.economicData?.decisionAfter ?? null,
-          },
-        });
+    await db.$transaction(async (tx) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${merchantId} || ':' || ${extracted.orderId}))`;
+
+      const raceCheck = await tx.order.findUnique({
+        where: { merchantId_orderId: { merchantId, orderId: extracted.orderId } },
+      });
+      if (raceCheck) {
+        webhookRaceWinner = raceCheck;
+        return;
       }
-    }
+
+      await tx.order.upsert({
+        where: { merchantId_orderId: { merchantId, orderId: extracted.orderId } },
+        create: {
+          orderId: extracted.orderId,
+          merchantId,
+          // Same unconditional-attribution fix as /evaluate (Change 2a).
+          // req.storeId here comes from resolveStoreIdBestEffort() via
+          // X-WC-Webhook-Source, set earlier in this handler.
+          storeId: req.storeId ?? null,
+          amount: extracted.amount,
+          currency: 'USD',
+          email: extracted.email,
+          // [Bug #7 fix] راجع تعليق /evaluate فوق — نفس المنطق بالظبط.
+          normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
+          // [BIN Velocity fix] راجع webhookCardBinPrefix فوق.
+          cardBinPrefix: webhookCardBinPrefix,
+          ipAddress: extracted.ipAddress,
+          deviceFingerprint: riskRequest.deviceFingerprint,
+          riskScore: riskResult.score,
+          riskLevel: riskResult.riskLevel,
+          decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+          connectedRisk: riskResult.graphRisk || 0,
+          signalsSnapshot: JSON.stringify(signalsSnapshot),
+          fingerprintVersion: 'v3',
+        },
+        update: {
+          amount: extracted.amount,
+          email: extracted.email,
+          normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
+          cardBinPrefix: webhookCardBinPrefix,
+          ipAddress: extracted.ipAddress,
+          deviceFingerprint: riskRequest.deviceFingerprint,
+          riskScore: riskResult.score,
+          riskLevel: riskResult.riskLevel,
+          decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+          connectedRisk: riskResult.graphRisk || 0,
+          signalsSnapshot: JSON.stringify(signalsSnapshot),
+        },
+      });
+
+      // Optionally save RiskEvaluation if decision is block or review
+      if (riskResult.decision.includes('Block') || riskResult.decision.includes('Review')) {
+        const savedOrder = await tx.order.findUnique({ where: { merchantId_orderId: { merchantId, orderId: extracted.orderId } } });
+        if (savedOrder) {
+          await tx.riskEvaluation.upsert({
+            where: { orderId: savedOrder.id },
+            create: {
+              orderId: savedOrder.id,
+              staticScore: riskResult.score,
+              learningScore: riskResult.score,
+              finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+              topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+              positiveSignals: JSON.stringify(riskResult.positives || []),
+              scoringVersion: riskResult.scoringVersion || 'v1.0',
+              fraudProb: riskResult.economicData?.fraudProb ?? null,
+              expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+              thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+              decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+              decisionAfter: riskResult.economicData?.decisionAfter ?? null,
+            },
+            update: {
+              staticScore: riskResult.score,
+              learningScore: riskResult.score,
+              finalDecision: riskResult.decision.includes('Approve') ? 'low' : (riskResult.decision.includes('Review') ? 'medium' : 'high'),
+              topSignals: JSON.stringify(riskResult.flags.slice(0, 5)),
+              positiveSignals: JSON.stringify(riskResult.positives || []),
+              fraudProb: riskResult.economicData?.fraudProb ?? null,
+              expectedLoss: riskResult.economicData?.expectedLoss ?? null,
+              thresholdUsed: riskResult.economicData?.baseThreshold ?? null,
+              decisionBefore: riskResult.economicData?.decisionBefore ?? null,
+              decisionAfter: riskResult.economicData?.decisionAfter ?? null,
+            },
+          });
+        }
+      }
+    }, { timeout: 15000, maxWait: 5000 });
 
     // ── Quota Counter: webhook risk-scoring block path ──────────────────
     // Second of two block-producing decision points on this route (the
@@ -3266,12 +3290,37 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
 
     // Return response
+    // [Concurrency fix] لو حصل race وطلب متزامن سبقنا بالكتابة
+    // (webhookRaceWinner !== null)، نرجّع القيم المخزَّنة الفعلية بدل
+    // riskResult المحسوب محليًا — يضمن تطابق الرد مع الـ DB 100% حتى تحت
+    // تزامن حقيقي، مش بس في حالة الكتابة الطازجة العادية.
+    const webhookResponseSnapshot = webhookRaceWinner
+      ? (() => {
+          let wonFlags = riskResult.flags;
+          try {
+            const parsed = JSON.parse(webhookRaceWinner.signalsSnapshot || '{}');
+            if (parsed && Array.isArray(parsed.flags)) wonFlags = parsed.flags;
+          } catch (_) { /* fallback على riskResult.flags لو الـ parse فشل */ }
+          return {
+            score: webhookRaceWinner.riskScore,
+            decision: webhookRaceWinner.decision,
+            flags: wonFlags,
+            connectedRisk: webhookRaceWinner.connectedRisk || 0,
+          };
+        })()
+      : {
+          score: riskResult.score,
+          decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
+          flags: riskResult.flags,
+          connectedRisk: riskResult.graphRisk || 0,
+        };
+
     res.json({
       orderId: extracted.orderId,
-      score: riskResult.score,
-      decision: riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block'),
-      flags: riskResult.flags,
-      connectedRisk: riskResult.graphRisk || 0,
+      score: webhookResponseSnapshot.score,
+      decision: webhookResponseSnapshot.decision,
+      flags: webhookResponseSnapshot.flags,
+      connectedRisk: webhookResponseSnapshot.connectedRisk,
       scored: true,
       limitedScoring,
     });
