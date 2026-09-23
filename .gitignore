@@ -60,3 +60,10 @@ chargeguard-woocommerce*.zip
 
 *.bak
 .env.backup*
+
+# --- Added 2026-09-23: block env and backup leaks ---
+.env*
+!.env.example
+*.bak*
+*.backup*
+_tmp_*
