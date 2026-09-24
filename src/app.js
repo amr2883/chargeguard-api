@@ -28,17 +28,19 @@ app.use((req, res, next) => {
 });
 app.use(cors());
 app.use(prometheus.httpMetricsMiddleware);
-let swaggerUi, swaggerSpec;
-try {
-  swaggerUi = require('swagger-ui-express');
-  swaggerSpec = require('./swagger');
-  app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
-  app.get('/api-docs.json', (req, res) => {
-    res.setHeader('Content-Type', 'application/json');
-    res.send(swaggerSpec);
-  });
-} catch (e) {
-  console.warn('?? Swagger UI not available:', e.message);
+if (process.env.NODE_ENV !== 'production') {
+  try {
+    const swaggerUi   = require('swagger-ui-express');
+    const swaggerSpec = require('./swagger');
+    app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
+    app.get('/api-docs.json', (_req, res) => {
+      res.setHeader('Content-Type', 'application/json');
+      res.send(swaggerSpec);
+    });
+  } catch (e) {
+    console.warn('Swagger UI not available:', e.message);
+  }
+}
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
