@@ -1,8 +1,8 @@
-services:
+﻿services:
   - type: web
     name: chargeguard-api
     runtime: docker
-    repo: https://huggingface.co/spaces/Amr453/chargeguard-space
+    repo: https://github.com/amr2883/chargeguard-api
     branch: master
     dockerContext: .
     dockerfilePath: ./Dockerfile

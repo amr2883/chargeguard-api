@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const { runFastCleanup } = require('./lib/retention');
 const db = require('./lib/db');
 const express = require('express');
@@ -12,13 +12,13 @@ const { safeErrorPayload } = require('./lib/errorResponse');
 const app = express();
 app.set('trust proxy', true);
 
-// TEMPORARY — remove after test
+// TEMPORARY â€” remove after test
 
 
 // Middlewares
 app.use((req, res, next) => {
   if (req.path.startsWith('/admin')) {
-    // CSP disabled here only — the admin panel's inline <script> predates
+    // CSP disabled here only â€” the admin panel's inline <script> predates
     // helmet's default policy, and this route is already protected by the
     // x-admin-key header auth + per-IP rate limiting in routes/admin.js.
     // Every other route keeps the full default helmet() policy unchanged.
@@ -81,7 +81,7 @@ app.use('/api/settings',  settingsRoutes);
 app.use('/api/payments',  paymentsRoutes);
 app.use('/api/stores',    require('./routes/stores'));
 app.use('/api/updates',   updatesRoutes);
-// Morgan ����� �� /admin ���� ����� ��� secret �� �����
+// Morgan ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ /admin ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ secret ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
@@ -93,12 +93,12 @@ app.use((err, req, res, next) => {
   if (req.originalUrl === '/api/risk/woocommerce-webhook') {
     // Unchanged: forwarded to Express's built-in final handler. This path
     // only fires for errors thrown before that route's own try/catch could
-    // run (e.g. a raw-body-parsing failure upstream) — Express's default
+    // run (e.g. a raw-body-parsing failure upstream) â€” Express's default
     // handler still responds with a 5xx status, which is all the plugin's
     // circuit breaker (class-api-client.php) actually inspects.
     return next(err);
   }
-  // Full detail (message + stack) goes to the structured logger only —
+  // Full detail (message + stack) goes to the structured logger only â€”
   // never to the client. safeErrorPayload() returns a generic
   // { error: 'Internal server error' } in production, and only reveals
   // err.message/err.stack when NODE_ENV === 'development' or
@@ -139,6 +139,7 @@ app.get('/api/cleanup-now', async (req, res) => {
 // point that starts the HTTP server AND registers every scheduler
 // (monthlyReportScheduler, subscriptionScheduler, etc.) is src/server.js.
 // Calling listen() here too previously caused a duplicate bind attempt on
-// the same port within the same process — visible in production logs as
+// the same port within the same process â€” visible in production logs as
 // the "Server running" line printing twice.
 module.exports = app;
+
