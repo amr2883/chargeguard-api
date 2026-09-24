@@ -1,4 +1,4 @@
-﻿require('dotenv').config();
+require('dotenv').config();
 const { runFastCleanup } = require('./lib/retention');
 const db = require('./lib/db');
 const express = require('express');
@@ -40,7 +40,6 @@ if (process.env.NODE_ENV !== 'production') {
   } catch (e) {
     console.warn('Swagger UI not available:', e.message);
   }
-}
 }
 app.use('/api/risk/woocommerce-webhook', express.raw({ type: '*/*' }));
 app.use('/api/risk/blocked-attempt', express.raw({ type: 'application/json' }));
