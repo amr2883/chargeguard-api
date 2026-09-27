@@ -1,5 +1,4 @@
 require('dotenv').config();
-const { runFastCleanup } = require('./lib/retention');
 const db = require('./lib/db');
 const express = require('express');
 const cors = require('cors');
@@ -124,15 +123,16 @@ app.get('/api/retention-config', (req, res) => {
   res.json({ success: true, retention: RETENTION });
 });
 
-app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ? External ping ? running fast cleanup...`);
-  try {
-    await runFastCleanup(db);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ? Cleanup failed:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
+// [C-02 FIX] كان هنا /api/cleanup-now: بيحذف Order/Blacklist/Whitelist
+// فعلياً، بلا auth ولا rate limit، أي حد يعرف الـ URL يقدر ينادّيه. اتشال
+// استدعاء runFastCleanup بالكامل — مكرر أصلاً مع الـ internal scheduler
+// (src/server.js، كل 10 دقايق). استُبدل بـ /api/ping: health check بحت،
+// بلا DB access وبلا أي side effect، هدفه الوحيد إبقاء الـ Render Free
+// instance صاحي لو فيه external pinger (UptimeRobot أو مشابه) — لازم
+// تحدّث الـ URL المُستهدَف في إعدادات الـ pinger من /api/cleanup-now
+// إلى /api/ping بعد نشر هذا التعديل.
+app.get('/api/ping', (req, res) => {
+  res.json({ success: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
 // app.js intentionally does NOT call app.listen(). This file only builds

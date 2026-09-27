@@ -30,6 +30,9 @@
 // checkout حقيقي عبر JS pixel بيبعت fingerprint)، لكن موثّق هنا كـ
 // residual risk مش مغطى بالكامل.
 
+const logger = require('./logger');
+const { redisClient, usingRedis } = require('./redisClient');
+
 const RAW_VELOCITY_WINDOW_MS =
   (parseInt(process.env.RAW_VELOCITY_WINDOW_MINUTES, 10) || 10) * 60 * 1000;
 
@@ -59,7 +62,7 @@ setInterval(() => {
   }
 }, SWEEP_INTERVAL_MS).unref();
 
-function recordAndCheck(store, merchantId, key, threshold) {
+function recordAndCheckMemory(store, merchantId, key, threshold) {
   if (!merchantId || !key) return { count: 0, blocked: false };
   const now = Date.now();
   let innerMap = store.get(merchantId);
@@ -73,15 +76,66 @@ function recordAndCheck(store, merchantId, key, threshold) {
   return { count: fresh.length, blocked: fresh.length >= threshold };
 }
 
+// [C-01b FIX] Lua script: atomic record-and-count عبر Redis sorted set —
+// نفس فلسفة binSequenceDetector.js's Lua scripts، لكن ZSET بدل JSON object
+// (أنسب لـ sliding-window counter بسيط بلا حقول إضافية).
+const RECORD_AND_COUNT_SCRIPT = `
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local windowMs = tonumber(ARGV[2])
+local ttlSeconds = tonumber(ARGV[3])
+local member = ARGV[4]
+
+redis.call('ZREMRANGEBYSCORE', key, 0, now - windowMs)
+redis.call('ZADD', key, now, member)
+redis.call('EXPIRE', key, ttlSeconds)
+return redis.call('ZCARD', key)
+`;
+
+async function recordAndCheckRedis(keyPrefix, merchantId, key, threshold) {
+  const redisKey = `${keyPrefix}:${merchantId}:${key}`;
+  const now = Date.now();
+  const ttlSeconds = Math.ceil(RAW_VELOCITY_WINDOW_MS / 1000) + 60;
+  const member = `${now}-${Math.random().toString(36).slice(2, 10)}`;
+
+  const count = await redisClient.eval(
+    RECORD_AND_COUNT_SCRIPT,
+    1,
+    redisKey,
+    now,
+    RAW_VELOCITY_WINDOW_MS,
+    ttlSeconds,
+    member
+  );
+  return { count, blocked: count >= threshold };
+}
+
+async function recordAndCheck(memoryStore, keyPrefix, merchantId, key, threshold) {
+  if (!merchantId || !key) return { count: 0, blocked: false };
+
+  if (usingRedis && redisClient && redisClient.status === 'ready') {
+    try {
+      return await recordAndCheckRedis(keyPrefix, merchantId, key, threshold);
+    } catch (err) {
+      logger.error(
+        { module: 'rawVelocityDetector', err: err.message, keyPrefix, merchantId },
+        'Redis EVAL failed for raw velocity check — falling back to in-memory (single-instance) for this call'
+      );
+    }
+  }
+
+  return recordAndCheckMemory(memoryStore, merchantId, key, threshold);
+}
+
 /**
  * فحص سرعة غير مشروط بالقرار، مفتاحه device fingerprint. يتنادى على كل
  * /evaluate (وwebhook) request معاه deviceFingerprint حقيقي (مش synthetic
  * fallback زي wc_${orderId})، بغض النظر عن القرار النهائي لهذا الـ
  * request نفسه.
  */
-function checkRawDeviceVelocity(merchantId, deviceFingerprint) {
-  const { count, blocked } = recordAndCheck(
-    deviceAttempts, merchantId, deviceFingerprint, RAW_DEVICE_BLOCK_THRESHOLD
+async function checkRawDeviceVelocity(merchantId, deviceFingerprint) {
+  const { count, blocked } = await recordAndCheck(
+    deviceAttempts, 'rvel:device', merchantId, deviceFingerprint, RAW_DEVICE_BLOCK_THRESHOLD
   );
   return { count, blocked, threshold: RAW_DEVICE_BLOCK_THRESHOLD };
 }
@@ -91,9 +145,9 @@ function checkRawDeviceVelocity(merchantId, deviceFingerprint) {
  * checkRawDeviceVelocity مايقدرش يشتغل أصلاً). عتبة أعلى بكتير، عشان
  * نتحمّل شبكات NAT/مكاتب مشتركة.
  */
-function checkRawIpVelocityFallback(merchantId, ipHash) {
-  const { count, blocked } = recordAndCheck(
-    ipFallbackAttempts, merchantId, ipHash, RAW_IP_FALLBACK_BLOCK_THRESHOLD
+async function checkRawIpVelocityFallback(merchantId, ipHash) {
+  const { count, blocked } = await recordAndCheck(
+    ipFallbackAttempts, 'rvel:ipfb', merchantId, ipHash, RAW_IP_FALLBACK_BLOCK_THRESHOLD
   );
   return { count, blocked, threshold: RAW_IP_FALLBACK_BLOCK_THRESHOLD };
 }
