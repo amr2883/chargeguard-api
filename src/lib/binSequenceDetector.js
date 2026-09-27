@@ -72,37 +72,11 @@ const THRESHOLDS = {
 // storage — the in-memory fallback path also uses this same shape for
 // consistency between the two backends.)
 
-let redisClient = null;
-let usingRedis = false;
-
-if (process.env.REDIS_URL) {
-  try {
-    const Redis = require('ioredis');
-    redisClient = new Redis(process.env.REDIS_URL, {
-      maxRetriesPerRequest: 2,
-      lazyConnect: false,
-      retryStrategy: (times) => Math.min(times * 200, 5000),
-    });
-    redisClient.on('error', (err) => {
-      logger.error({ module: 'binSequenceDetector', err: err.message }, 'Redis connection error — falling back to in-memory store for subsequent operations');
-    });
-    redisClient.on('connect', () => {
-      logger.info({ module: 'binSequenceDetector' }, 'Redis connected — using shared BIN-sequence store (multi-instance safe)');
-    });
-    usingRedis = true;
-  } catch (err) {
-    logger.error({ module: 'binSequenceDetector', err: err.message }, 'Failed to initialize Redis client — falling back to in-memory store');
-    redisClient = null;
-    usingRedis = false;
-  }
-} else {
-  logger.warn(
-    { module: 'binSequenceDetector' },
-    'REDIS_URL not set — BIN-sequence attack detection is using a single-process in-memory store. ' +
-    'This is UNSAFE if this backend runs more than one instance: an attacker can split a card-testing ' +
-    'burst across instances to evade detection. Set REDIS_URL before scaling horizontally.'
-  );
-}
+// [Unified] Shared Redis client — single connection reused by every
+// Redis-backed detector (binSequenceDetector, rawVelocityDetector, ...).
+// See src/lib/redisClient.js for connection setup, retry strategy, and
+// the one consolidated startup warning when REDIS_URL is absent.
+const { redisClient, usingRedis } = require('./redisClient');
 
 // In-memory fallback store — used when Redis is not configured, or as a
 // same-request fallback if an individual Redis call fails (see
