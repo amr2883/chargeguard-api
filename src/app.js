@@ -124,15 +124,8 @@ app.get('/api/retention-config', (req, res) => {
   res.json({ success: true, retention: RETENTION });
 });
 
-app.get('/api/cleanup-now', async (req, res) => {
-  console.log(`[${new Date().toISOString()}] ? External ping ? running fast cleanup...`);
-  try {
-    await runFastCleanup(db);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(`[${new Date().toISOString()}] ? Cleanup failed:`, err.message);
-    res.status(500).json({ error: err.message });
-  }
+app.get('/api/ping', (req, res) => {
+  res.json({ success: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
 // app.js intentionally does NOT call app.listen(). This file only builds
