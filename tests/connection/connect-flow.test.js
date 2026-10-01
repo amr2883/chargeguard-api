@@ -87,37 +87,60 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
       expect(confirmUrl).toContain(updated.connectToken);
     });
 
-    test('GET /connect/confirm issues a brand-new apiKey + webhookSecret, returned in the JSON body (by design — this endpoint differs from /verify-email)', async () => {
+    test('GET /connect/confirm issues a new apiKey (browser gets HTML only); the plugin collects it once via GET /connect/status', async () => {
       const { tenant } = await seedConnectableTenant('confirm');
       createdTenantIds.push(tenant.id);
       const oldApiKeyHash = tenant.apiKeyHash;
       const oldWebhookSecret = tenant.webhookSecret;
 
-      await request(app)
+      const connectRes = await request(app)
         .post('/api/auth/connect')
         .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
+      const requestId = connectRes.body.connectRequestId;
+      expect(typeof requestId).toBe('string');
+      expect(requestId.length).toBeGreaterThan(0);
 
       const withToken = await prisma.tenant.findUnique({ where: { id: tenant.id } });
 
-      const res = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
+      // Step 1: browser click on the emailed link. HTML only, no credentials.
+      const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
+      expect(confirmRes.status).toBe(200);
+      expect(confirmRes.headers['content-type']).toMatch(/text\/html/);
 
-      expect(res.status).toBe(200);
-      expect(res.body.merchantId).toBe(tenant.id);
-      expect(res.body.email).toBe(tenant.email);
-      // Unlike /verify-email, this response DOES carry the plaintext key —
-      // intentional, since /connect already proved inbox ownership and no
-      // separate delivery email is sent for this recovery flow.
-      expect(typeof res.body.apiKey).toBe('string');
-      expect(res.body.apiKey.length).toBeGreaterThan(0);
-      expect(res.body.webhookSecret).toBe(oldWebhookSecret); // preserved, not rotated
+      const afterConfirm = await prisma.tenant.findUnique({ where: { id: tenant.id } });
+      expect(afterConfirm.connectToken).toBeNull();
+      expect(afterConfirm.connectTokenExpiresAt).toBeNull();
+      expect(afterConfirm.apiKeyHash).not.toBe(oldApiKeyHash); // rotated
+      expect(afterConfirm.keyRotatedAt).not.toBeNull();
+      // Plaintext is staged (not permanent) until the plugin collects it.
+      expect(typeof afterConfirm.apiKey).toBe('string');
+      expect(afterConfirm.apiKey.length).toBeGreaterThan(0);
+      expect(hashApiKey(afterConfirm.apiKey)).toBe(afterConfirm.apiKeyHash);
+      // The browser-facing page must never contain the key.
+      expect(confirmRes.text).not.toContain(afterConfirm.apiKey);
 
-      const final = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(final.connectToken).toBeNull();
-      expect(final.connectTokenExpiresAt).toBeNull();
-      expect(final.apiKey).toBeNull(); // plaintext never persisted, same invariant as T1
-      expect(final.apiKeyHash).not.toBe(oldApiKeyHash); // rotated
-      expect(hashApiKey(res.body.apiKey)).toBe(final.apiKeyHash);
-      expect(final.keyRotatedAt).not.toBeNull();
+      // Step 2: plugin polls /status and receives the credentials once.
+      const statusUrl = `/api/auth/connect/status?requestId=${encodeURIComponent(requestId)}`;
+      const statusRes = await request(app).get(statusUrl);
+      expect(statusRes.status).toBe(200);
+      expect(statusRes.body.status).toBe('active');
+      expect(statusRes.body.merchantId).toBe(tenant.id);
+      expect(statusRes.body.email).toBe(tenant.email);
+      expect(statusRes.body.webhookSecret).toBe(oldWebhookSecret); // preserved, not rotated
+      expect(statusRes.body.apiKey).toBe(afterConfirm.apiKey);
+      expect(hashApiKey(statusRes.body.apiKey)).toBe(afterConfirm.apiKeyHash);
+
+      // After delivery: plaintext and requestId are purged, hash unchanged.
+      const afterStatus = await prisma.tenant.findUnique({ where: { id: tenant.id } });
+      expect(afterStatus.apiKey).toBeNull();
+      expect(afterStatus.connectRequestId).toBeNull();
+      expect(afterStatus.apiKeyHash).toBe(afterConfirm.apiKeyHash);
+
+      // Step 3: delivery is one-time. Same requestId now yields pending, no key.
+      const again = await request(app).get(statusUrl);
+      expect(again.status).toBe(200);
+      expect(again.body.status).toBe('pending');
+      expect(again.body.apiKey).toBeUndefined();
     });
   });
 
@@ -220,7 +243,7 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
       const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
 
       liveTenant = tenant;
-      liveApiKey = confirmRes.body.apiKey;
+      liveApiKey = (await request(app).get(`/api/auth/connect/status?requestId=${withToken.connectRequestId}`)).body.apiKey;
       liveDomain = domain;
 
       if (!liveApiKey) {
@@ -282,7 +305,7 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
       const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
 
       liveTenant = tenant;
-      liveApiKey = confirmRes.body.apiKey;
+      liveApiKey = (await request(app).get(`/api/auth/connect/status?requestId=${withToken.connectRequestId}`)).body.apiKey;
       liveDomain = domain;
 
       if (!liveApiKey) {
@@ -335,6 +358,36 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
         .set('X-Store-Domain', liveDomain)
         .set('X-ChargeGuard-Signature', signature)
         .set('X-ChargeGuard-Timestamp', staleTimestamp)
+        .send(bodyString);
+
+      expect(res.status).toBe(401);
+    });
+
+    test('a missing signature with a valid timestamp is rejected (401)', async () => {
+      const bodyString = JSON.stringify({ type: 'EMAIL', value: `nosig-${Date.now()}@example.com` });
+      const { timestamp } = signRequest(liveTenant.webhookSecret, bodyString);
+
+      const res = await request(app)
+        .post('/api/risk/blacklist')
+        .set('Content-Type', 'application/json')
+        .set('X-Api-Key', liveApiKey)
+        .set('X-Store-Domain', liveDomain)
+        .set('X-ChargeGuard-Timestamp', timestamp)
+        .send(bodyString);
+
+      expect(res.status).toBe(401);
+    });
+
+    test('a missing timestamp with a signature present is rejected (401)', async () => {
+      const bodyString = JSON.stringify({ type: 'EMAIL', value: `nots-${Date.now()}@example.com` });
+      const { signature } = signRequest(liveTenant.webhookSecret, bodyString);
+
+      const res = await request(app)
+        .post('/api/risk/blacklist')
+        .set('Content-Type', 'application/json')
+        .set('X-Api-Key', liveApiKey)
+        .set('X-Store-Domain', liveDomain)
+        .set('X-ChargeGuard-Signature', signature)
         .send(bodyString);
 
       expect(res.status).toBe(401);
