@@ -1,4 +1,5 @@
 const { PrismaClient } = require('@prisma/client');
+const { assertSafeTestDb } = require('./assertSafeTestDb');
 
 const prisma = process.env.DATABASE_URL
   ? new PrismaClient()
@@ -6,6 +7,7 @@ const prisma = process.env.DATABASE_URL
 
 beforeEach(async () => {
   if (!prisma) return;
+  assertSafeTestDb();
   try {
     await prisma.registrationAttempt.deleteMany({});
     await prisma.connectAttempt.deleteMany({});
