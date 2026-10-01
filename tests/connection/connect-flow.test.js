@@ -393,4 +393,74 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
       expect(res.status).toBe(401);
     });
   });
+  
+  // ── /connect/status edge cases ────────────────────────────────────────
+  describe('GET /connect/status edge cases', () => {
+    const randomRequestId = () => crypto.randomBytes(32).toString('hex');
+    const INVALID_BODY = { status: 'invalid', error: 'requestId is required' };
+
+    test('a missing requestId is rejected with 400', async () => {
+      const res = await request(app).get('/api/auth/connect/status');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(INVALID_BODY);
+    });
+
+    test('a non-string requestId (repeated query parameter) is rejected with 400', async () => {
+      const res = await request(app).get('/api/auth/connect/status?requestId=a&requestId=b');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual(INVALID_BODY);
+    });
+
+    test('an unknown requestId returns exactly {status: "pending"}', async () => {
+      const res = await request(app).get(`/api/auth/connect/status?requestId=${randomRequestId()}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'pending' });
+    });
+
+    test('a known requestId before confirmation is indistinguishable from an unknown one', async () => {
+      const { tenant } = await seedConnectableTenant('statuspending');
+      createdTenantIds.push(tenant.id);
+
+      const connectRes = await request(app)
+        .post('/api/auth/connect')
+        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
+      const requestId = connectRes.body.connectRequestId;
+      expect(typeof requestId).toBe('string');
+
+      // Guard: the id really is a known one (stored on the tenant).
+      const stored = await prisma.tenant.findUnique({ where: { id: tenant.id } });
+      expect(stored.connectRequestId).toBe(requestId);
+
+      const known = await request(app).get(`/api/auth/connect/status?requestId=${requestId}`);
+      const unknown = await request(app).get(`/api/auth/connect/status?requestId=${randomRequestId()}`);
+
+      expect(known.status).toBe(unknown.status);
+      expect(known.body).toEqual(unknown.body);
+      expect(known.body).toEqual({ status: 'pending' });
+    });
+
+    test('a known requestId whose connect token has expired returns {status: "expired"}', async () => {
+      const { tenant } = await seedConnectableTenant('statusexpired');
+      createdTenantIds.push(tenant.id);
+
+      const connectRes = await request(app)
+        .post('/api/auth/connect')
+        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
+      const requestId = connectRes.body.connectRequestId;
+      expect(typeof requestId).toBe('string');
+
+      await prisma.tenant.update({
+        where: { id: tenant.id },
+        data: { connectTokenExpiresAt: new Date(Date.now() - 1000) },
+      });
+
+      const res = await request(app).get(`/api/auth/connect/status?requestId=${requestId}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ status: 'expired' });
+    });
+  });
 });
