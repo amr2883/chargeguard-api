@@ -105,6 +105,7 @@ describe('attackAlertScheduler', () => {
   beforeEach(() => {
     jest.useFakeTimers();
     jest.resetAllMocks();
+    require('../../src/lib/distributedLock').acquireLock.mockResolvedValue(true); // resetAllMocks() wipes the factory default
     prisma = makePrisma();
     applyPersistentDefaults(prisma);
     logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
