@@ -105,6 +105,7 @@ function applyPersistentDefaults(prisma) {
   prisma.blockedAttempt.findMany.mockResolvedValue([]);
   prisma.blockedAttempt.count.mockResolvedValue(0);
   sendWeeklySummaryEmail.mockResolvedValue(undefined);
+  require('../../src/lib/distributedLock').acquireLock.mockResolvedValue(true); // resetAllMocks() wipes the factory default
 }
 
 // Sets system time so that after advancing STARTUP_DELAY_MS, "now" equals target.

@@ -159,6 +159,7 @@ describe('paypalWeeklyReportScheduler', () => {
     jest.useFakeTimers();
     jest.resetAllMocks();
     sendPaypalWeeklyReportEmail.mockResolvedValue(undefined);
+    require('../../src/lib/distributedLock').acquireLock.mockResolvedValue(true); // resetAllMocks() wipes the factory default
   });
 
   afterEach(() => {
