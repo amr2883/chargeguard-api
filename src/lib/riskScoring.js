@@ -10,7 +10,7 @@ const { computeNormalizedValue } = require('./blacklistGate');
 const { getIPIntelligence, calculateIPPenalty } = require('./ipIntelligence');
 const { getEmailIntelligence, calculateEmailPenalty, invalidateEmailCache } = require('./emailIntelligence');
 const { findSimilarDisputes } = require('./similarity');
-const { checkPatternRisk, recordPattern } = require('./patternSharing');
+const { checkPatternRisk } = require('./patternSharing');
 const logger = require('../lib/logger');
 
 const { getBINIntelligence, calculateBINPenalty } = require('./binIntelligence');
@@ -1377,12 +1377,11 @@ if (binIntelSettled.status === 'fulfilled' && binIntelSettled.value) {
     : decision.includes("Review") ? "medium"
     : "high";
 
-  // Pattern Recording — بعد تعريف finalRiskLevel
-  // سجل high risk فقط — medium ممكن يكون legit ويسمم الـ pattern database
-  if (finalRiskLevel === "high") {
-    recordPattern(orderForPattern, emailIntelForPattern, ipIntelForPattern, false, merchantId, patternContext)
-      .catch(e => logger.error({ module: 'riskScoring', err: e }, 'Pattern record error'));
-  }
+  // [P0-04 fix] استدعاء recordPattern(..., false, ...) هنا كان بيسجل "legit"
+  // بمجرد الوصول لـ high risk — قرار تقييم غير مؤكد، مش outcome حقيقي —
+  // وده كان بيسمم الـ pattern database. اتشال بالكامل. التسجيل المعتمد
+  // دلوقتي لـ fraud/legit في pattern sharing هو من feedbackLoop.js
+  // (markPatternAsFraud/markPatternAsLegit) بعد تأكيد فعلي فقط.
 
   // حساب قيم السرعة والمؤشرات للإرجاع (استخدام المتغيرات الموجودة)
   const computedSignals = {

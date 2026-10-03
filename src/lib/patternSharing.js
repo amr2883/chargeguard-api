@@ -693,9 +693,18 @@ async function checkPatternRisk(order, emailIntel, ipIntel, patternContext = {})
 async function markPatternAsFraud(order, emailIntel, ipIntel, merchantId, patternContext = {}) {
   return recordPattern(order, emailIntel, ipIntel, true, merchantId, patternContext);
 }
+
+// [P0-04 fix] مرآة لـ markPatternAsFraud — بتسجل نفس الـ pattern كـ "legit"
+// لما يكون فيه تأكيد فعلي (dispute اتكسب / feedback صريح)، مش مجرد تقييم
+// عالي الخطورة غير مؤكد.
+async function markPatternAsLegit(order, emailIntel, ipIntel, merchantId, patternContext = {}) {
+  return recordPattern(order, emailIntel, ipIntel, false, merchantId, patternContext);
+}
+
 module.exports = {
   buildPattern,
   recordPattern,
   checkPatternRisk,
   markPatternAsFraud,
+  markPatternAsLegit,
 };
