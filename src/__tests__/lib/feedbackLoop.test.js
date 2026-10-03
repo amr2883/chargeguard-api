@@ -19,6 +19,7 @@ jest.mock('../../lib/identityGraph', () => ({
 }));
 jest.mock('../../lib/patternSharing', () => ({
   markPatternAsFraud: jest.fn(),
+  markPatternAsLegit: jest.fn(),
 }));
 jest.mock('../../lib/logger', () => ({
   info: jest.fn(),
@@ -37,7 +38,7 @@ jest.mock('../../lib/db', () => ({
 
 const { processFeedback, processFeedbackSimplified } = require('../../lib/feedbackLoop');
 const { markOrderAsFraud } = require('../../lib/identityGraph');
-const { markPatternAsFraud } = require('../../lib/patternSharing');
+const { markPatternAsFraud, markPatternAsLegit } = require('../../lib/patternSharing');
 const db = require('../../lib/db');
 const logger = require('../../lib/logger');
 
@@ -90,6 +91,7 @@ describe('feedbackLoop.js', () => {
       db.cardHash.update.mockResolvedValue({});
       markOrderAsFraud.mockResolvedValue(undefined);
       markPatternAsFraud.mockResolvedValue(undefined);
+      markPatternAsLegit.mockResolvedValue(undefined);
     });
 
     // $executeRaw is used as a tagged template: calls are (strings, ...values).
@@ -222,6 +224,7 @@ describe('feedbackLoop.js', () => {
         merchantId,
         { isHighVelocity: true }
       );
+      expect(markPatternAsLegit).not.toHaveBeenCalled();
       expect(db.cardHash.update).not.toHaveBeenCalled();
 
       expect(db.disputeOutcome.create).toHaveBeenCalledTimes(1);
@@ -278,6 +281,14 @@ describe('feedbackLoop.js', () => {
 
       expect(markOrderAsFraud).not.toHaveBeenCalled();
       expect(markPatternAsFraud).not.toHaveBeenCalled();
+      expect(markPatternAsLegit).toHaveBeenCalledTimes(1);
+      expect(markPatternAsLegit).toHaveBeenCalledWith(
+        expect.objectContaining({ amount: 100, isNewCustomer: true }),
+        { isDisposable: true },
+        { isDatacenter: true },
+        merchantId,
+        { isHighVelocity: true }
+      );
       expect(db.cardHash.update).not.toHaveBeenCalled();
       expect(db.disputeOutcome.create).toHaveBeenCalledWith({
         data: expect.objectContaining({ disputeId: orderId, merchantId, result: 'won' }),
@@ -314,6 +325,7 @@ describe('feedbackLoop.js', () => {
         expect.objectContaining({ module: 'feedbackLoop' }),
         'Failed to parse signalsSnapshot'
       );
+      expect(logger.error).toHaveBeenCalledTimes(1);
       expect(db.merchantProfile.upsert).toHaveBeenCalledTimes(1);
       expect(db.$executeRaw).not.toHaveBeenCalled();
       expect(db.disputeOutcome.create).toHaveBeenCalledWith({
