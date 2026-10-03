@@ -13,7 +13,7 @@ const logger = require('../lib/logger');
 // const { upsertCustomerRiskProfile } = require('./customerRiskProfile'); // معطل مؤقتًا
 const { getWeightsForMerchant, DECAY_LAMBDA } = require('./signalWeights');
 const { markOrderAsFraud } = require('./identityGraph');
-const { markPatternAsFraud } = require('./patternSharing');
+const { markPatternAsFraud, markPatternAsLegit } = require('./patternSharing');
 
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -546,6 +546,27 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
     }
 
     // 5. تحديث الرسم البياني للهوية و Pattern Sharing إذا كان احتيالاً
+    let emailIntel = null;
+    let ipIntel = null;
+    let snapshot = {};
+    try {
+      snapshot = JSON.parse(order.signalsSnapshot || '{}');
+      emailIntel = snapshot.emailIntel || null;
+      ipIntel = snapshot.ipIntel || null;
+    } catch (e) {
+      logger.warn({ module: 'feedbackLoop', err: e }, 'Failed to parse signalsSnapshot for pattern sharing');
+    }
+
+    const patternContext = {
+      isHighVelocity: (snapshot.deviceVelocityCount >= 2) || false
+    };
+
+    const patternOrder = {
+      amount: order.amount,
+      isNewCustomer: snapshot.isNewCustomer || false,
+      createdAt: order.createdAt
+    };
+
     if (isFraud) {
       const deviceFp = order.deviceFingerprint || `fp_${orderId}`;
       const mockOrder = {
@@ -560,30 +581,13 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
         logger.error({ module: 'feedbackLoop', err: e }, 'markOrderAsFraud error')
       );
 
-      // 6. تحديث Pattern Sharing (Cross-Merchant Learning)
-      let emailIntel = null;
-      let ipIntel = null;
-      let snapshot = {};
-      try {
-        snapshot = JSON.parse(order.signalsSnapshot || '{}');
-        emailIntel = snapshot.emailIntel || null;
-        ipIntel = snapshot.ipIntel || null;
-      } catch (e) {
-        logger.warn({ module: 'feedbackLoop', err: e }, 'Failed to parse signalsSnapshot for pattern sharing');
-      }
-
-      const patternContext = {
-        isHighVelocity: (snapshot.deviceVelocityCount >= 2) || false
-      };
-
-      const patternOrder = {
-        amount: order.amount,
-        isNewCustomer: snapshot.isNewCustomer || false,
-        createdAt: order.createdAt
-      };
-
+      // 6. تحديث Pattern Sharing (Cross-Merchant Learning) — احتيال مؤكد
       await markPatternAsFraud(patternOrder, emailIntel, ipIntel, merchantId, patternContext)
         .catch(e => logger.error({ module: 'feedbackLoop', err: e }, 'markPatternAsFraud error'));
+    } else {
+      // [P0-04 fix] عميل شرعي مؤكد (dispute اتكسب) — أول مصدر legit مؤكد فعلي في النظام كله لـ pattern sharing.
+      await markPatternAsLegit(patternOrder, emailIntel, ipIntel, merchantId, patternContext)
+        .catch(e => logger.error({ module: 'feedbackLoop', err: e }, 'markPatternAsLegit error'));
     }
 
     logger.info({
