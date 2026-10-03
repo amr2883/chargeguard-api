@@ -14,6 +14,8 @@
 const logger = require('./logger');
 const dns    = require('dns').promises;
 const net    = require('net');
+const ipaddr = require('ipaddr.js');
+const { Agent } = require('undici');
 
 // ── Tuneable constants ──────────────────────────────────────────────────────
 const RETRIES          = 3;
@@ -75,8 +77,16 @@ function isPrivateOrReservedIPv4(ip) {
 // and this mapping has historically been a real SSRF/allowlist-bypass
 // vector when left unhandled.
 function unwrapIpv4MappedIpv6(ip) {
-  const match = ip.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
-  return match ? match[1] : null;
+  try {
+    const addr = ipaddr.parse(ip);
+    if (addr.kind() === 'ipv6' && addr.isIPv4MappedAddress()) {
+      return addr.toIPv4Address().toString();
+    }
+  } catch (_) {
+    // Not a parseable address at all — leave classification to the
+    // caller's other checks, same as before this fix.
+  }
+  return null;
 }
 
 function isPrivateOrReservedIPv6(ip) {
@@ -138,18 +148,27 @@ async function resolveAndCheckHostname(hostname) {
     return { blocked: true, reason: 'DNS resolution failed or timed out' };
   }
 
-  const allAddresses = [...aRecords, ...aaaaRecords];
+  // [P0-03] كل عنوان محتفظ بنسخة من عائلته (4 أو 6) عشان الـpinning
+  // لاحقًا يقدر يمرر family الصحيحة بدل ما يخمّنها.
+  const allAddresses = [
+    ...aRecords.map((ip) => ({ ip, family: 4 })),
+    ...aaaaRecords.map((ip) => ({ ip, family: 6 })),
+  ];
   if (allAddresses.length === 0) {
     return { blocked: true, reason: 'Hostname did not resolve to any address' };
   }
 
-  for (const ip of allAddresses) {
+  for (const { ip } of allAddresses) {
     if (isPrivateOrReservedIP(ip)) {
       return { blocked: true, reason: 'Hostname resolves to an internal or reserved address' };
     }
   }
 
-  return { blocked: false };
+  // [P0-03] نرجّع أول عنوان اتفحص واتأكد إنه آمن — هو نفسه اللي هيتم
+  // الـpinning عليه وقت الاتصال الفعلي، عشان نقفل نافذة DNS rebinding
+  // بين الفحص والاتصال.
+  const chosen = allAddresses[0];
+  return { blocked: false, address: chosen.ip, family: chosen.family };
 }
 
 // ── URL Validation ─────────────────────────────────────────────────────────
@@ -163,7 +182,14 @@ async function resolveAndCheckHostname(hostname) {
  * @param {string} url
  * @returns {Promise<{ valid: boolean, error?: string }>}
  */
-async function validateWebhookUrl(url) {
+// [P0-03] المنطق الكامل اتنقل هنا وبقى بيرجّع كمان العنوان الآمن المتحقق
+// منه (address/family) — مش بس valid/error. ده يسمح لـsendWebhookAlert
+// إنه يـ"pin" الاتصال الفعلي على نفس العنوان اللي اتفحص، بدل ما fetch()
+// يعمل DNS resolution تاني من الصفر وقت الاتصال (DNS rebinding window).
+// validateWebhookUrl تحتها فضلت غلاف رفيع بيرجّع نفس الشكل القديم
+// بالظبط ({ valid, error }) — صفر تغيير في العقد العام مع أي مستدعي
+// (routes/settings.js) أو أي اختبار موجود.
+async function performUrlSafetyCheck(url) {
   if (!url || typeof url !== 'string') {
     return { valid: false, error: 'URL is required' };
   }
@@ -190,10 +216,12 @@ async function validateWebhookUrl(url) {
   const ipVersion = net.isIP(hostname);
   if (ipVersion !== 0) {
     // Hostname is itself a literal IP — check directly, no DNS involved.
+    // No resolution ever happens for this case, so there is no TOCTOU
+    // gap to close: the "resolved" address is just the literal itself.
     if (isPrivateOrReservedIP(hostname)) {
       return { valid: false, error: 'Internal or private IPs are not allowed' };
     }
-    return { valid: true };
+    return { valid: true, address: hostname, family: ipVersion };
   }
 
   const result = await resolveAndCheckHostname(hostname);
@@ -201,6 +229,14 @@ async function validateWebhookUrl(url) {
     return { valid: false, error: 'Internal or private IPs are not allowed' };
   }
 
+  return { valid: true, address: result.address, family: result.family };
+}
+
+async function validateWebhookUrl(url) {
+  const result = await performUrlSafetyCheck(url);
+  if (!result.valid) {
+    return { valid: false, error: result.error };
+  }
   return { valid: true };
 }
 
@@ -443,14 +479,44 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
   // a private/internal address (DNS rebinding). This re-check closes that
   // window at the point that actually matters: immediately before the
   // outbound request is made.
-  const revalidation = await validateWebhookUrl(url);
-  if (!revalidation.valid) {
+  // [P0-03 fix] Uses performUrlSafetyCheck (not validateWebhookUrl) so we
+  // also get back the exact IP address that was checked, not just a
+  // valid/invalid verdict. That address is pinned below via a per-delivery
+  // undici Agent (connect.lookup override) so the actual TCP connection
+  // fetch() makes is forced onto it — closing the DNS-rebinding gap where
+  // fetch()'s own internal resolution could otherwise land on a different
+  // (and possibly private) address than the one just validated here.
+  const safety = await performUrlSafetyCheck(url);
+  if (!safety.valid) {
     logger.warn(
-      { tenantId: tenant.id, reason: revalidation.error },
+      { tenantId: tenant.id, reason: safety.error },
       'WEBHOOK_URL_FAILED_DELIVERY_TIME_REVALIDATION'
     );
     return;
   }
+
+  // Pins every connection made through this Agent to the single address
+  // just validated above, regardless of what hostname undici's own
+  // resolver would otherwise look up. lookup() ignores the hostname
+  // argument it receives for exactly that reason — the address returned
+  // is a closure variable from the validation above, never a fresh
+  // resolution. Handles both call shapes Node's Happy-Eyeballs connection
+  // logic can use: options.all === true expects an array of
+  // {address, family} objects; otherwise it expects the classic
+  // (err, address, family) callback shape. Verified directly against this
+  // Node/undici version pair (Node internal undici 7.21.0, npm undici
+  // pinned to the same 7.21.0 exact version) before relying on it.
+  const pinnedAgent = new Agent({
+    connect: {
+      lookup: (_hostname, options, cb) => {
+        if (options.all) {
+          cb(null, [{ address: safety.address, family: safety.family }]);
+        } else {
+          cb(null, safety.address, safety.family);
+        }
+      },
+    },
+  });
 
   const isPaypal = extraContext !== null
                 && typeof extraContext === 'object'
@@ -477,6 +543,7 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
     }
   }
 
+  try {
   const label = `[Webhook ${tenant.id.slice(0, 8)}]`;
   let lastError;
 
@@ -490,11 +557,12 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
       const timeoutId  = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
       const response = await fetch(url, {
-        method:   'POST',
-        headers:  { 'Content-Type': 'application/json' },
-        body:     JSON.stringify(payload),
-        signal:   controller.signal,
-        redirect: 'manual', // C2 fix: never follow redirects — see justification
+        method:     'POST',
+        headers:    { 'Content-Type': 'application/json' },
+        body:       JSON.stringify(payload),
+        signal:     controller.signal,
+        redirect:   'manual', // C2 fix: never follow redirects — see justification
+        dispatcher: pinnedAgent, // P0-03 fix: force this connection onto the validated address
       });
 
       clearTimeout(timeoutId);
@@ -569,6 +637,13 @@ async function sendWebhookAlert(tenant, attackCount, savedAmount, windowMinutes 
 
   logger.error({ tenantId: tenant.id, type, attempts: RETRIES, error: lastError?.message }, 'All webhook delivery attempts failed');
   throw lastError;
+  } finally {
+    // Always tear down the pinned Agent's underlying connection pool,
+    // whether delivery succeeded, exhausted its retries, or hit a
+    // non-retryable error — this Agent is scoped to this one delivery
+    // call only and must not linger holding sockets open.
+    pinnedAgent.close().catch(() => {});
+  }
 }
 
 module.exports = { sendWebhookAlert, validateWebhookUrl };
