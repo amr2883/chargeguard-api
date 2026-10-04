@@ -66,18 +66,16 @@
 //   flags are already present, at or below 55). Each such test states the
 //   arithmetic inline.
 //
-// KNOWN, DELIBERATELY DOCUMENTED (NOT FIXED) BEHAVIORS — see the dedicated
-// "documented behaviors" describe blocks near the bottom of this file:
-//   1. IP velocity is double-penalized: an unconditional early block
-//      (based on `sameIPOrders`) and a later fallback block (based on
-//      `ipVelocityCount`, only skipped if `externalVelocity` supplies a
-//      DIFFERENT count) both apply the identical log-scaled penalty when
-//      externalVelocity is not supplied.
-//   2. Email velocity is double-penalized the same way (`sameEmailOrders`
-//      then `emailVelocityCount`).
-//   3. Device velocity is NOT double-penalized — there is only ONE block
-//      for it (no unconditional early pass), so it is asymmetric with
-//      IP/email velocity.
+// KNOWN BEHAVIORS. Items 1, 2, 3 and 6 describe behavior that was FIXED in riskScoring.js after
+// these tests were first written; the tests now pin the fixed behavior. Items 4 and 5 still hold.
+// Items 4 and 5 are pinned by the tests named "documented dead code" (pixelBotScore/pixelSuspicious)
+// and "DOCUMENTED DEAD CODE: the second high-value check ...".
+//   1. FIXED (H2 fix): IP velocity was double-penalized by an early allOrders-based block plus a
+//      later ipVelocityCount block. Only the ipVelocityCount block remains, so the penalty is
+//      applied once and externalVelocity fully controls it.
+//   2. FIXED (H2 fix): email velocity had the same double penalty; the early block was removed.
+//   3. Device velocity always had a single block. IP and email velocity now match it, so the old
+//      asymmetry no longer exists.
 //   4. pixelBotScore/pixelSuspicious are hardcoded to 0/false — the entire
 //      Tier 1 "Bot Detection Penalty" block is permanently dead code.
 //   5. The second high-value-order check (guarded by
@@ -86,11 +84,9 @@
 //      orderMultiple >= 3`) is identical to the first block's, and the
 //      first block always sets `highValuePenaltyApplied = true` whenever
 //      that condition holds.
-//   6. utils.js's normalizeEmail (used by riskScoring.js) has NO homoglyph
-//      mapping, unlike similarity.js's normalizeEmail. A Cyrillic-spoofed
-//      email variant is therefore NOT recognized as a duplicate for
-//      velocity/dispute/returning-customer purposes inside
-//      calculateRiskScore.
+//   6. FIXED: utils.js normalizeEmail now has a HOMOGLYPH_MAP (Cyrillic, Greek, Arabic-Indic
+//      digits, and a few IPA/letterlike characters), so a Cyrillic-spoofed email variant IS
+//      recognized as a duplicate for velocity purposes inside calculateRiskScore.
 
 jest.mock('prom-client', () => ({
   Counter: jest.fn().mockImplementation(() => ({
@@ -374,7 +370,7 @@ describe('Tier 2 — shipping/billing country mismatch', () => {
       billingAddress: JSON.stringify({ country: 'EG' }),
     });
     const result = await runScoring({ order, ipPenalty: 20 });
-    expect(result.flags.some((f) => f.severity === 'high' && f.text.includes('Shipping country differs from billing country'))).toBe(true);
+    expect(result.flags.some((f) => f.severity === 'high' && f.code === 'shipping_billing_mismatch')).toBe(true);
     expect(result.score).toBe(65); // 100 - 15 - 20
   });
 
@@ -399,7 +395,7 @@ describe('Tier 2 — shipping/billing country mismatch', () => {
   });
 });
 
-// ─── Tier 2 — IP Velocity (and documented double-penalty) ──────────────────
+// === Tier 2: IP Velocity ===
 
 describe('Tier 2 — IP velocity', () => {
   test('exactly 1 other order from same IP in 24h → below threshold (>=2 required) → no penalty', async () => {
@@ -412,12 +408,13 @@ describe('Tier 2 — IP velocity', () => {
     expect(result.score).toBe(100);
   });
 
-  test('DOCUMENTED DOUBLE-PENALTY: 2 other orders from same IP in 24h are penalized TWICE — once by the unconditional early block, once by the fallback recompute block — because the early block never checks externalVelocity', async () => {
-    // penalty per occurrence = min(round(15*log2(3)),35) = 24 (verified: 15*log2(3)=23.77→round=24)
-    // total = 24 + 24 = 48. raw = 100 - 48 = 52.
-    // highCount = 2 (two identical "high" flags) but score(52) is not > 55,
-    // so the "2+ high flags" floor rule does NOT clamp it — the true
-    // double-counted value is directly observable.
+  test('single IP velocity penalty: 2 other orders from same IP in 24h yield exactly ONE flag (the old early duplicate block was removed, H2 fix)', async () => {
+    // penalty = min(round(15 * learnedMultiplier * log2(count + 1)), 35), count = 2, learned multiplier ~1.0 in this
+    // test env = 24 (measured: topSignals IP_VELOCITY contribution -24), applied once.
+    // raw = 100 - 24 = 76. One high flag, score above 70, so the risk floor caps it at 70.
+    // The assertions pin the flag count (1) and the floor-capped score; they do not pin the
+    // raw penalty size, because the floor hides it (see #232).
+    // Formerly this test documented a double penalty (2 flags, 100-24-24=52).
     const order = makeOrder({ amount: 50, ipAddress: '198.51.100.50', email: 'orderemail@example.com' });
     const allOrders = [
       { id: 'ip-hist-1', amount: 50, ipAddress: '198.51.100.50', email: 'hist1@example.com', createdAt: minutesAgo(30) },
@@ -426,17 +423,18 @@ describe('Tier 2 — IP velocity', () => {
     const result = await runScoring({ order, allOrders });
 
     const ipVelocityFlags = result.flags.filter((f) => f.text.includes('3 orders from same IP in last 24 hours'));
-    expect(ipVelocityFlags.length).toBe(2); // duplicated flag — the tell-tale sign of the double-count
+    expect(ipVelocityFlags.length).toBe(1); // exactly one flag (formerly 2, from the duplicate early block)
     expect(ipVelocityFlags.every((f) => f.severity === 'high')).toBe(true);
-    expect(result.score).toBe(52); // 100 - 24 - 24, NOT 100 - 24
+    expect(result.score).toBe(70); // 100 - 24 = 76, floor-capped to 70
   });
 
-  test('when externalVelocity supplies ipVelocityCount=0, the SECOND (fallback) block is suppressed, but the FIRST (unconditional, allOrders-based) block still fires regardless — proving the early block genuinely ignores externalVelocity', async () => {
-    // Early block: sameIPOrders.length=2 → penalty 24, flag fires.
-    // Fallback block: externalVelocity truthy → ipVelocityCount = 0 (from
-    // externalVelocity.ipVelocityCount) → `if (ipVelocityCount >= 2)` is
-    // false → second penalty does NOT fire.
-    // raw = 100 - 24 = 76 → single high flag, score>70 → floor caps to 70.
+  test('when externalVelocity supplies ipVelocityCount=0, no IP velocity flag or penalty is applied (the old early allOrders-based block was removed)', async () => {
+    // The only IP velocity block is driven by ipVelocityCount. When externalVelocity is supplied,
+    // ipVelocityCount is read from externalVelocity.ipVelocityCount (0 here) and the allOrders
+    // fallback (the else branch of that check) is not used, so the >= 2 check is false.
+    // No flag and no penalty, even though allOrders holds 2 other orders from the same IP.
+    // raw = 100, no flags, no floor. (Formerly an early block ignored externalVelocity and
+    // produced 1 flag with 100-24=76 capped to 70.)
     const order = makeOrder({ amount: 50, ipAddress: '198.51.100.60', email: 'orderemail2@example.com' });
     const allOrders = [
       { id: 'ip-hist-3', amount: 50, ipAddress: '198.51.100.60', email: 'hist3@example.com', createdAt: minutesAgo(10) },
@@ -448,12 +446,12 @@ describe('Tier 2 — IP velocity', () => {
       externalVelocity: { deviceVelocityCount: 0, ipVelocityCount: 0, emailVelocityCount: 0 },
     });
     const ipVelocityFlags = result.flags.filter((f) => f.text.includes('same IP in last 24 hours'));
-    expect(ipVelocityFlags.length).toBe(1); // only the early block fired
-    expect(result.score).toBe(70); // 100-24=76, floor-capped to 70
+    expect(ipVelocityFlags.length).toBe(0); // externalVelocity supplies 0, so no IP velocity flag
+    expect(result.score).toBe(100); // no IP penalty, so no floor
   });
 });
 
-// ─── Tier 2 — Email Velocity (and documented double-penalty) ──────────────
+// === Tier 2: Email Velocity ===
 
 describe('Tier 2 — email velocity', () => {
   test('exactly 2 other orders from same email in 6h → below threshold (>=3 required) → no penalty', async () => {
@@ -466,9 +464,10 @@ describe('Tier 2 — email velocity', () => {
     expect(result.flags.some((f) => f.text.includes('same email in last 6 hours'))).toBe(false);
   });
 
-  test('DOCUMENTED DOUBLE-PENALTY: 3 other orders from same email in 6h are penalized TWICE, same structural bug as IP velocity', async () => {
-    // penalty per occurrence = min(round(12*log2(4)),30) = 24 (12*2=24)
-    // total = 24 + 24 = 48. raw = 100 - 48 = 52 (highCount=2, not >55 → no clamp).
+  test('email velocity: 3 other orders from same email in 6h apply the penalty ONCE (the early duplicate block was removed, H2 fix)', async () => {
+    // penalty = min(round(12 * learnedMultiplier * log2(count + 1)), 30), count = 3, learned multiplier ~1.0 in this
+    // test env = 24 (measured: topSignals EMAIL_VELOCITY contribution -24), applied once. raw = 100 - 24 = 76;
+    // one high flag, so the risk floor caps the score at 70 (the cap, not the raw value, is what the assertion pins).
     // disputes below reference each history order's id purely to exclude
     // them from `prevGoodOrders` (returning-customer credit) — otherwise
     // the same 3 matching-email orders would ALSO trigger the returning-
@@ -491,8 +490,8 @@ describe('Tier 2 — email velocity', () => {
     const result = await runScoring({ order, allOrders, disputes });
 
     const emailVelocityFlags = result.flags.filter((f) => f.text.includes('4 orders from same email in last 6 hours'));
-    expect(emailVelocityFlags.length).toBe(2);
-    expect(result.score).toBe(52);
+    expect(emailVelocityFlags.length).toBe(1);
+    expect(result.score).toBe(70); // 76 floor-capped to 70
   });
 });
 
@@ -564,8 +563,8 @@ describe('Tier 2 — BIN velocity (tiered, first-match-wins: 10min > 1h > 24h)',
       payment_details: { card_bin: '411111' },
     });
     const allOrders = [
-      { id: 'bin-hist-1', amount: 50, email: 'binh1@example.com', ipAddress: 'ip-h1', payment_details: { card_bin: '411111' }, createdAt: minutesAgo(2) },
-      { id: 'bin-hist-2', amount: 50, email: 'binh2@example.com', ipAddress: 'ip-h2', payment_details: { card_bin: '411111' }, createdAt: minutesAgo(5) },
+      { id: 'bin-hist-1', amount: 50, email: 'binh1@example.com', ipAddress: 'ip-h1', payment_details: { card_bin: '411111' }, cardBinPrefix: '411111', createdAt: minutesAgo(2) },
+      { id: 'bin-hist-2', amount: 50, email: 'binh2@example.com', ipAddress: 'ip-h2', payment_details: { card_bin: '411111' }, cardBinPrefix: '411111', createdAt: minutesAgo(5) },
     ];
     const result = await runScoring({ order, allOrders, ipPenalty: 20 }); // 100-10-20=70
     expect(result.flags.some((f) => f.severity === 'high' && f.text.includes('3 orders from same BIN prefix in 10 minutes'))).toBe(true);
@@ -581,8 +580,8 @@ describe('Tier 2 — BIN velocity (tiered, first-match-wins: 10min > 1h > 24h)',
       payment_details: { card_bin: '511111' },
     });
     const allOrders = [
-      { id: 'bin-hist-3', amount: 50, email: 'binh3@example.com', ipAddress: 'ip-h3', payment_details: { card_bin: '511111' }, createdAt: minutesAgo(2) },
-      { id: 'bin-hist-4', amount: 50, email: 'binh4@example.com', ipAddress: 'ip-h4', payment_details: { card_bin: '511111' }, createdAt: minutesAgo(5) },
+      { id: 'bin-hist-3', amount: 50, email: 'binh3@example.com', ipAddress: 'ip-h3', payment_details: { card_bin: '511111' }, cardBinPrefix: '511111', createdAt: minutesAgo(2) },
+      { id: 'bin-hist-4', amount: 50, email: 'binh4@example.com', ipAddress: 'ip-h4', payment_details: { card_bin: '511111' }, cardBinPrefix: '511111', createdAt: minutesAgo(5) },
     ];
     const result = await runScoring({
       order,
@@ -606,8 +605,8 @@ describe('Tier 2 — BIN velocity (tiered, first-match-wins: 10min > 1h > 24h)',
     // would be >=2 (not >=3, so 1h tier alone wouldn't fire on its own —
     // but this test's real point is: whichever earlier tier matches wins).
     const allOrders = [
-      { id: 'bin-hist-5', amount: 50, email: 'binh5@example.com', ipAddress: 'ip-h5', payment_details: { card_bin: '611111' }, createdAt: minutesAgo(2) },
-      { id: 'bin-hist-6', amount: 50, email: 'binh6@example.com', ipAddress: 'ip-h6', payment_details: { card_bin: '611111' }, createdAt: minutesAgo(3) },
+      { id: 'bin-hist-5', amount: 50, email: 'binh5@example.com', ipAddress: 'ip-h5', payment_details: { card_bin: '611111' }, cardBinPrefix: '611111', createdAt: minutesAgo(2) },
+      { id: 'bin-hist-6', amount: 50, email: 'binh6@example.com', ipAddress: 'ip-h6', payment_details: { card_bin: '611111' }, cardBinPrefix: '611111', createdAt: minutesAgo(3) },
     ];
     const result = await runScoring({ order, allOrders, ipPenalty: 20 });
     const binFlags = result.flags.filter((f) => f.text.includes('BIN prefix'));
@@ -619,7 +618,7 @@ describe('Tier 2 — BIN velocity (tiered, first-match-wins: 10min > 1h > 24h)',
   test('no bin on the order → BIN velocity block is skipped entirely (guarded by `if (binPrefix)`)', async () => {
     const order = makeOrder({ amount: 50, email: 'nobin@example.com' });
     const allOrders = [
-      { id: 'irrelevant-1', amount: 50, email: 'x@example.com', payment_details: { card_bin: '411111' }, createdAt: minutesAgo(2) },
+      { id: 'irrelevant-1', amount: 50, email: 'x@example.com', payment_details: { card_bin: '411111' }, cardBinPrefix: '411111', createdAt: minutesAgo(2) },
     ];
     const result = await runScoring({ order, allOrders });
     expect(result.flags.some((f) => f.text.includes('BIN prefix'))).toBe(false);
@@ -693,12 +692,11 @@ describe('Tier 2 — high-value order (3x / 5x average order value, new vs retur
     expect(result.score).toBe(90); // 100-10
   });
 
-  test('exactly 5.0x average, new customer → -30 (high-value) PLUS an un-suppressed -10 (first-order penalty) — DISCOVERED QUIRK: the alreadyFlagged suppression only matches capitalized "New customer", but the 5x tier\'s own flag text uses lowercase "new customer", so the case-sensitive `includes("New customer")` check fails to catch it', async () => {
-    // This is a genuine, previously undocumented behavior difference from
-    // the 3x tier (whose flag text IS "New customer with order..." —
-    // capitalized — which DOES successfully suppress the -10). At the 5x
-    // tier the suppression silently does not fire, so both penalties land:
-    // raw = 100 - 30 (high-value) - 10 (first-order, NOT suppressed) - 10 (dial) = 50.
+  test('exactly 5.0x average, new customer: -30 (high-value) and the first-order -10 is suppressed by highValuePenaltyApplied (the old text-match quirk is gone)', async () => {
+    // Formerly a documented quirk: suppression depended on matching the capitalized text "New customer",
+    // which the 5x tier flag did not contain, so both penalties landed. riskScoring.js now gates the
+    // first-order penalty on the highValuePenaltyApplied variable, so only the high-value penalty applies:
+    // raw = 100 - 30 (high-value) - 10 (dial) = 60; the first-order -10 does not fire.
     const order = makeOrder({ amount: 500 });
     const allOrders = [
       { id: 'hv-hist-5', amount: 100, email: 'hist5@example.com', createdAt: hoursAgo(48) },
@@ -706,8 +704,8 @@ describe('Tier 2 — high-value order (3x / 5x average order value, new vs retur
     ];
     const result = await runScoring({ order, allOrders, ipPenalty: 10 });
     expect(result.flags.some((f) => f.severity === 'high' && f.text.includes('extreme anomaly from new customer'))).toBe(true);
-    expect(result.flags.some((f) => f.text.includes('First order from this email'))).toBe(true); // NOT suppressed, unlike the 3x-tier case
-    expect(result.score).toBe(50); // NOT 60 — the second -10 is real
+    expect(result.flags.some((f) => f.text.includes('First order from this email'))).toBe(false); // suppressed, same as the 3x tier
+    expect(result.score).toBe(60); // 100-30(high-value)-10(dial); first-order -10 is suppressed
   });
 
   test('exactly 5.0x average, RETURNING customer → -25, still "high" severity (extreme tier is high regardless), no "new customer" suffix', async () => {
@@ -757,7 +755,7 @@ describe('Tier 2 — new-customer first-order penalty (-10) and its suppression 
   test('new customer, amount >= 150, NO high-value trigger (no order history at all) → -10 fires standalone, medium', async () => {
     const order = makeOrder({ amount: 150 }); // avgOrderValue=0 (no allOrders) → high-value block skipped entirely
     const result = await runScoring({ order, allOrders: [] });
-    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First order from this email with value $150'))).toBe(true);
+    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First order from this email with value 150'))).toBe(true);
     expect(result.score).toBe(90); // 100-10, single medium flag, no floor
   });
 
@@ -791,7 +789,7 @@ describe('Tier 2 — first-seen device / cold-start device penalty', () => {
   test('brand-new device (no prior orders) + amount >= 100 → -15, medium', async () => {
     const order = makeOrder({ amount: 100, deviceFingerprint: 'brand-new-device' });
     const result = await runScoring({ order, allOrders: [] });
-    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First-time device with order $100'))).toBe(true);
+    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First-time device with order 100'))).toBe(true);
     expect(result.score).toBe(85); // 100-15
   });
 
@@ -1069,15 +1067,15 @@ describe('Tier 3 — MAX_POSITIVE_BOOST cap (25)', () => {
   });
 });
 
-// ─── Documented Gap — Homoglyph Bypass in riskScoring.js's normalizeEmail ──
+// === Regression guard: homoglyph email spoofing (formerly a documented gap) ===
 
-describe('documented gap — homoglyph email spoofing bypasses velocity/dedup checks', () => {
-  test('a Cyrillic-"а" variant of an email is NOT recognized as a duplicate for email-velocity purposes, because utils.js normalizeEmail (used by riskScoring.js) has no homoglyph map', async () => {
-    // "\u0430hmed@example.com" uses Cyrillic а (U+0430) in place of Latin "a".
-    // similarity.js's normalizeEmail WOULD fold this to "ahmed@example.com"
-    // via its HOMOGLYPH_MAP, but riskScoring.js imports normalizeEmail from
-    // utils.js, which has no such mapping — so these are treated as two
-    // completely distinct emails for velocity purposes.
+describe('regression guard: homoglyph email spoofing is folded by normalizeEmail', () => {
+  test('a Cyrillic variant of an email IS recognized as a duplicate for email-velocity purposes, because utils.js normalizeEmail applies HOMOGLYPH_MAP', async () => {
+    // "\u0430hmed@example.com" uses Cyrillic a (U+0430) in place of Latin "a".
+    // utils.js normalizeEmail (used by riskScoring.js) applies HOMOGLYPH_MAP, so this folds to
+    // "ahmed@example.com" (similarity.js re-exports this same utils.js function). The spoofed order and the 3
+    // prior orders therefore count as the same email for velocity purposes (formerly they were
+    // treated as distinct emails because utils.js had no mapping).
     const spoofedEmail = '\u0430hmed@example.com'; // Cyrillic а
     const realEmail = 'ahmed@example.com';
 
@@ -1089,9 +1087,12 @@ describe('documented gap — homoglyph email spoofing bypasses velocity/dedup ch
     ];
     const result = await runScoring({ order, allOrders });
 
-    // If normalizeEmail folded homoglyphs, this would be a 3-match email
-    // velocity event (>=3 threshold) and would produce a flag. It does not.
-    expect(result.flags.some((f) => f.text.includes('same email in last 6 hours'))).toBe(false);
-    expect(result.score).toBe(100);
+    // With the homoglyph fold this is a 3-match email velocity event (>=3 threshold): topSignals shows
+    // EMAIL_VELOCITY value 3 with contribution -24, and the final score is 70.
+    // The run also yields a medium trust_farming_pattern flag ("3 orders in 0h"). Neither that flag
+    // nor its penalty is asserted here, so how much of the drop to 70 comes from each is not pinned.
+    // Before the fold it produced no email velocity flag.
+    expect(result.flags.some((f) => f.text.includes('same email in last 6 hours'))).toBe(true); // homoglyph folded: counts as 3 prior orders
+    expect(result.score).toBe(70); // EMAIL_VELOCITY -24 plus a medium trust_farming flag (not pinned); see comment above
   });
 });
