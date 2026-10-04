@@ -417,7 +417,7 @@ describe('2. Suspicious order (moderate risk) — non-critical high-severity sta
     expect(highFlags.length).toBe(5);
     expect(result.flags.some((f) => f.text.includes('New customer with order 4x above store average'))).toBe(true);
     expect(result.flags.some((f) => f.text.includes('Device fingerprint linked to 3 orders in last hour'))).toBe(true);
-    expect(result.flags.some((f) => f.text.includes('First-time device with order $400'))).toBe(true);
+    expect(result.flags.some((f) => f.text.includes('First-time device with order 400'))).toBe(true);
     expect(result.flags.some((f) => f.text.includes('Economic risk'))).toBe(true);
 
     // DOCUMENTED FINDING: the "2+ high flags → cap at 55" floor rule never
@@ -443,7 +443,7 @@ describe('3. Fraudulent order (critical risk) — hard-blocked with correct crit
       amount: 250, // >200, feeds the pattern-sharing "highAmount" signal
     });
 
-    const blacklist = [{ email: 'blackhat@fraud-domain.com' }];
+    const blacklist = [{ type: 'EMAIL', value: 'blackhat@fraud-domain.com' }];
 
     // Minimal, similarity-inert dispute shapes (no `email`/`shippingAddress`
     // fields) — the same pattern T3d-1 already proved passes through the
@@ -563,7 +563,7 @@ describe('4. Mixed signals — simultaneous positive AND negative pressure on th
 
     // Negative pressure: brand-new device + VPN IP
     expect(result.flags.some((f) => f.severity === 'high' && f.text.includes('VPN/datacenter'))).toBe(true);
-    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First-time device with order $100'))).toBe(true);
+    expect(result.flags.some((f) => f.severity === 'medium' && f.text.includes('First-time device with order 100'))).toBe(true);
     expect(result.flags.length).toBe(2);
 
     // Positive pressure: trusted-by-email returning customer — but NO
@@ -722,13 +722,14 @@ describe('5. Interaction verification', () => {
       order,
       allOrders: [],
       disputes,
-      blacklist: [{ email: 'clamp-low@example.com' }],
+      blacklist: [{ type: 'EMAIL', value: 'clamp-low@example.com' }],
     });
 
     // -80 -60 -50 = -190 raw → far below 0 → outer clamp to 0 → critical
     // floor min(0,40) = 0. Never negative.
     expect(result.score).toBe(0);
     expect(result.score).toBeGreaterThanOrEqual(0);
+    expect(result.flags.some((f) => f.severity === 'critical' && f.text.includes('fraud blacklist'))).toBe(true);
   });
 
   test('5.4b — the final score is clamped at the ceiling: 100, never above, even when the raw positive arithmetic (login bonus + capped pool) would sum past it', async () => {
