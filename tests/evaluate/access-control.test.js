@@ -40,7 +40,8 @@ function defaultScoreResult(overrides = {}) {
 }
 
 function uniqueIp(label) {
-  return `10.99.${Math.floor(Math.random() * 255)}.${label}-${Date.now()}`;
+  // Must pass isPlausibleClientIp (valid, public, not reserved/TEST-NET) - see #250.
+  return `45.${Math.floor(Math.random() * 256)}.${Math.floor(Math.random() * 256)}.${1 + Math.floor(Math.random() * 254)}`;
 }
 
 function uniqueOrderId(label) {
@@ -523,7 +524,12 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
         flags: [{ severity: 'critical', text: 'mock block reason' }],
       }));
 
-      const txnSpy = jest.spyOn(db, '$transaction').mockRejectedValueOnce(new Error('simulated transaction failure'));
+      // Reject ONLY the BlockedAttempt write (array form). Other transactions (e.g. atomicIdentityGate callback) must run normally.
+      const originalTxn = db.$transaction.bind(db);
+      const txnSpy = jest.spyOn(db, '$transaction').mockImplementation((arg, ...rest) => {
+        if (Array.isArray(arg)) return Promise.reject(new Error('simulated transaction failure'));
+        return originalTxn(arg, ...rest);
+      });
 
       try {
         const res = await evaluateRequest(
