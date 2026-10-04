@@ -3420,32 +3420,6 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     const limitedScoring = quotaStatus.exceeded;
     // ?? End Quota Status ??????????????????????????????????????????????????
 
-    // ??? CardHash generation (if last4+expiry+brand provided) ???rovided) ???
-    let cardHashRecord = null;
-    if (last4 && expMonth && expYear && brand && merchantId) {
-
-      const secret = process.env.CARD_HASH_SECRET;
-      if (!secret) throw new Error('CARD_HASH_SECRET missing');
-      const raw = `${merchantId}:${last4}:${expMonth}:${expYear}:${brand}`;
-      const cardHash = crypto.createHmac('sha256', secret).update(raw).digest('hex');
-      
-      cardHashRecord = await db.cardHash.upsert({
-        where: { cardHash },
-        create: {
-          merchantId,
-          cardHash,
-          last4,
-          expMonth,
-          expYear,
-          brand,
-          attemptCount: 1,
-        },
-        update: {
-          attemptCount: { increment: 1 },
-          lastSeenAt: new Date(),
-        },
-      });
-    }
 
     // 1. ????? ?? ????? ???????
     const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
