@@ -409,11 +409,11 @@ describe('Tier 2 — IP velocity', () => {
   });
 
   test('single IP velocity penalty: 2 other orders from same IP in 24h yield exactly ONE flag (the old early duplicate block was removed, H2 fix)', async () => {
-    // penalty = min(round(15 * learnedMultiplier * log2(count + 1)), 35), count = 2, learned multiplier ~1.0 in this
-    // test env = 24 (measured: topSignals IP_VELOCITY contribution -24), applied once.
+    // penalty = min(round(15 * learnedMultiplier * log2(count + 1)), 35), count = 2. With merchantId = null,
+    // getW falls back to the static weights, so learnedMultiplier is exactly 1.0 and the penalty is 24 (applied once).
     // raw = 100 - 24 = 76. One high flag, score above 70, so the risk floor caps it at 70.
-    // The assertions pin the flag count (1) and the floor-capped score; they do not pin the
-    // raw penalty size, because the floor hides it (see #232).
+    // The floor hides the raw penalty, so topSignals pins it directly (IP_VELOCITY value 2, contribution -24, #232);
+    // the score assertion only pins the floor-capped result. The 35 cap is not reached with count = 2.
     // Formerly this test documented a double penalty (2 flags, 100-24-24=52).
     const order = makeOrder({ amount: 50, ipAddress: '198.51.100.50', email: 'orderemail@example.com' });
     const allOrders = [
@@ -426,6 +426,10 @@ describe('Tier 2 — IP velocity', () => {
     expect(ipVelocityFlags.length).toBe(1); // exactly one flag (formerly 2, from the duplicate early block)
     expect(ipVelocityFlags.every((f) => f.severity === 'high')).toBe(true);
     expect(result.score).toBe(70); // 100 - 24 = 76, floor-capped to 70
+    const ipSignals = result.topSignals.filter((s) => s.type === 'IP_VELOCITY');
+    expect(ipSignals.length).toBe(1);
+    expect(ipSignals[0].value).toBe(2);
+    expect(ipSignals[0].contribution).toBe(-24);
   });
 
   test('when externalVelocity supplies ipVelocityCount=0, no IP velocity flag or penalty is applied (the old early allOrders-based block was removed)', async () => {
@@ -465,9 +469,11 @@ describe('Tier 2 — email velocity', () => {
   });
 
   test('email velocity: 3 other orders from same email in 6h apply the penalty ONCE (the early duplicate block was removed, H2 fix)', async () => {
-    // penalty = min(round(12 * learnedMultiplier * log2(count + 1)), 30), count = 3, learned multiplier ~1.0 in this
-    // test env = 24 (measured: topSignals EMAIL_VELOCITY contribution -24), applied once. raw = 100 - 24 = 76;
-    // one high flag, so the risk floor caps the score at 70 (the cap, not the raw value, is what the assertion pins).
+    // penalty = min(round(12 * learnedMultiplier * log2(count + 1)), 30), count = 3. With merchantId = null,
+    // getW falls back to the static weights, so learnedMultiplier is exactly 1.0 and the penalty is 24 (applied once).
+    // raw = 100 - 24 = 76; one high flag, so the risk floor caps the score at 70. The floor hides the raw
+    // penalty, so topSignals pins it directly (EMAIL_VELOCITY value 3, contribution -24, #232); the score
+    // assertion only pins the floor-capped result. The 30 cap is not reached with count = 3.
     // disputes below reference each history order's id purely to exclude
     // them from `prevGoodOrders` (returning-customer credit) — otherwise
     // the same 3 matching-email orders would ALSO trigger the returning-
@@ -492,6 +498,10 @@ describe('Tier 2 — email velocity', () => {
     const emailVelocityFlags = result.flags.filter((f) => f.text.includes('4 orders from same email in last 6 hours'));
     expect(emailVelocityFlags.length).toBe(1);
     expect(result.score).toBe(70); // 76 floor-capped to 70
+    const emailSignals = result.topSignals.filter((s) => s.type === 'EMAIL_VELOCITY');
+    expect(emailSignals.length).toBe(1);
+    expect(emailSignals[0].value).toBe(3);
+    expect(emailSignals[0].contribution).toBe(-24);
   });
 });
 
