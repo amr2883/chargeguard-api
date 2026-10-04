@@ -16,6 +16,10 @@ const { calculateRiskScore } = require('../../src/lib/riskScoring');
 // into — mocked to keep this suite hermetic and fast rather than
 // accidentally depending on unreviewed code.
 jest.mock('../../src/lib/identityGraph');
+// sendQuotaExceededEmail is fire-and-forget inside quotaGate. Without this mock the suite calls the real
+// Gmail client (no credentials here -> noisy [ERROR] logs; real mail if credentials ever load) - #294/#297.
+jest.mock('../../src/lib/email');
+const email = require('../../src/lib/email');
 
 const prisma = new PrismaClient();
 const db = require('../../src/lib/db'); // same singleton risk.js uses — needed to spy on $transaction
@@ -118,6 +122,7 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     calculateRiskScore.mockResolvedValue(defaultScoreResult());
+    email.sendQuotaExceededEmail.mockResolvedValue();
   });
 
   // ── 1. Access control ordering ─────────────────────────────────────────
@@ -337,9 +342,14 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
       });
 
       expect(res.status).toBe(200);
+      expect(res.body.scored).toBe(true);
+      expect(res.body.limitedScoring).toBe(false);
+      expect(calculateRiskScore).toHaveBeenCalled();
+      expect(calculateRiskScore.mock.calls[0].at(-1)).toBe(false);
+      expect(email.sendQuotaExceededEmail).not.toHaveBeenCalled();
     });
 
-    test('starter plan at quota (500/500) is blocked with quota_exceeded', async () => {
+    test('starter plan at quota (500/500) keeps scoring with limitedScoring=true instead of a 403 (#252)', async () => {
       const seeded = await seedTenant({
         label: 'quota-at',
         plan: 'starter',
@@ -354,12 +364,15 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
         { orderId: uniqueOrderId('quota-at'), ipAddress: uniqueIp('quota-at') }
       );
 
-      expect(res.status).toBe(403);
-      expect(res.body.blocked_reason).toBe('quota_exceeded');
-      expect(calculateRiskScore).not.toHaveBeenCalled();
+      expect(res.status).toBe(200);
+      expect(res.body.blocked_reason).toBeUndefined();
+      expect(res.body.scored).toBe(true);
+      expect(res.body.limitedScoring).toBe(true);
+      expect(calculateRiskScore).toHaveBeenCalled();
+      expect(calculateRiskScore.mock.calls[0].at(-1)).toBe(true);
     });
 
-    test('pro plan at its 5000 quota returns pro_quota_exceeded (distinct message from starter)', async () => {
+    test('pro plan at its 5000 quota keeps scoring with limitedScoring=true instead of a 403 (#252)', async () => {
       const seeded = await seedTenant({
         label: 'quota-pro',
         plan: 'pro',
@@ -374,8 +387,29 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
         { orderId: uniqueOrderId('quota-pro'), ipAddress: uniqueIp('quota-pro') }
       );
 
-      expect(res.status).toBe(403);
-      expect(res.body.blocked_reason).toBe('pro_quota_exceeded');
+      expect(res.status).toBe(200);
+      expect(res.body.blocked_reason).toBeUndefined();
+      expect(res.body.scored).toBe(true);
+      expect(res.body.limitedScoring).toBe(true);
+    });
+
+    test('pro plan just under its 5000 quota (4999/5000) is not limited (#252)', async () => {
+      const seeded = await seedTenant({
+        label: 'quota-pro-under',
+        plan: 'pro',
+        monthlyBlockedCount: 4999,
+        quotaResetDate: new Date(Date.now() + 24 * 60 * 60 * 1000),
+      });
+      createdTenantIds.push(seeded.tenant.id);
+
+      const res = await evaluateRequest(
+        { ...seeded.tenant, _plaintextKeyForAuth: seeded.plaintextKey },
+        seeded.domain,
+        { orderId: uniqueOrderId('quota-pro-under'), ipAddress: uniqueIp('quota-pro-under') }
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.limitedScoring).toBe(false);
     });
 
     test('agency plan is exempt from quota enforcement regardless of monthlyBlockedCount', async () => {
@@ -394,6 +428,7 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
       );
 
       expect(res.status).toBe(200);
+      expect(res.body.limitedScoring).toBe(false);
     });
 
     test('a null quotaResetDate triggers an automatic reset to 0 and allows the request through', async () => {
