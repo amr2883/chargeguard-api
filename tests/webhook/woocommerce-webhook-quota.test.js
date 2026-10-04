@@ -111,6 +111,10 @@ beforeEach(() => {
 afterAll(async () => {
   try {
     if (createdTenantIds.length) {
+      const where = { merchantId: { in: createdTenantIds } };
+      const safe = async (fn) => { try { await fn(); } catch (e) { /* best effort */ } };
+      await safe(() => db.riskEvaluation.deleteMany({ where: { order: where } }));
+      await safe(() => db.order.deleteMany({ where }));
       await db.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
     }
   } finally {
