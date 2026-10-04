@@ -184,7 +184,7 @@ describe('T3d-6: Identity Graph Risk Integration (getConnectedRisk ↔ calculate
     // ─── Neutral defaults for every non-graph subsystem ────────────────
     getConnectedRisk.mockResolvedValue(NEUTRAL_GRAPH_RESULT);
     getWeightsForMerchant.mockResolvedValue({ weights: null, isLearning: false });
-    getStaticWeight.mockReturnValue(1);
+    getStaticWeight.mockImplementation((t, v) => (t === 'DEVICE_VELOCITY' && v === 'MEDIUM') ? 15 : 1);
     getIPIntelligence.mockResolvedValue(null);
     calculateIPPenalty.mockReturnValue({ penalty: 0, flags: [] });
     getEmailIntelligence.mockResolvedValue(null);
