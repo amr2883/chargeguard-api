@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { computeNormalizedValue } = require('../../src/lib/blacklistGate');
 
 // Black-box calculateRiskScore entirely — T3a tests risk.js's own
 // orchestration (quota, idempotency, whitelist/blacklist, BlockedAttempt
@@ -266,7 +267,8 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
     test('a whitelisted email short-circuits before scoring, velocity, or BIN checks', async () => {
       const testEmail = `whitelisted-${Date.now()}@example.com`;
       await prisma.whitelistEntry.create({
-        data: { merchantId: tenant.id, type: 'EMAIL', value: testEmail },
+        // Same normalizedValue the POST /whitelist writer stores - the EMAIL gate matches on it (#251).
+        data: { merchantId: tenant.id, type: 'EMAIL', value: testEmail, normalizedValue: computeNormalizedValue('EMAIL', testEmail) },
       });
 
       const res = await evaluateRequest(tenant, domain, {
