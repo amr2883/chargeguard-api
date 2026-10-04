@@ -4,6 +4,7 @@
 const express = require('express');
 const router  = express.Router();
 const db = require('../lib/db'); // replaces the local `new PrismaClient()`
+const { computeNormalizedValue } = require('../lib/blacklistGate');
 const {
   suspendTenant,
   reactivateTenant,
@@ -1639,6 +1640,7 @@ const buildAddEntryHandler = (listName, model, validTypes, action) =>
           storeId: null,
           type,
           value: normalizedValue,
+          normalizedValue: computeNormalizedValue(type, normalizedValue),
           reason: reason || null,
           expiresAt: expiresAt ? new Date(expiresAt) : null,
           createdBy: createdBy || 'admin',
