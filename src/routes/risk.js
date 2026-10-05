@@ -2426,6 +2426,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const webhookWhitelistCheck = await db.whitelistEntry.findFirst({
         where: {
           merchantId,
+          ...storeScope,
           OR: webhookWhitelistConditions,
           AND: [{ OR: [
             { expiresAt: null },
