@@ -6,8 +6,9 @@
 // --verify) before the read-path changes in risk.js / enrichmentProcessor.js
 // are deployed — see ADR-10 §6 rollout order.
 //
+// All modes need DATABASE_URL set in the environment (see the guard below).
 // Usage:
-//   node scripts/backfill-normalized-emails.js               # run for real
+//   node scripts/backfill-normalized-emails.js --confirm-target=<host:port/db>   # run for real
 //   node scripts/backfill-normalized-emails.js --dry-run     # count only, no writes
 //   node scripts/backfill-normalized-emails.js --verify      # check completion, no writes
 //
