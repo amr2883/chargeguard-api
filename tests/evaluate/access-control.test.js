@@ -114,6 +114,8 @@ describe('/evaluate — access control & orchestration (T3a)', () => {
       await prisma.cardTestAttempt.deleteMany({ where: { merchantId: { in: createdTenantIds } } });
       await prisma.order.deleteMany({ where: { merchantId: { in: createdTenantIds } } });
       await prisma.blockedAttempt.deleteMany({ where: { tenantId: { in: createdTenantIds } } });
+      await prisma.whitelistEntry.deleteMany({ where: { merchantId: { in: createdTenantIds } } });
+      await prisma.blacklistEntry.deleteMany({ where: { merchantId: { in: createdTenantIds } } });
       await prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
     }
     await prisma.$disconnect();
