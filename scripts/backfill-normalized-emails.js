@@ -15,6 +15,33 @@
 // `normalizedValue IS NULL` / `normalizedEmail IS NULL`, so a completed
 // run is a fast no-op on subsequent invocations.
 
+// [#316] Target-DB guard. Runs before ANY require so Prisma never falls back to .env.
+// Needs DATABASE_URL in the environment; LIVE mode also needs --confirm-target=<host:port/db>.
+(function guardTargetDb() {
+  const argv = process.argv;
+  const live = !argv.includes('--dry-run') && !argv.includes('--verify');
+  const raw = process.env.DATABASE_URL;
+  if (!raw) {
+    console.error('REFUSING: DATABASE_URL is not set in the environment (Prisma would fall back to .env).');
+    process.exit(2);
+  }
+  let u;
+  try { u = new URL(raw); } catch (e) {
+    console.error('REFUSING: DATABASE_URL is not a valid URL (value not printed).');
+    process.exit(2);
+  }
+  const target = u.host + u.pathname;
+  console.log('Target DB: ' + target);
+  if (live) {
+    const arg = argv.find((a) => a.startsWith('--confirm-target='));
+    const want = arg ? arg.slice('--confirm-target='.length) : '';
+    if (want !== target) {
+      console.error('REFUSING: LIVE run needs --confirm-target=' + target + ' (exactly the target above).');
+      process.exit(2);
+    }
+  }
+})();
+
 const db = require('../src/lib/db');
 const { normalizeEmail } = require('../src/lib/utils');
 
