@@ -144,6 +144,10 @@ async function backfillListModel(modelName, dbModel) {
 
     processed += batch.length;
     totalErrors += errors;
+    if (errors === batch.length) {
+      console.error('  ! No progress: all ' + batch.length + ' rows in this batch failed. Stopping to avoid an infinite loop.');
+      break;
+    }
     console.log(`  Processed ${processed}/${totalToProcess} (${errors} errors this batch)`);
   }
 
@@ -195,6 +199,10 @@ async function backfillOrders() {
 
     processed += batch.length;
     totalErrors += errors;
+    if (errors === batch.length) {
+      console.error('  ! No progress: all ' + batch.length + ' rows in this batch failed. Stopping to avoid an infinite loop.');
+      break;
+    }
     console.log(`  Processed ${processed}/${totalToProcess} (${errors} errors this batch)`);
   }
 
