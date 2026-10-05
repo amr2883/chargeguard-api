@@ -30,6 +30,17 @@
     console.error('REFUSING: DATABASE_URL is not a valid URL (value not printed).');
     process.exit(2);
   }
+  // [#322] Allowlist for query params: host / hostaddr / dbname / port in the query can redirect the connection while host+pathname look fine.
+  const ALLOWED_PARAMS = new Set(['schema', 'connection_limit', 'pool_timeout', 'connect_timeout', 'sslmode', 'pgbouncer']);
+  const bad = [];
+  for (const k of u.searchParams.keys()) {
+    if (!ALLOWED_PARAMS.has(k) && !bad.includes(k)) bad.push(k);
+  }
+  if (bad.length > 0) {
+    const names = bad.slice(0, 5).map((k) => (/^[A-Za-z0-9_]{1,40}$/.test(k) ? k : '<unprintable>')).join(', ');
+    console.error('REFUSING: DATABASE_URL has query parameter(s) outside the allowlist: ' + names + (bad.length > 5 ? ' (+' + (bad.length - 5) + ' more)' : '') + ' (values not printed).');
+    process.exit(2);
+  }
   const target = u.host + u.pathname;
   console.log('Target DB: ' + target);
   if (live) {
