@@ -252,14 +252,15 @@ async function main() {
     results.push(await backfillListModel('WhitelistEntry', db.whitelistEntry));
     results.push(await backfillOrders());
 
+    let complete = true;
     if (!DRY_RUN) {
-      await verifyCompletion();
+      complete = await verifyCompletion();
     }
 
     const totalErrors = results.reduce((sum, r) => sum + r.errors, 0);
     const elapsedSec = ((Date.now() - startedAt) / 1000).toFixed(1);
     console.log(`\nFinished in ${elapsedSec}s.`);
-    process.exitCode = totalErrors > 0 ? 1 : 0;
+    process.exitCode = (totalErrors > 0 || !complete) ? 1 : 0;
   } catch (err) {
     console.error('Fatal error during backfill:', err);
     process.exitCode = 1;
