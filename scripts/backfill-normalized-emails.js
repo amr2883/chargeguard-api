@@ -65,17 +65,9 @@ const CONCURRENCY = 20; // bounded parallel updates per batch — avoids
 const DRY_RUN = process.argv.includes('--dry-run');
 const VERIFY_ONLY = process.argv.includes('--verify');
 
-// ─── computeNormalizedValue — MUST stay identical to risk.js's copy ───────
-// EMAIL: full normalizeEmail() (homoglyph/case/plus-tag/dot aware) — this
-// is the actual Bug #7 fix. IP/DEVICE_FINGERPRINT: trim only, no fuzzy
-// matching (out of scope for this fix). BIN: unchanged — already
-// normalized to 6 digits at write time in both blacklist/whitelist routes.
-function computeNormalizedValue(type, value) {
-  if (value == null) return null;
-  if (type === 'EMAIL') return normalizeEmail(value);
-  if (type === 'IP' || type === 'DEVICE_FINGERPRINT') return String(value).trim();
-  return String(value);
-}
+// computeNormalizedValue is imported from the read-path module so the backfill
+// and the blacklist/whitelist checks can never diverge (#314).
+const { computeNormalizedValue } = require('../src/lib/blacklistGate');
 
 // Bounded-concurrency runner — processes `items` with at most
 // `CONCURRENCY` in-flight promises at once, using `fn` to process each.
