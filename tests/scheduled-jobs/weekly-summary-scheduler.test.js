@@ -16,8 +16,9 @@
  *     only) and there is no in-loop plan re-check. Weekly summaries go to
  *     ALL active tenants regardless of plan — confirmed from source, not
  *     assumed from the attack-alert pattern.
- *   - No `logger.js` mock: this module logs via raw console.log/warn/error.
- *     We spy on console methods to silence + assert.
+ *   - `../../src/lib/logger` IS mocked (debug/info/warn/error as jest.fn). The
+ *     scheduler logs via the structured logger (fields, message), so assertions
+ *     target that contract directly instead of spying on console output.
  *   - `runWeeklySummaryCheck` / `processTenant` are NOT exported — only
  *     `startWeeklySummaryScheduler` is. Every test calls
  *     `startWeeklySummaryScheduler(prisma)` and advances fake timers.
@@ -43,8 +44,16 @@ jest.mock('../../src/lib/email', () => ({
   sendWeeklySummaryEmail: jest.fn(),
 }));
 
+jest.mock('../../src/lib/logger', () => ({
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+
 const { startWeeklySummaryScheduler } = require('../../src/jobs/weeklySummaryScheduler');
 const { sendWeeklySummaryEmail } = require('../../src/lib/email');
+const logger = require('../../src/lib/logger');
 const { SAVINGS_PER_ATTACK, QUIET_STREAK_THRESHOLD } = require('../../src/lib/constants');
 
 // Mirrors non-exported constants from src/jobs/weeklySummaryScheduler.js.
@@ -120,26 +129,17 @@ async function triggerFirstTick(prisma) {
 
 describe('weeklySummaryScheduler', () => {
   let prisma;
-  let logSpy;
-  let warnSpy;
-  let errorSpy;
 
   beforeEach(() => {
     jest.useFakeTimers();
     jest.resetAllMocks();
     prisma = makePrisma();
     applyPersistentDefaults(prisma);
-    logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
-    warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-    errorSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
   });
 
   afterEach(() => {
     jest.clearAllTimers();
     jest.useRealTimers();
-    logSpy.mockRestore();
-    warnSpy.mockRestore();
-    errorSpy.mockRestore();
   });
 
   // ── 1. gate: not Sunday ──────────────────────────────────────────────────
@@ -283,8 +283,9 @@ describe('weeklySummaryScheduler', () => {
         savedAmount: 0,
       },
     });
-    expect(logSpy).toHaveBeenCalledWith(
-      expect.stringContaining(`${QUIET_STREAK_THRESHOLD} consecutive quiet weeks, skipping email`)
+    expect(logger.debug).toHaveBeenCalledWith(
+      { module: 'weeklySummaryScheduler', tenantEmail: tenant.email, quietStreakThreshold: QUIET_STREAK_THRESHOLD },
+      'Consecutive quiet weeks, skipping email'
     );
     expect(sendWeeklySummaryEmail).not.toHaveBeenCalled();
   });
@@ -391,9 +392,9 @@ describe('weeklySummaryScheduler', () => {
     // Advance past the inter-tenant courtesy delay so the second tenant runs.
     await jest.advanceTimersByTimeAsync(TENANT_DELAY_MS);
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Unhandled error for tenant tenant-fail:'),
-      'query exploded'
+    expect(logger.error).toHaveBeenCalledWith(
+      { module: 'weeklySummaryScheduler', tenantId: 'tenant-fail', error: 'query exploded' },
+      'Unhandled error for tenant'
     );
     expect(prisma.alertLog.create).toHaveBeenCalledWith({
       data: {
@@ -417,9 +418,9 @@ describe('weeklySummaryScheduler', () => {
 
     await expect(triggerFirstTick(prisma)).resolves.not.toThrow();
 
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining(`Email failed for ${tenant.email}:`),
-      'SMTP down'
+    expect(logger.error).toHaveBeenCalledWith(
+      { module: 'weeklySummaryScheduler', tenantEmail: tenant.email, error: 'SMTP down' },
+      'Email failed'
     );
   });
 
