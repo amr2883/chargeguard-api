@@ -149,12 +149,33 @@ jest.mock('../../src/lib/logger', () => ({
   error: jest.fn(),
 }));
 
+jest.mock('../../src/lib/protectionStatus', () => {
+  const CORE = [
+    'Blacklist & Email Verification',
+    'Velocity & Device Fingerprinting',
+    'BIN Sequence Detection',
+    'Identity Graph',
+  ];
+  const ADV = ['IP Intelligence', 'Email Intelligence', 'BIN Intelligence'];
+  function getProtectionLayers(ps) {
+    const paused   = ps.state === 'emergency_pause_global' || ps.state === 'emergency_pause_tenant';
+    const quotaOut = ps.state === 'quota_exhausted';
+    const core     = CORE.map(name => ({ name, active: !paused }));
+    const advanced = ADV.map(name => ({ name, active: !paused && !quotaOut }));
+    return { core, advanced,
+      coreActiveCount:     core.filter(l => l.active).length,
+      advancedActiveCount: advanced.filter(l => l.active).length };
+  }
+  return { getProtectionStatus: jest.fn(), getProtectionLayers };
+});
+
 const { PrismaClient } = require('@prisma/client');
 const mockPrisma = new PrismaClient();
 const { getBINStats } = require('../../src/lib/binSequenceDetector');
 const { resolveTenantByApiKey } = require('../../src/lib/apiKeyAuth');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
 const { sendRotatedKeyEmail } = require('../../src/lib/email');
+const { getProtectionStatus: mockGetPS } = require('../../src/lib/protectionStatus');
 const dashboardRouter = require('../../src/routes/dashboard');
 
 // Fail loudly and immediately, instead of tests failing later with cryptic
@@ -349,6 +370,12 @@ function applyPersistentDefaults() {
   mockPrisma.binSequenceAlert.findMany.mockResolvedValue([]);
 
   getBINStats.mockReturnValue({ activePrefixes: 0, blockedPrefixes: 0, totalActiveBINs: 0 });
+  mockGetPS.mockResolvedValue({
+    state: 'healthy', severity: 'healthy',
+    title: 'Fully protected',
+    detail: 'All detection layers are active and running normally.',
+    source: 'default', confidence: 'confirmed',
+  });
   hashApiKey.mockImplementation((key) => `hashed_${key}`);
   resolveTenantByApiKey.mockResolvedValue({ tenant: makeTenant(), usedPreviousKey: false });
   sendRotatedKeyEmail.mockResolvedValue(undefined);
@@ -457,10 +484,10 @@ describe('Rate limiter (DASHBOARD_RATE) — deliberately reuses ONE fixed IP', (
   const FIXED_IP = 'rate-limit-fixed-ip';
   const handlers = () => getRouteHandlers('get', '/');
 
-  test('first 30 requests on one IP succeed, the 31st gets 429', async () => {
+  test('first 300 requests on one IP succeed, the 301st gets 429', async () => {
     mockAuthenticatedTenant(makeTenant());
 
-    for (let i = 1; i <= 30; i++) {
+    for (let i = 1; i <= 300; i++) {
       setupDashboardScenario({});
       const req = makeReq({ ip: FIXED_IP });
       const res = makeRes();
@@ -468,12 +495,12 @@ describe('Rate limiter (DASHBOARD_RATE) — deliberately reuses ONE fixed IP', (
       expect(res.status).not.toHaveBeenCalledWith(429);
     }
 
-    const req31 = makeReq({ ip: FIXED_IP });
-    const res31 = makeRes();
-    await dispatch(handlers(), req31, res31);
+    const req301 = makeReq({ ip: FIXED_IP });
+    const res301 = makeRes();
+    await dispatch(handlers(), req301, res301);
 
-    expect(res31.status).toHaveBeenCalledWith(429);
-    expect(res31.json).toHaveBeenCalledWith({ error: 'Too Many Requests' });
+    expect(res301.status).toHaveBeenCalledWith(429);
+    expect(res301.json).toHaveBeenCalledWith({ error: 'Too Many Requests' });
   });
 });
 
@@ -481,7 +508,7 @@ describe('Rate limiter (DASHBOARD_RATE) — deliberately reuses ONE fixed IP', (
 describe('GET / — dashboard data engine', () => {
   const handlers = () => getRouteHandlers('get', '/');
 
-  describe('security score (calculateSecurityScore)', () => {
+  describe('security score (layers-based: core + advanced)', () => {
     test('baseline: zero attacks, zero week, no reasons, brand-new tenant → 100', async () => {
       mockAuthenticatedTenant(makeTenant({ createdAt: new Date() }));
       setupDashboardScenario({ attacks24h: 0, recentAttempts: [], reasonData: [] });
@@ -493,89 +520,58 @@ describe('GET / — dashboard data engine', () => {
       expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 100 }));
     });
 
-    test('heavy attack volume clamps the floor at 52, never lower', async () => {
-      mockAuthenticatedTenant(makeTenant({ createdAt: new Date() }));
-      // intensity maxes at 30 (attacks24h >= 37.5), weekPressure maxes at 15
-      // (weekTotal >= 100), diversity maxes at 8 (>=3 reasons), longevity 0
-      // (brand new tenant) → raw = 100-30-15-8+0 = 47 → clamped to 52.
-      const recentAttempts = Array.from({ length: 100 }, () => ({ blockedAt: new Date() }));
-      setupDashboardScenario({
-        attacks24h: 50,
-        recentAttempts,
-        reasonData: [
-          { reason: 'card_testing', _count: { reason: 10 } },
-          { reason: 'velocity', _count: { reason: 10 } },
-          { reason: 'blacklist', _count: { reason: 10 } },
-        ],
+    test('emergency_pause_global: all layers off, score = 0', async () => {
+      mockGetPS.mockResolvedValueOnce({
+        state: 'emergency_pause_global', severity: 'critical',
+        title: 'Protection is paused',
+        detail: 'All orders are being approved automatically without fraud checks.',
+        source: 'emergency_pause', confidence: 'confirmed',
       });
+      mockAuthenticatedTenant(makeTenant());
+      setupDashboardScenario({});
       const req = makeReq();
       const res = makeRes();
 
       await dispatch(handlers(), req, res);
 
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 52 }));
+      // (core/4)*70 + (adv/3)*30; pause -> core=0, adv=0 -> 0
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 0 }));
     });
 
-    test('diversity bonus scales with distinct reason count (0 → 2 → 3 reasons)', async () => {
-      mockAuthenticatedTenant(makeTenant({ createdAt: new Date() }));
-
-      // 0 reasons, attacks24h=5 (intensity=4) → raw = 100-4-0-0+0 = 96
-      setupDashboardScenario({ attacks24h: 5, reasonData: [] });
-      let req = makeReq();
-      let res = makeRes();
-      await dispatch(handlers(), req, res);
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 96 }));
-
-      // 2 reasons, attacks24h=5 (intensity=4, diversity=4) → raw = 92
-      setupDashboardScenario({
-        attacks24h: 5,
-        reasonData: [
-          { reason: 'card_testing', _count: { reason: 3 } },
-          { reason: 'velocity', _count: { reason: 2 } },
-        ],
+    test('emergency_pause_tenant: all layers off, score = 0', async () => {
+      mockGetPS.mockResolvedValueOnce({
+        state: 'emergency_pause_tenant', severity: 'critical',
+        title: 'Your protection is paused',
+        detail: 'All orders on your store are being approved automatically without fraud checks.',
+        source: 'emergency_pause', confidence: 'confirmed',
       });
-      req = makeReq();
-      res = makeRes();
-      await dispatch(handlers(), req, res);
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 92 }));
+      mockAuthenticatedTenant(makeTenant());
+      setupDashboardScenario({});
+      const req = makeReq();
+      const res = makeRes();
 
-      // 3 reasons, attacks24h=5 (intensity=4, diversity=8) → raw = 88
-      setupDashboardScenario({
-        attacks24h: 5,
-        reasonData: [
-          { reason: 'card_testing', _count: { reason: 3 } },
-          { reason: 'velocity', _count: { reason: 2 } },
-          { reason: 'blacklist', _count: { reason: 1 } },
-        ],
-      });
-      req = makeReq();
-      res = makeRes();
       await dispatch(handlers(), req, res);
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 88 }));
+
+      // isPaused also set by pause_tenant -> core=0, adv=0 -> 0
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 0 }));
     });
 
-    test('longevity bonus offsets the intensity penalty for older tenants', async () => {
-      jest.useFakeTimers();
-      jest.setSystemTime(new Date('2026-07-07T12:00:00.000Z'));
+    test('quota_exhausted: core on, advanced off, score = 70', async () => {
+      mockGetPS.mockResolvedValueOnce({
+        state: 'quota_exhausted', severity: 'warning',
+        title: 'Running on basic protection',
+        detail: 'Monthly limit reached.',
+        source: 'quota', confidence: 'confirmed',
+      });
+      mockAuthenticatedTenant(makeTenant());
+      setupDashboardScenario({});
+      const req = makeReq();
+      const res = makeRes();
 
-      // attacks24h=10 (intensity=8) in both cases; only daysSinceJoined differs.
-      mockAuthenticatedTenant(makeTenant({ createdAt: new Date('2026-07-07T12:00:00.000Z') })); // daysSinceJoined=0
-      setupDashboardScenario({ attacks24h: 10, reasonData: [] });
-      let req = makeReq();
-      let res = makeRes();
       await dispatch(handlers(), req, res);
-      // raw = 100 - 8 - 0 - 0 + 0 = 92
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 92 }));
 
-      // 250 days old → longevity = min(250*0.04, 8) = 8 (capped)
-      const longAgo = new Date('2026-07-07T12:00:00.000Z' - 250 * 86400000);
-      mockAuthenticatedTenant(makeTenant({ createdAt: new Date(Date.parse('2026-07-07T12:00:00.000Z') - 250 * 86400000) }));
-      setupDashboardScenario({ attacks24h: 10, reasonData: [] });
-      req = makeReq();
-      res = makeRes();
-      await dispatch(handlers(), req, res);
-      // raw = 100 - 8 - 0 - 0 + 8 = 100
-      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 100 }));
+      // quota_exhausted -> core=4, adv=0 -> (4/4)*70 + (0/3)*30 = 70
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ securityScore: 70 }));
     });
   });
 
