@@ -11,6 +11,7 @@
 const logger = require('../lib/logger');
 const db = require('../lib/db');
 const { processEnrichment } = require('../lib/enrichmentProcessor');
+const { findOrderByBusinessKey } = require('../lib/orderIdentity');
 
 const REPLAY_INTERVAL_MS = 2 * 60 * 1000;        // run every 2 minutes
 const MIN_AGE_MS = 60 * 1000;                     // give the order-linking race 60s to resolve
@@ -67,10 +68,15 @@ async function replayOnce() {
         continue;
       }
 
-      const existingOrder = await db.order.findUnique({
-        where: { merchantId_orderId: { merchantId: row.merchantId, orderId: row.orderId } },
-        select: { id: true },
-      });
+      // [C4 fix] storeId: null — documented limitation, not an oversight.
+      // The PendingEnrichment model itself has no storeId column (see
+      // schema.prisma's model comment), so every queued row is inherently
+      // pooled-only regardless of the originating store. Adding storeId
+      // here would require a schema migration plus changes to every
+      // write path that enqueues a PendingEnrichment row — tracked as
+      // separate future work, out of scope for C4 (storage-identity
+      // collision fix).
+      const existingOrder = await findOrderByBusinessKey(db, { merchantId: row.merchantId, storeId: null, orderId: row.orderId });
       if (!existingOrder) {
         // Still not linked — release the claim so the next sweep can try again.
         await db.pendingEnrichment.update({ where: { id: row.id }, data: { status: 'pending' } });

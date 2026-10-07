@@ -14,6 +14,7 @@ const logger = require('../lib/logger');
 const { getWeightsForMerchant, DECAY_LAMBDA } = require('./signalWeights');
 const { markOrderAsFraud } = require('./identityGraph');
 const { markPatternAsFraud, markPatternAsLegit } = require('./patternSharing');
+const { findOrderByBusinessKey } = require('./orderIdentity');
 
 
 // ─── Constants ────────────────────────────────────────────────────────────
@@ -355,9 +356,20 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
     // and the Prisma client regenerated. If that migration has not yet
     // been run, this compound-key lookup will fail at runtime — do not
     // deploy this change ahead of the C3 migration.
-    const order = await db.order.findUnique({
-      where: { merchantId_orderId: { merchantId: callerMerchantId, orderId } }
-    });
+    // [C4 fix] storeId: null here is a deliberate, documented limitation —
+    // not an oversight. processFeedbackSimplified() is invoked from
+    // Stripe/PayPal dispute webhooks and manual merchant feedback, neither
+    // of which currently carries per-store attribution (unlike risk.js's
+    // /evaluate and /woocommerce-webhook, which resolve req.storeId from
+    // the authenticated request). This means feedback for a store-scoped
+    // Agency tenant with duplicate orderIds across stores can only match
+    // the POOLED partial-unique-index partition (storeId IS NULL) — if
+    // that tenant's orders are NOT pooled (storeId populated), this
+    // lookup will not find them via this path. Tracked as a known gap:
+    // extending feedback ingestion to carry storeId is future work, not
+    // part of C4's scope (which fixes storage-identity collisions, not
+    // this pre-existing feedback/detection-scope limitation).
+    const order = await findOrderByBusinessKey(db, { merchantId: callerMerchantId, storeId: null, orderId });
 
     if (!order) {
       // Deliberately generic: this branch is reached both when the order

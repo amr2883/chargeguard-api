@@ -14,6 +14,7 @@ const { verifyDeviceToken } = require('./deviceToken');
 const { getStoreScope, isProOrAbove } = require('./planAccess');
 const { normalizeEmail } = require('./utils'); // [Bug #7 fix]
 const { findBlacklistMatch } = require('./blacklistGate'); // [Discovery 2 fix]
+const { findOrderByBusinessKey } = require('./orderIdentity'); // [C4 fix]
 
 const RISK_SECRET_SALT = process.env.SECRET_SALT;
 const hashIp = (ip) => crypto.createHmac('sha256', RISK_SECRET_SALT).update(ip).digest('hex');
@@ -78,10 +79,9 @@ async function processEnrichment({ merchantId, orderId, body, storeId = null, te
     });
   }
 
-  const existingOrder = await db.order.findUnique({
-    where: { merchantId_orderId: { merchantId, orderId } },
-    select: { id: true, merchantId: true, decision: true, riskScore: true, signalsSnapshot: true, amount: true, email: true, ipAddress: true, deviceFingerprint: true, createdAt: true, customerLoginId: true, fingerprintVersion: true, riskLevel: true },
-  });
+  // [C4 fix] storeId already available as this function's own parameter
+  // (see processEnrichment's signature above) — no need to derive it.
+  const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId, orderId });
 
   // Caller (route or replay job) is responsible for only invoking this
   // once existingOrder is known to exist — this is a defensive guard,

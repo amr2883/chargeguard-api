@@ -28,7 +28,7 @@ jest.mock('../../lib/logger', () => ({
   debug: jest.fn(),
 }));
 jest.mock('../../lib/db', () => ({
-  order: { findUnique: jest.fn(), updateMany: jest.fn() },
+  order: { findFirst: jest.fn(), updateMany: jest.fn() },
   merchantProfile: { upsert: jest.fn() },
   disputeOutcome: { create: jest.fn() },
   cardHash: { update: jest.fn() },
@@ -111,18 +111,18 @@ describe('feedbackLoop.js', () => {
       await expect(processFeedbackSimplified(orderId, true)).rejects.toThrow(
         'callerMerchantId is required'
       );
-      expect(db.order.findUnique).not.toHaveBeenCalled();
+      expect(db.order.findFirst).not.toHaveBeenCalled();
       expect(db.order.updateMany).not.toHaveBeenCalled();
       expect(db.$transaction).not.toHaveBeenCalled();
     });
 
     test('returns early when the order is not found for this merchant', async () => {
-      db.order.findUnique.mockResolvedValue(null);
+      db.order.findFirst.mockResolvedValue(null);
 
       await processFeedbackSimplified(orderId, true, merchantId);
 
-      expect(db.order.findUnique).toHaveBeenCalledWith({
-        where: { merchantId_orderId: { merchantId, orderId } },
+      expect(db.order.findFirst).toHaveBeenCalledWith({
+        where: { merchantId, orderId, storeId: null },
       });
       expect(logger.warn).toHaveBeenCalledWith(
         expect.objectContaining({ orderId, callerMerchantId: merchantId }),
@@ -137,7 +137,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('refuses a row that belongs to a different merchant (C4 guard)', async () => {
-      db.order.findUnique.mockResolvedValue({ ...mockOrder, merchantId: 'other_merchant' });
+      db.order.findFirst.mockResolvedValue({ ...mockOrder, merchantId: 'other_merchant' });
 
       await processFeedbackSimplified(orderId, true, merchantId);
 
@@ -156,7 +156,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('skips everything on a duplicate feedback call (idempotency claim lost)', async () => {
-      db.order.findUnique.mockResolvedValue(mockOrder);
+      db.order.findFirst.mockResolvedValue(mockOrder);
       db.order.updateMany.mockResolvedValue({ count: 0 });
 
       await processFeedbackSimplified(orderId, true, merchantId);
@@ -179,7 +179,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('fraud (isFraud=true): counts a loss, updates every signal, marks fraud', async () => {
-      db.order.findUnique.mockResolvedValue(mockOrder);
+      db.order.findFirst.mockResolvedValue(mockOrder);
 
       await processFeedbackSimplified(orderId, true, merchantId);
 
@@ -254,7 +254,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('legit (isFraud=false): counts a win, updates every signal, no fraud marking', async () => {
-      db.order.findUnique.mockResolvedValue(mockOrder);
+      db.order.findFirst.mockResolvedValue(mockOrder);
 
       await processFeedbackSimplified(orderId, false, merchantId);
 
@@ -297,7 +297,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('missing signalsSnapshot: still counts the outcome, updates no signals', async () => {
-      db.order.findUnique.mockResolvedValue({ ...mockOrder, signalsSnapshot: null });
+      db.order.findFirst.mockResolvedValue({ ...mockOrder, signalsSnapshot: null });
 
       await processFeedbackSimplified(orderId, true, merchantId);
 
@@ -317,7 +317,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('malformed signalsSnapshot: logs it, still counts the outcome', async () => {
-      db.order.findUnique.mockResolvedValue({ ...mockOrder, signalsSnapshot: '{not valid json' });
+      db.order.findFirst.mockResolvedValue({ ...mockOrder, signalsSnapshot: '{not valid json' });
 
       await processFeedbackSimplified(orderId, false, merchantId);
 
@@ -334,7 +334,7 @@ describe('feedbackLoop.js', () => {
     });
 
     test('fraud on an order with a cardHash increments blockCount for that card', async () => {
-      db.order.findUnique.mockResolvedValue({ ...mockOrder, cardHash: 'ch_abc123' });
+      db.order.findFirst.mockResolvedValue({ ...mockOrder, cardHash: 'ch_abc123' });
 
       await processFeedbackSimplified(orderId, true, merchantId);
 
@@ -350,18 +350,18 @@ describe('feedbackLoop.js', () => {
       await expect(processFeedback(orderId, 'lost')).rejects.toThrow(
         'processFeedback: callerMerchantId is required'
       );
-      expect(db.order.findUnique).not.toHaveBeenCalled();
+      expect(db.order.findFirst).not.toHaveBeenCalled();
       expect(db.order.updateMany).not.toHaveBeenCalled();
       expect(db.$transaction).not.toHaveBeenCalled();
     });
 
     test('processFeedback: delegates to the simplified path, mapping "lost" to fraud', async () => {
-      db.order.findUnique.mockResolvedValue(mockOrder);
+      db.order.findFirst.mockResolvedValue(mockOrder);
 
       await processFeedback(orderId, 'lost', merchantId);
 
-      expect(db.order.findUnique).toHaveBeenCalledWith({
-        where: { merchantId_orderId: { merchantId, orderId } },
+      expect(db.order.findFirst).toHaveBeenCalledWith({
+        where: { merchantId, orderId, storeId: null },
       });
       expect(db.merchantProfile.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -372,7 +372,7 @@ describe('feedbackLoop.js', () => {
       expect(logger.error).not.toHaveBeenCalled();
     });
     test('legit outcome never touches cardHash.blockCount', async () => {
-      db.order.findUnique.mockResolvedValue({ ...mockOrder, cardHash: 'ch_abc123' });
+      db.order.findFirst.mockResolvedValue({ ...mockOrder, cardHash: 'ch_abc123' });
 
       await processFeedbackSimplified(orderId, false, merchantId);
 
