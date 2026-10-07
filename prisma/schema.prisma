@@ -223,18 +223,46 @@ model Order {
   @@index([merchantId, storeId, email, createdAt])
   @@index([merchantId, storeId, cardBinPrefix, createdAt])
 
-  // CRITICAL FIX (C3): orderId alone was globally @unique, meaning two
-  // different merchants could never both have an order with the same
-  // orderId — but WooCommerce order IDs are per-store auto-increment
-  // integers, so collisions across tenants are routine, not exceptional.
-  // Scoping uniqueness to (merchantId, orderId) is the same multi-tenant
-  // isolation pattern already used by BlacklistEntry, WhitelistEntry, and
-  // IdentityNode in this file; Order was the one model that omitted it.
-  // This constraint is what makes the compound-key queries in
-  // routes/risk.js structurally correct — the database itself now
-  // guarantees a findUnique/upsert scoped to (merchantId, orderId) can
-  // only ever touch that tenant's row.
-  @@unique([merchantId, orderId])
+  // CRITICAL FIX (C3, superseded by C4 below): orderId alone was globally
+  // @unique, meaning two different merchants could never both have an
+  // order with the same orderId — but WooCommerce order IDs are per-store
+  // auto-increment integers, so collisions across tenants are routine.
+  // C3 scoped uniqueness to (merchantId, orderId).
+  //
+  // C4 FIX: C3 missed a second, narrower collision — two DIFFERENT STORES
+  // under the SAME Agency tenant (same merchantId) can independently
+  // produce the same WooCommerce orderId (each store auto-increments its
+  // own order numbers from 1). Under the plain (merchantId, orderId)
+  // constraint, Store A's order #123 and Store B's order #123 would
+  // silently overwrite one another — a real data-corruption path, not
+  // just a detection-scope question (fraudIsolationMode/getStoreScope()
+  // only controls fraud DETECTION pooling, never storage identity).
+  //
+  // Prisma cannot express "unique per (merchantId, storeId, orderId) when
+  // storeId is set, else unique per (merchantId, orderId)" as a single
+  // declarative @@unique — NULL values never collide under standard SQL
+  // uniqueness, and a single non-partial 3-column unique would let
+  // multiple storeId=NULL (pooled) rows for the same order coexist
+  // instead of staying merchant-wide unique like before.
+  //
+  // So this model deliberately declares NO @@unique here. The real
+  // constraint is TWO PARTIAL UNIQUE INDEXES, created via raw SQL in
+  // migration `order_store_scoped_uniqueness` (Prisma schema syntax has
+  // no partial-index support):
+  //   - (merchantId, storeId, orderId) WHERE storeId IS NOT NULL
+  //   - (merchantId, orderId)          WHERE storeId IS NULL
+  // Together these preserve every existing pooled (storeId=NULL) row's
+  // exact prior guarantee, while giving store-scoped tenants a genuinely
+  // independent identity per store.
+  //
+  // Because no @@unique is declared, Prisma Client no longer generates a
+  // `merchantId_orderId` compound-unique input, so findUnique()/upsert()
+  // against it are NOT available here. All reads/writes MUST go through
+  // lib/orderIdentity.js's findOrderByBusinessKey()/upsertOrderByBusinessKey()
+  // instead, which encode the same storeId-aware lookup and treat a
+  // P2002 on write as "a concurrent request already won this exact key",
+  // not as a real failure — see that file for the full rationale.
+  @@index([merchantId, orderId])
 }
 
 // ========== Risk Evaluation (Flight Recorder) ==========
