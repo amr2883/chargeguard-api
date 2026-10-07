@@ -17,8 +17,9 @@
  * ══════════════════════════════════════════════════════════════════════════
  * MOCKING STRATEGY:
  * --------------------------------------------------------------------------
- *   - NO jest.mock() calls. We are testing the REAL require‑time behavior of
- *     the actual source modules. The only thing we control is process.env.
+ *   - No jest.mock() calls, except jest.doMock of src/lib/db in test 2 (db.js loads
+ *     Prisma, which auto-reads .env and would re-populate SECRET_SALT). We test the
+ *     REAL require-time behavior; the main thing we control is process.env.
  *   - jest.resetModules() is called in beforeEach to guarantee a clean
  *     module registry for each test. Without it, Node's require cache would
  *     serve the previously‑required (and possibly failed) module instance.
@@ -96,6 +97,9 @@ describe('fail-closed startup', () => {
     expect(process.env.SECRET_SALT).toBeUndefined();
 
     jest.isolateModules(() => {
+      // db is mocked: the real db.js loads Prisma, which auto-reads .env and
+      // re-populates SECRET_SALT before velocityDetector's top-level check runs.
+      jest.doMock('../../src/lib/db', () => ({}));
       expect(() => {
         require('../../src/lib/velocityDetector');
       }).toThrow('[velocityDetector] SECRET_SALT environment variable is required');
