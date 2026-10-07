@@ -19,6 +19,7 @@ const { fetchRemoteConfig, setRemoteConfigKey } = require('../lib/remoteConfig')
 const emergencyPause = require('../lib/emergencyPause');
 const crypto = require('crypto');
 const logger = require('../lib/logger');
+const { findOrderByBusinessKey } = require('../lib/orderIdentity');
 // ── دالة الحماية من XSS ──────────────────────────────────────
 const escapeHtml = (str) =>
   String(str ?? '')
@@ -1354,10 +1355,13 @@ router.post('/tenants/:id/orders/:orderId/override', rateLimitAdmin, authAdmin, 
   try {
     // Compound-key lookup — structurally scoped to this tenant, same
     // pattern as risk.js's idempotency check and /reconcile above.
-    const existing = await db.order.findUnique({
-      where: { merchantId_orderId: { merchantId: tenantId, orderId } },
-      select: { id: true, orderId: true, merchantId: true, decision: true },
-    });
+    // [C4 fix] storeId: null — documented limitation, not an oversight.
+    // The admin override UI has no store-selection concept currently
+    // (it operates purely at the tenant/merchantId level), so this can
+    // only resolve orders in the pooled partition. Same known-gap class
+    // as feedbackLoop.js's processFeedbackSimplified — future work if
+    // admin tooling needs per-store override support.
+    const existing = await findOrderByBusinessKey(db, { merchantId: tenantId, storeId: null, orderId });
 
     if (!existing) {
       const result = { success: false, code: 'NOT_FOUND' };
