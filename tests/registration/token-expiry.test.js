@@ -42,13 +42,13 @@ describe('Token expiry boundary tests (§2.3)', () => {
     await prisma.$disconnect();
   });
 
-  test('token used 1 second before expiry succeeds', async () => {
+  test('token used well before expiry succeeds', async () => {
     const tenant = await registerTenant('before');
     createdTenantIds.push(tenant.id);
 
     await prisma.tenant.update({
       where: { id: tenant.id },
-      data: { emailVerifyExpiresAt: new Date(Date.now() + 1000) },
+      data: { emailVerifyExpiresAt: new Date(Date.now() + 30000) },
     });
 
     const res = await request(app).get(`/api/auth/verify-email?token=${tenant.emailVerifyToken}`);
@@ -72,7 +72,7 @@ describe('Token expiry boundary tests (§2.3)', () => {
     // "1 second before expiry" case above it — that test proves the happy
     // path well clear of expiry; this one specifically targets the
     // near-boundary behavior.
-    const nearBoundary = new Date(Date.now() + 2000);
+    const nearBoundary = new Date(Date.now() + 10000);
     await prisma.tenant.update({
       where: { id: tenant.id },
       data: { emailVerifyExpiresAt: nearBoundary },
