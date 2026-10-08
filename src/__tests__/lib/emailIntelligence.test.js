@@ -6,7 +6,7 @@ describe('calculateEmailPenalty', () => {
     const { penalty, flags } = calculateEmailPenalty(emailIntel, 100, false);
     expect(penalty).toBe(40);
     expect(flags[0].severity).toBe('critical');
-    expect(flags[0].text).toContain('Email domain does not exist');
+    expect(flags[0].text).toBe('email_domain_not_found');
   });
 
   test('disposable email gives penalty if no domain penalty', () => {
@@ -14,7 +14,7 @@ describe('calculateEmailPenalty', () => {
     const { penalty, flags } = calculateEmailPenalty(emailIntel, 100, false);
     expect(penalty).toBe(35);
     expect(flags[0].severity).toBe('critical');
-    expect(flags[0].text).toContain('Disposable email domain');
+    expect(flags[0].text).toBe('disposable_email_domain');
   });
 
   test('free provider + new customer + high value gives penalty', () => {
@@ -22,7 +22,7 @@ describe('calculateEmailPenalty', () => {
     const { penalty, flags } = calculateEmailPenalty(emailIntel, 300, true);
     expect(penalty).toBe(10);
     expect(flags[0].severity).toBe('medium');
-    expect(flags[0].text).toContain('Free email provider with high-value first order');
+    expect(flags[0].text).toBe('free_provider_high_value_new_customer');
   });
 
   test('skipped source returns zero', () => {
@@ -47,6 +47,7 @@ describe('calculateEmailPenalty', () => {
     // يجب أن يكون العقوبة صغيرة لأنها حالة uncertain (network issue)
     expect(penalty).toBeLessThanOrEqual(5);
     // يجب أن يكون هناك flag يوضح أن المجال غير مؤكد
-    expect(flags.some(f => f.text.includes('could not be verified'))).toBe(true);
+    expect(flags[0].text).toBe('email_domain_unverified');
+    expect(flags[0].severity).toBe('medium');
   });
 });
