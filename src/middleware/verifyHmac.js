@@ -1,12 +1,19 @@
 const crypto = require('crypto');
 const logger = require('../lib/logger');
 const db = require('../lib/db');
+const { claimRequestOnce, completeRequest, releaseRequest } = require('../lib/replayGuard');
 
 const TIMESTAMP_TOLERANCE_SEC = 300; // 5 دقائق
 
 async function verifyHmacSignature(req, res, next) {
   const signature  = req.headers['x-chargeguard-signature'];
   const timestamp  = req.headers['x-chargeguard-timestamp'];
+  // موجود بس في طلبات v3 (شوف build_signed_headers() في
+  // class-api-client.php)؛ هيكون undefined لطلبات v1/v2 — وده طبيعي،
+  // الـreplay-guard fallback تحت بيستخدم التوقيع نفسه (+ method/path) بدل
+  // منه في الحالة دي. بنقراه مرة واحدة هنا عشان يُستخدم بنفس القيمة في
+  // بناء الـsignedStr بتاع v3 تحت، وفي اختيار الـreplayKey لاحقًا.
+  const requestId  = req.headers['x-chargeguard-request-id'];
 
 // Both signature headers are mandatory on every mutating request — no
 // legacy/unsigned bypass exists. A togglable security bypass is itself a
@@ -18,6 +25,20 @@ if (!signature || !timestamp) {
     logger.warn(
       { tenantId: req.tenant?.id, signature: !!signature, timestamp: !!timestamp, path: req.path },
       'HMAC_HEADERS_MISSING — request signature required'
+    );
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // حد أقصى قبل ما تُستخدم في أي مكان — سواء كـinput لتوقيع v3 تحت، أو
+  // كـDB key في الـreplay guard لاحقًا. هيدر متحكم فيه من العميل لازم
+  // يتقيّد بحد أقصى قبل ما يوصل لأي عملية تانية.
+  if (requestId && !/^[A-Za-z0-9_-]{1,128}$/.test(String(requestId))) {
+    const code = String(requestId).length > 128
+      ? 'HMAC_REQUEST_ID_TOO_LONG'
+      : 'HMAC_REQUEST_ID_INVALID';
+    logger.warn(
+      { tenantId: req.tenant?.id, path: req.path },
+      code
     );
     return res.status(401).json({ error: 'Unauthorized' });
   }
@@ -89,7 +110,29 @@ if (!signature || !timestamp) {
 
   let signedStr;
 
-  if (sigVersion === 'v2') {
+  if (sigVersion === 'v3') {
+    // v3 = domain-bound + request-id-bound. الـrequest id جزء من الرسالة
+    // الموقّعة نفسها، مش مجرد هيدر مصاحب — يعني مهاجم معاه توقيع v3
+    // ملتقط مايقدرش يغيّر X-ChargeGuard-Request-Id عشان يتهرّب من فحص
+    // الـreplay guard تحت؛ أي تغيير فيه بيكسر التوقيع فورًا. طابق
+    // generate_hmac() في class-api-client.php.
+    const storeDomain = req.headers['x-store-domain'];
+    if (!storeDomain) {
+      logger.warn(
+        { tenantId: req.tenant?.id, path: req.path },
+        'HMAC_V3_MISSING_STORE_DOMAIN_HEADER'
+      );
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!requestId) {
+      logger.warn(
+        { tenantId: req.tenant?.id, path: req.path },
+        'HMAC_V3_MISSING_REQUEST_ID'
+      );
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    signedStr = `${timestamp}.${storeDomain}.${requestId}.${rawBody.toString('utf8')}`;
+  } else if (sigVersion === 'v2') {
     // v2 = domain-bound signature. The domain is not just informational —
     // it is verified as part of the signed string itself, so a signature
     // captured from one store's traffic cannot be replayed against a
@@ -148,6 +191,86 @@ if (!signature || !timestamp) {
       'HMAC_SIGNATURE_MISMATCH'
     );
     return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  // --- Replay / idempotency protection (P0-01) ---
+  // "claim and cache" مش "hard reject": أول claim ناجح ينفّذ الـhandler
+  // ويخزّن ردّه؛ أي تكرار بنفس المفتاح بعد كده ياخد نفس الرد المخزّن بدل
+  // ما يترفض بـ401. كده retry شرعي (الرد ضاع في الشبكة بعد ما السيرفر
+  // نفّذ العملية فعليًا) بيرجعله نتيجته الصح، وreplay من مهاجم مايجيبش
+  // أي معلومة جديدة ولا بينفّذ أي side effect تاني. مفيش حد لسه شغال
+  // (concurrent duplicate) بيترفض بـ409 بس.
+  //
+  // اختيار المفتاح:
+  // - v3: requestId هو المفتاح مباشرة — ثابت عبر كل محاولات retry لنفس
+  //   العملية المنطقية (شوف request_with_breaker() في class-api-client.php).
+  // - v1/v2 (لسه مستخدمة من متاجر لسه ما حدّثتش الـplugin): مفيش
+  //   requestId صريح، فبنستخدم التوقيع نفسه + method + path. التوقيع
+  //   وحده مش كافي هنا: عمليات زي whitelist_delete/blacklist_delete/
+  //   store_deactivate بتوقّع body فاضي والـID بتاعها في الـURL مش في
+  //   الـbody الموقّع — يعني حذف عنصرين مختلفين في نفس الثانية ممكن
+  //   يطلعوا بنفس التوقيع بالظبط. إضافة method+path بتفرّق بينهم لأن
+  //   الـID (مصدر الاختلاف الوحيد) أصلاً موجود في الـpath.
+  const replayKey = (sigVersion === 'v3' && requestId)
+    ? String(requestId)
+    : `${signature}:${req.method}:${req.path}`;
+
+  let claim;
+  try {
+    claim = await claimRequestOnce(req.tenant.id, replayKey);
+  } catch (err) {
+    return res.status(503).json({ error: 'Service temporarily unavailable' });
+  }
+
+  if (!claim.claimed) {
+    if (claim.cached) {
+      // نفس الطلب اتخلّص قبل كده (retry شرعي أو replay) — رجّع نفس الرد
+      // الأصلي من غير ما تنفّذ الـhandler ولا أي side effect تاني.
+      res.status(claim.cached.code || 200);
+      if (claim.cached.body != null) {
+        try {
+          return res.json(JSON.parse(claim.cached.body));
+        } catch (_) {
+          return res.send(claim.cached.body);
+        }
+      }
+      return res.end();
+    }
+    // لسه شغال فعليًا (تكرار متزامن حقيقي) أو الرد الأصلي كان أكبر من
+    // حد التخزين. الـPHP client مبيعملش retry على 409، فمفيش خطر loop.
+    logger.warn(
+      { tenantId: req.tenant?.id, path: req.path, sigVersion },
+      'HMAC_REPLAY_OR_CONCURRENT_DUPLICATE'
+    );
+    return res.status(409).json({ error: 'Duplicate request' });
+  }
+
+  // اتحجز — ده طلب منطقي جديد. نلف res.json/res.send عشان أي رد نهائي
+  // يرجّعه الـhandler يتخزن تلقائيًا تحت نفس replayKey. res.json في
+  // Express بينادي res.send داخليًا، فـcapture() محميّة بـflag عشان
+  // متتسجلش مرتين لنفس الرد.
+  {
+    const originalJson = res.json.bind(res);
+    const originalSend = res.send.bind(res);
+    const claimId = claim.claimId;
+    let captured = false;
+    const capture = (payload) => {
+      if (captured) return;
+      captured = true;
+      // 5xx = فشل سيرفر مؤقت، مش نتيجة نهائية تستاهل الحفظ/الإرجاع لأي
+      // retry لاحق — نسيب الـclaim يتحرر عشان أي retry فعلي (بنفس
+      // request_id من request_with_breaker() في class-api-client.php)
+      // يشغّل الـhandler من جديد فعليًا، بدل ما ياخد نفس الـ500 المخزّن
+      // من غير أي فايدة. أي كود تاني (2xx أو قرار منطقي زي 401/403/409)
+      // بيتخزن عادي زي قبل كده.
+      if (res.statusCode >= 500) {
+        releaseRequest(req.tenant.id, replayKey, claimId).catch(() => {});
+      } else {
+        completeRequest(req.tenant.id, replayKey, claimId, res.statusCode, payload).catch(() => {});
+      }
+    };
+    res.json = (payload) => { capture(payload); return originalJson(payload); };
+    res.send = (payload) => { capture(payload); return originalSend(payload); };
   }
 
   // Exposes which signed-string format this request verified against, for

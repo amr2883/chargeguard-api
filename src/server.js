@@ -9,6 +9,7 @@ const { startWeeklySummaryScheduler } = require('./jobs/weeklySummaryScheduler')
 const { startMonthlyReportScheduler } = require('./jobs/monthlyReportScheduler');
 const { startPaypalWeeklyReportScheduler } = require('./jobs/paypalWeeklyReportScheduler');
 const { startSubscriptionScheduler } = require('./jobs/subscriptionScheduler');
+const { startCleanupJob: startReplayGuardCleanup } = require('./lib/replayGuard');
 
 const PORT = process.env.PORT || 3000;
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
@@ -73,4 +74,9 @@ app.listen(PORT, () => {
 
   // ?? 8) Subscription Lifecycle Scheduler (hourly)
   startSubscriptionScheduler(prismaForCleanup);
+
+  // 9) Replay-guard cleanup (P0-01) — بيمسح صفوف ProcessedRequest اللي
+  // عدّت مدة الاحتفاظ بيها (15 دقيقة). بيتنادى فورًا مرة واحدة عند
+  // الإقلاع، وبعدين كل 10 دقايق. من غيره، الجدول هيكبر من غير حد.
+  startReplayGuardCleanup();
 });

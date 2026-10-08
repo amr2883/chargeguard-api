@@ -1037,3 +1037,34 @@ model ChallengeVerification {
   // pattern as CheckoutSession.expiresAt above.
   @@index([expiresAt])
 }
+
+// ========== Processed Request (HMAC Replay Guard — P0-01) ==========
+// "Claim and cache" idempotency store لكل طلب موقّع بـHMAC (v1/v2/v3).
+// أول claim ناجح لمفتاح معيّن يخلي verifyHmac.js ينفّذ الـhandler ويخزّن
+// ردّه هنا؛ أي تكرار لاحق بنفس المفتاح (سواء retry شرعي بعد فقدان الرد،
+// أو replay فعلي من مهاجم التقط الرسالة) ياخد نفس الرد المخزّن من غير ما
+// ينفّذ أي side effect تاني. مفتاح الـdedup (requestKey) بيتحدد في
+// verifyHmac.js نفسه — إما X-ChargeGuard-Request-Id الصريح (v3)، أو
+// التوقيع + method + path كـfallback لطلبات v1/v2 اللي لسه معندهاش
+// request id.
+//
+// TTL عملي: صفوف أقدم من RETENTION_MS (15 دقيقة، في replayGuard.js) بيتم
+// مسحها دوريًا بواسطة startCleanupJob(). claims عالقة في status=processing
+// أكتر من STALE_PROCESSING_MS (45 ثانية، في replayGuard.js) بتتعتبر
+// متروكة (abandoned) وتتسحب تلقائيًا عند أي محاولة جديدة بنفس المفتاح.
+model ProcessedRequest {
+  id           String    @id @default(cuid())
+  tenantId     String
+  requestKey   String
+  status       String    @default("processing") // processing | completed
+  responseCode Int?
+  responseBody String?
+  createdAt    DateTime  @default(now())
+  completedAt  DateTime?
+
+  // بدون name: صريح — الاسم الافتراضي المولّد (tenantId_requestKey) هو
+  // اللي replayGuard.js بيعتمد عليه حرفيًا في claimRequestOnce/
+  // completeRequest/releaseRequest (where: { tenantId_requestKey: {...} }).
+  @@unique([tenantId, requestKey])
+  @@index([createdAt])
+}

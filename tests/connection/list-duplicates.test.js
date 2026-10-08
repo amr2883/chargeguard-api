@@ -7,9 +7,9 @@ const { hashApiKey } = require('../../src/lib/apiKeyHash');
 const prisma = new PrismaClient();
 
 // Same signing scheme as connect-flow.test.js / verifyHmac.js: v1 = HMAC(secret, `${ts}.${rawBody}`)
-function signRequest(secret, bodyString) {
+function signRequest(secret, domain, requestId, bodyString) {
   const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = 'v1=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${bodyString}`).digest('hex');
+  const signature = 'v3=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${domain}.${requestId}.${bodyString}`).digest('hex');
   return { timestamp, signature };
 }
 
@@ -50,7 +50,8 @@ describe('blacklist/whitelist: duplicate adds', () => {
 
   function add(list, body) {
     const bodyString = JSON.stringify(body);
-    const { timestamp, signature } = signRequest(tenant.webhookSecret, bodyString);
+    const requestId = crypto.randomUUID();
+    const { timestamp, signature } = signRequest(tenant.webhookSecret, domain, requestId, bodyString);
     return request(app)
       .post(`/api/risk/${list}`)
       .set('Content-Type', 'application/json')
@@ -58,6 +59,7 @@ describe('blacklist/whitelist: duplicate adds', () => {
       .set('X-Store-Domain', domain)
       .set('X-ChargeGuard-Signature', signature)
       .set('X-ChargeGuard-Timestamp', timestamp)
+      .set('X-ChargeGuard-Request-Id', requestId)
       .send(bodyString);
   }
 
