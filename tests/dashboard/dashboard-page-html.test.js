@@ -110,6 +110,7 @@ beforeAll(() => {
         binRecord: { findMany: jest.fn() },
         alertLog: { findMany: jest.fn(), aggregate: jest.fn() },
         monthlyReport: { findFirst: jest.fn(), findMany: jest.fn() },
+        store: { findMany: jest.fn() },
         binSequenceAlert: { findFirst: jest.fn(), findMany: jest.fn() },
       };
       return { PrismaClient: jest.fn(() => mp) };
@@ -328,6 +329,7 @@ function applyPersistentDefaults() {
     apiKey: null,
   });
   mockPrisma.tenant.update.mockResolvedValue({});
+  mockPrisma.store.findMany.mockResolvedValue([]);
   mockPrisma.binRecord.findMany.mockResolvedValue([]);
   mockPrisma.alertLog.findMany.mockResolvedValue([]);
   mockPrisma.alertLog.aggregate.mockResolvedValue({
@@ -473,6 +475,7 @@ describe('GET /page — HTML dashboard rendering', () => {
     test('Starter tenant with active/blocked prefixes: locked panel renders', async () => {
       mockAuthenticatedTenant(makeTenant({ plan: 'starter' }));
       setupDashboardScenario({
+        totalBlocked: 1, // locked BIN panel for non-Pro renders only when data.totalBlocked > 0
         binStats: { activePrefixes: 0, blockedPrefixes: 1, totalActiveBINs: 2 },
       });
       const req = makeReq();
@@ -605,7 +608,7 @@ describe('GET /page — HTML dashboard rendering', () => {
   });
 
   describe('buildReportsArchiveSection — Monthly Security Reports archive', () => {
-    test('Starter tenant: findMany called with take:3; only the latest row is unlocked, older rows blurred with no View Report link', async () => {
+    test('Starter tenant: findMany called with take:3; every row blurred (isLocked = !isPro), no View Report link', async () => {
       mockAuthenticatedTenant(makeTenant({ plan: 'starter' }));
       setupDashboardScenario({});
       const reports = [
@@ -625,7 +628,7 @@ describe('GET /page — HTML dashboard rendering', () => {
 
       const html = res.send.mock.calls[0][0];
       const viewReportCount = (html.match(/View Report/g) || []).length;
-      expect(viewReportCount).toBe(1); // only index 0 (latest) is unlocked
+      expect(viewReportCount).toBe(0); // non-Pro: every row locked, incl. the latest
       expect(html).toContain('filter:blur(2px);pointer-events:none;user-select:none;');
       expect(html).toContain('Access full archive — Upgrade to Pro');
     });
