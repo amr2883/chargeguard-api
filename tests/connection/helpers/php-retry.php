@@ -42,6 +42,7 @@ function wp_remote_request($url, $args) {
     if ($s === 'retry_503')    return ['response' => ['code' => $n === 1 ? 503 : 200], 'body' => '{}'];
     if ($s === 'retry_wperror') return $n === 1 ? new WP_Error('http_request_failed', 'timeout') : ['response' => ['code' => 200], 'body' => '{}'];
     if ($s === 'retry_500') return ['response' => ['code' => $n === 1 ? 500 : 200], 'body' => '{}'];
+    if ($s === 'flaky')     return ['response' => ['code' => $n === 5 ? 200 : 503], 'body' => '{}'];
     if ($s === 'circuit' || $s === 'both_503')     return ['response' => ['code' => 503], 'body' => '{}'];
     return ['response' => ['code' => 200], 'body' => '{}'];
 }
@@ -54,7 +55,7 @@ $timeout = (int) ($argv[3] ?? 5);
 $body    = stream_get_contents(STDIN);
 $client  = new ChargeGuard_API_Client();
 $m = new ReflectionMethod(ChargeGuard_API_Client::class, 'request_with_breaker');
-$reps = $GLOBALS['cg_scenario'] === 'circuit' ? 4 : 1;
+$reps = $GLOBALS['cg_scenario'] === 'circuit' ? 4 : ($GLOBALS['cg_scenario'] === 'flaky' ? 5 : 1);
 $results = [];
 for ($i = 0; $i < $reps; $i++) {
     $res = $m->invoke($client, 'https://api.example.test/risk/x', $method, $body, $timeout);
