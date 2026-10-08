@@ -103,9 +103,13 @@ function getCloudflareRangesMeta() {
 
 // Kick off the first fetch immediately at process startup (fire-and-forget
 // — nothing in the request path awaits this), then daily thereafter.
-refreshCloudflareRanges();
-const intervalHandle = setInterval(refreshCloudflareRanges, REFRESH_INTERVAL_MS);
-if (typeof intervalHandle.unref === 'function') intervalHandle.unref();
+// Skipped under jest: tests must not hit cloudflare.com at import time (the
+// hardcoded FALLBACK_RANGES stay in effect). Same pattern as emailIntelligence.js.
+if (process.env.NODE_ENV !== 'test') {
+  refreshCloudflareRanges();
+  const intervalHandle = setInterval(refreshCloudflareRanges, REFRESH_INTERVAL_MS);
+  if (typeof intervalHandle.unref === 'function') intervalHandle.unref();
+}
 
 module.exports = {
   getCloudflareRanges,
