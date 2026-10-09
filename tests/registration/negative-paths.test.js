@@ -33,6 +33,23 @@ describe('Negative & edge-case tests (§3.2)', () => {
     email.sendConfirmationEmail.mockClear();
   });
 
+  // Warm-up: the first registerTenant() in a fresh Jest process pays several
+  // cold costs (Prisma connections for lib/db and this file's own client, and
+  // the first Turnstile round-trip). Before this hook the first test, which
+  // registers twice, took ~9.8-10.9 s as reported by jest against a 15 s
+  // timeout. One full round-trip here, under its own timeout, keeps that cost
+  // out of it. beforeEach clears the mock call history before every test, so
+  // the warm-up's email calls are not visible to any assertion.
+  beforeAll(async () => {
+    try {
+      const { testEmail } = await registerTenant('warmup');
+      const warm = await prisma.tenant.findUnique({ where: { email: testEmail } });
+      if (warm) createdTenantIds.push(warm.id);
+    } catch (e) {
+      console.warn('[warm-up] failed, tests run cold:', e && e.message);
+    }
+  }, 60000);
+
   afterAll(async () => {
     if (createdTenantIds.length) {
       await prisma.tenant.deleteMany({ where: { id: { in: createdTenantIds } } });
