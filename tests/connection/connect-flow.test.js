@@ -57,6 +57,20 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
     await prisma.$disconnect();
   });
 
+  // Warm-up: the first /connect in a fresh process pays one-time costs (two
+  // Prisma connections, cold query paths). Measured ~13s on this machine for
+  // the first test, against the 15s per-test limit. This runs the same
+  // operations once, under an explicit hook timeout, so the per-test limit
+  // only catches steady-state slowness. Its rate-limit row is cleared by the
+  // global beforeEach reset before the first test.
+  beforeAll(async () => {
+    email.sendConfirmationEmail.mockResolvedValue(undefined);
+    const { tenant, domain } = await seedConnectableTenant('warmup');
+    createdTenantIds.push(tenant.id);
+    await request(app)
+      .post('/api/auth/connect')
+      .send({ email: tenant.email, siteUrl: `https://${domain}`, turnstileToken: TURNSTILE_ALWAYS_PASS });
+  }, 60000);
   beforeEach(() => {
     jest.clearAllMocks();
     email.sendConfirmationEmail.mockResolvedValue(undefined);
