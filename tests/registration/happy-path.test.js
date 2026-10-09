@@ -15,6 +15,35 @@ describe('Happy path — registration through email verification (production mod
   let confirmUrl;
   let emailVerifyToken;
 
+  // Warm-up: the first /register in a fresh Jest process pays several cold
+  // costs (Prisma connections for lib/db and this file's own client, and the
+  // first Turnstile round-trip). Measured here: Step 1 went from ~11.6 s to
+  // ~2.5-5.3 s as reported by jest; that figure still includes ~3 s of
+  // beforeEach hook time, and the test body itself measured 0.4-2.1 s.
+  // One full round-trip in beforeAll, under its own generous timeout, keeps
+  // the cold cost out of Step 1's 15 s budget.
+  beforeAll(async () => {
+    try {
+      email.sendConfirmationEmail.mockResolvedValue(undefined);
+      email.sendWelcomeWithKeyEmail.mockResolvedValue(undefined);
+      const warmupEmail = `warmup-hp-${Date.now()}@example.com`;
+      await request(app).post('/api/risk/tenants/register').send({
+        email: warmupEmail,
+        storeUrl: 'https://example-warmup-hp-store.com',
+        turnstileToken: 'dummy-token-for-always-pass-testing-secret',
+      });
+      // Clear call records so Step 2's toHaveBeenCalledTimes(1) only counts
+      // Step 1's sendConfirmationEmail call, not the warm-up's.
+      jest.clearAllMocks();
+      // Warm this file's own Prisma client and remove the warm-up row.
+      const warmupTenant = await prisma.tenant.findUnique({ where: { email: warmupEmail } });
+      if (warmupTenant) await prisma.tenant.deleteMany({ where: { id: warmupTenant.id } });
+    } catch (e) {
+      // Best-effort: tests run cold but stay correct if warm-up fails.
+      console.warn('[warm-up] failed, tests run cold:', e && e.message);
+    }
+  }, 60000);
+
   afterAll(async () => {
     if (tenantId) {
       await prisma.tenant.deleteMany({ where: { id: tenantId } });
