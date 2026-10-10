@@ -102,7 +102,7 @@ const { resolveTenantByApiKey } = require('../../src/lib/apiKeyAuth');
 jest.mock('../../src/middleware/verifyHmac', () => jest.fn());
 const storesRouter = require('../../src/routes/stores');
 const verifyHmacSignature = require('../../src/middleware/verifyHmac');
-const { domainAuthMiddleware, normalizeDomain, isDevDomain } = require('../../src/lib/domainAuth');
+const { domainAuthMiddleware, domainAuthMiddlewareWithAutoRegister, normalizeDomain, isDevDomain } = require('../../src/lib/domainAuth');
 
 // ── Route-stack extraction + dispatch (T6/T7/T8 convention) ────────────────
 function getRouteHandlers(method, path) {
@@ -976,5 +976,98 @@ describe('isDevDomain (pure helper, gates the domainAuth bypass)', () => {
   test('empty/falsy input → false', () => {
     expect(isDevDomain('')).toBe(false);
     expect(isDevDomain(null)).toBe(false);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Agency auto-register deferral (domainAuthMiddlewareWithAutoRegister)
+//
+// domainAuthCore defers an unresolved domain for Agency tenants (sets
+// req.pendingStoreDomain and calls next()) ONLY when it is reached through the
+// WithAutoRegister wrapper. Every other combination must still reject with
+// DOMAIN_MISMATCH. The POST /api/stores tests above never reach this branch:
+// they use the 'localhost' dev-domain bypass (makeStoresReq), which returns
+// before the deferral code. These tests use a non-dev domain on purpose.
+// -----------------------------------------------------------------------------
+describe('domainAuthMiddlewareWithAutoRegister (Agency deferral)', () => {
+  const NEW_DOMAIN = 'fresh-client-store.com';
+
+  async function runWith(mw, { plan, headers, storeCount = 0, allowedDomains = [] }) {
+    db.store.findFirst.mockResolvedValue(null);
+    db.store.count.mockResolvedValue(storeCount);
+    db.tenant.findUnique.mockResolvedValue({ allowedDomains });
+    const req = makeReq({ tenant: makeTenant({ plan }), headers });
+    const res = makeRes();
+    const next = jest.fn();
+    await mw(req, res, next);
+    return { req, res, next };
+  }
+
+  test('Agency + unresolved domain: defers with a normalized pendingStoreDomain, trusts nothing yet', async () => {
+    const { req, res, next } = await runWith(domainAuthMiddlewareWithAutoRegister, {
+      plan: 'agency',
+      headers: { 'x-store-domain': 'Fresh-Client-Store.com' },
+    });
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(req.pendingStoreDomain).toBe(NEW_DOMAIN);
+    expect(req.storeDomain).toBeUndefined();
+    expect(req.storeId).toBeUndefined();
+    expect(db.store.create).not.toHaveBeenCalled();
+  });
+
+  test.each(['starter', 'pro'])(
+    'non-Agency (%s) tenant that still has active Stores: rejected, never deferred',
+    async (plan) => {
+      const { req, res, next } = await runWith(domainAuthMiddlewareWithAutoRegister, {
+        plan,
+        headers: { 'x-store-domain': NEW_DOMAIN },
+        storeCount: 2,
+      });
+
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DOMAIN_MISMATCH' }));
+      expect(next).not.toHaveBeenCalled();
+      expect(req.pendingStoreDomain).toBeUndefined();
+      expect(db.store.count).toHaveBeenCalledWith({ where: { tenantId: 'tenant_1', isActive: true } });
+    }
+  );
+
+  test('Agency that already has other active Stores: still defers (adding a second client store)', async () => {
+    const { req, res, next } = await runWith(domainAuthMiddlewareWithAutoRegister, {
+      plan: 'agency',
+      headers: { 'x-store-domain': NEW_DOMAIN },
+      storeCount: 2,
+    });
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(req.pendingStoreDomain).toBe(NEW_DOMAIN);
+  });
+
+  test('plain domainAuthMiddleware never defers, even for an Agency tenant: 403 DOMAIN_MISMATCH', async () => {
+    const { req, res, next } = await runWith(domainAuthMiddleware, {
+      plan: 'agency',
+      headers: { 'x-store-domain': NEW_DOMAIN },
+    });
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DOMAIN_MISMATCH' }));
+    expect(next).not.toHaveBeenCalled();
+    expect(req.pendingStoreDomain).toBeUndefined();
+  });
+
+  test('Agency + domain already in legacy allowedDomains: passes without deferral', async () => {
+    const { req, res, next } = await runWith(domainAuthMiddlewareWithAutoRegister, {
+      plan: 'agency',
+      headers: { 'x-store-domain': NEW_DOMAIN },
+      allowedDomains: [NEW_DOMAIN],
+    });
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(res.status).not.toHaveBeenCalled();
+    expect(req.pendingStoreDomain).toBeUndefined();
+    expect(req.storeDomain).toBe(NEW_DOMAIN);
   });
 });
