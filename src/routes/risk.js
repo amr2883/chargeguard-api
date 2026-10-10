@@ -1,4 +1,4 @@
-const crypto = require('crypto');
+ï»¿const crypto = require('crypto');
 
 // ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
 const RISK_SECRET_SALT = process.env.SECRET_SALT;
@@ -10,11 +10,11 @@ const hashIp = (ip) => {
   return crypto.createHmac('sha256', RISK_SECRET_SALT).update(ip).digest('hex');
 };
 
-// [Discovery 4 fix] Prefix ááÜ synthetic per-order device fingerprint
-// Çááí ÈíÊÕäøÚ İí /woocommerce-webhook áãÇ ãİíÔ fingerprint ÍŞíŞí ãÊÇÍ
-// (ÊÌÇÑ ÈÏæä JS pixel ßÇãá¡ Òí Classic Checkout). ãÑßÒøÉ åäÇ ßãÕÏÑ æÇÍÏ
-// ÚÔÇä ÇáãßÇäíä Çááí áÇÒã íÊİŞæÇ ÚáíåÇ — äŞØÉ ÇáÈäÇÁ (fallback)¡ æäŞØÉ
-// ÇáÇÓÊËäÇÁ İí ÇÓÊÚáÇã device-rotation — ãíÊİÑŞæÔ Úä ÈÚÖ ÈãÑæÑ ÇáæŞÊ.
+// [Discovery 4 fix] Prefix Ù„Ù„Ù€ synthetic per-order device fingerprint
+// Ø§Ù„Ù„ÙŠ Ø¨ÙŠØªØµÙ†Ù‘Ø¹ ÙÙŠ /woocommerce-webhook Ù„Ù…Ø§ Ù…ÙÙŠØ´ fingerprint Ø­Ù‚ÙŠÙ‚ÙŠ Ù…ØªØ§Ø­
+// (ØªØ¬Ø§Ø± Ø¨Ø¯ÙˆÙ† JS pixel ÙƒØ§Ù…Ù„ØŒ Ø²ÙŠ Classic Checkout). Ù…Ø±ÙƒØ²Ù‘Ø© Ù‡Ù†Ø§ ÙƒÙ…ØµØ¯Ø± ÙˆØ§Ø­Ø¯
+// Ø¹Ø´Ø§Ù† Ø§Ù„Ù…ÙƒØ§Ù†ÙŠÙ† Ø§Ù„Ù„ÙŠ Ù„Ø§Ø²Ù… ÙŠØªÙÙ‚ÙˆØ§ Ø¹Ù„ÙŠÙ‡Ø§ â€” Ù†Ù‚Ø·Ø© Ø§Ù„Ø¨Ù†Ø§Ø¡ (fallback)ØŒ ÙˆÙ†Ù‚Ø·Ø©
+// Ø§Ù„Ø§Ø³ØªØ«Ù†Ø§Ø¡ ÙÙŠ Ø§Ø³ØªØ¹Ù„Ø§Ù… device-rotation â€” Ù…ÙŠØªÙØ±Ù‚ÙˆØ´ Ø¹Ù† Ø¨Ø¹Ø¶ Ø¨Ù…Ø±ÙˆØ± Ø§Ù„ÙˆÙ‚Øª.
 const WC_SYNTHETIC_DEVICE_PREFIX = 'wc_';
 // ?????????????????????????????????????????????????????????????????????????
 const logger = require('../lib/logger');
@@ -45,22 +45,22 @@ const { isPlausibleClientIp, normalizeEmail }    = require('../lib/utils');
 const { getCloudflareRanges }                    = require('../lib/cloudflareRanges');
 const { safeErrorPayload }                       = require('../lib/errorResponse');
 
-// [Bug #7 fix, relocated] ÇáãäØŞ äõŞá áÜ lib/blacklistGate.js ÚÔÇä íÈŞì
-// ãÕÏÑ æÇÍÏ íÓÊÎÏãå åĞÇ Çáãáİ (POST /blacklist, POST /whitelist, 0b
-// gate, webhook gate ÇáÌÏíÏÉ) æßãÇä riskScoring.js (ÇáÜ inBlacklist
-// defense-in-depth check). ÑÇÌÚ blacklistGate.js ááÊÚáíŞ ÇáßÇãá.
+// [Bug #7 fix, relocated] Ø§Ù„Ù…Ù†Ø·Ù‚ Ù†ÙÙ‚Ù„ Ù„Ù€ lib/blacklistGate.js Ø¹Ø´Ø§Ù† ÙŠØ¨Ù‚Ù‰
+// Ù…ØµØ¯Ø± ÙˆØ§Ø­Ø¯ ÙŠØ³ØªØ®Ø¯Ù…Ù‡ Ù‡Ø°Ø§ Ø§Ù„Ù…Ù„Ù (POST /blacklist, POST /whitelist, 0b
+// gate, webhook gate Ø§Ù„Ø¬Ø¯ÙŠØ¯Ø©) ÙˆÙƒÙ…Ø§Ù† riskScoring.js (Ø§Ù„Ù€ inBlacklist
+// defense-in-depth check). Ø±Ø§Ø¬Ø¹ blacklistGate.js Ù„Ù„ØªØ¹Ù„ÙŠÙ‚ Ø§Ù„ÙƒØ§Ù…Ù„.
 const { computeNormalizedValue, findBlacklistMatch } = require('../lib/blacklistGate');
 
-// ?? Early Access Pro Grant ????????????????????????????????????????????????
+// â”€â”€ Early Access Pro Grant â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Marketing promise (index.html): "Early Access cohort members receive
-// 3 months of Shield Pro at no cost." Applied at registration time only —
+// 3 months of Shield Pro at no cost." Applied at registration time only â€”
 // see /tenants/register below. EARLY_ACCESS_END_DATE is optional; if unset,
 // the promo has no cutoff and applies to every new registration.
-// Early Access promo removed — every new registration starts free.
+// Early Access promo removed â€” every new registration starts free.
 
-// ?? BIN Sequence Alert Persistence ???????????????????????????????????????
+// â”€â”€ BIN Sequence Alert Persistence â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const persistBinSequenceAlert = async (tenantId, bin, binSeq, storeId = null) => {
-  if (!tenantId) return; // webhook ÈÏæä tenant — TODO: ÑÈØ webhook ÈÇáÜ tenant
+  if (!tenantId) return; // webhook Ø¨Ø¯ÙˆÙ† tenant â€” TODO: Ø±Ø¨Ø· webhook Ø¨Ø§Ù„Ù€ tenant
   try {
     const prefix     = String(bin).replace(/\D/g, '').slice(0, 4);
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
@@ -75,7 +75,7 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq, storeId = null) =>
     });
 
     if (existing) {
-      // storeId is deliberately NOT touched on increment — the detection
+      // storeId is deliberately NOT touched on increment â€” the detection
       // window (binSequenceDetector.js) is tenant-wide/pooled by design, so
       // a single alert row can legitimately be incremented by requests from
       // several stores. storeId records only which store's request FIRST
@@ -100,7 +100,7 @@ const persistBinSequenceAlert = async (tenantId, bin, binSeq, storeId = null) =>
         },
       });
 
-      // ÅÔÚÇÑ ÇáÊÇÌÑ — fire-and-forget ãÚ cooldown
+      // Ø¥Ø´Ø¹Ø§Ø± Ø§Ù„ØªØ§Ø¬Ø± â€” fire-and-forget Ù…Ø¹ cooldown
       const tenant = await db.tenant.findUnique({
         where:  { id: tenantId },
         select: { id: true, email: true, webhookUrl: true, webhookType: true, plan: true },
@@ -133,14 +133,14 @@ const webhookAuth = requireAuth({ id: true, isActive: true, emailVerified: true,
 // Invokes an Express-style middleware inline and resolves true/false
 // depending on whether next() was called or the middleware sent its own
 // response (e.g. requireAuth's 401/403). Needed because the webhook route
-// can't take requireAuth as a normal router-level middleware — it must run
+// can't take requireAuth as a normal router-level middleware â€” it must run
 // after the raw-body buffer is already on req.body.
 const runAuthMiddleware = (req, res, mw) => new Promise((resolve) => {
   let settled = false;
   res.once('finish', () => { if (!settled) { settled = true; resolve(false); } });
   mw(req, res, () => { if (!settled) { settled = true; resolve(true); } });
 });
-// ?? recordBlockedAttempt Helper ??????????????????????????????????????????
+// â”€â”€ recordBlockedAttempt Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Shared by all four /evaluate block paths (blacklist, velocity, BIN
 // sequence, risk-scoring) so every backend-authoritative block decision
 // creates a BlockedAttempt row AND increments monthlyBlockedCount in the
@@ -158,7 +158,7 @@ const recordBlockedAttempt = (tx, {
   storeId = null,
   // Quota-dedup fix: when false (see lib/quotaDedup.js), this block is a
   // repeat from an entity already blocked for the same reason within the
-  // dedup window — the BlockedAttempt row is still written for dashboard/
+  // dedup window â€” the BlockedAttempt row is still written for dashboard/
   // audit purposes, but monthlyBlockedCount is NOT incremented again.
   // Defaults to true so any caller that doesn't pass it gets the original,
   // unconditional-increment behavior.
@@ -191,7 +191,7 @@ const recordBlockedAttempt = (tx, {
   return ops;
 };
 
-// ?? POST /risk/device-token ??????????????????????????????????????????????
+// â”€â”€ POST /risk/device-token â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Mints a server-signed device token for the WooCommerce plugin to store
 // as an HttpOnly cookie (chargeguard_dt). See src/lib/deviceToken.js for
 // the rationale. Rate-limited per-tenant so a compromised/misbehaving
@@ -225,33 +225,33 @@ const deviceTokenRateLimit = (req, res, next) => {
 };
 
 // deviceTokenRateLimit runs BEFORE domain resolution, keyed on
-// req.tenant?.id — unaffected by the change below.
+// req.tenant?.id â€” unaffected by the change below.
 //
 // domainAuthMiddlewareWithAutoRegister (in place of domainAuthMiddleware)
 // + autoRegisterStoreMiddleware (after verifyHmacSignature) closes the
 // "brand-new store's first visitor never gets a device token" gap: for
 // Agency tenants (or any tenant with Store rows) whose domain has no
 // Store row yet, this defers the domain-binding decision until AFTER the
-// HMAC signature is verified — the same "Solution D" pattern already
-// used on /evaluate and /blocked-attempt — then auto-registers the Store
+// HMAC signature is verified â€” the same "Solution D" pattern already
+// used on /evaluate and /blocked-attempt â€” then auto-registers the Store
 // from that signature-verified domain. Non-Agency tenants are completely
 // unaffected: they still resolve via the tenant.allowedDomains fallback
 // inside domainAuthCore, exactly as before. No new unauthenticated
-// store-creation path is introduced — auto-registration only ever fires
+// store-creation path is introduced â€” auto-registration only ever fires
 // after the request has already proven possession of this tenant's
 // webhookSecret.
 router.post('/device-token', apiKeyAuth, deviceTokenRateLimit, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
   try {
     const rawIp = typeof req.body.ip === 'string' ? req.body.ip : '';
     // Never bind a device token to a private/reserved or unverified
-    // Cloudflare-edge IP — see isPlausibleClientIp() in lib/utils.js. Doing
+    // Cloudflare-edge IP â€” see isPlausibleClientIp() in lib/utils.js. Doing
     // so would make ipMatches:true a false trust signal for every visitor
     // who happens to share that same non-unique address, rather than a
     // genuine per-visitor correlation.
     const ipCheck = isPlausibleClientIp(rawIp);
     const ip = ipCheck.ok ? rawIp.trim() : '';
     if (!ipCheck.ok && rawIp) {
-      logger.warn({ module: 'risk', endpoint: 'device-token', tenantId: req.tenant?.id, reason: ipCheck.reason }, 'Implausible ip on device-token mint — minting without IP binding');
+      logger.warn({ module: 'risk', endpoint: 'device-token', tenantId: req.tenant?.id, reason: ipCheck.reason }, 'Implausible ip on device-token mint â€” minting without IP binding');
     }
     const token = mintDeviceToken(ip);
     return res.status(200).json({ token });
@@ -261,13 +261,13 @@ router.post('/device-token', apiKeyAuth, deviceTokenRateLimit, domainAuthMiddlew
   }
 });
 
-// ?? GET /risk/cloudflare-ranges ???????????????????????????????????????????
+// â”€â”€ GET /risk/cloudflare-ranges â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Single source of truth for Cloudflare's published IP ranges (see
 // lib/cloudflareRanges.js, which owns the daily fetch/cache). The
 // WooCommerce plugin's WP-Cron job (ChargeGuard_Trusted_Proxy::
 // refresh_cf_ranges()) polls this instead of hitting cloudflare.com
 // directly, so both systems ultimately derive their ranges from this one
-// backend fetch — eliminating the drift risk between the plugin's and
+// backend fetch â€” eliminating the drift risk between the plugin's and
 // backend's previously-independent hardcoded copies. Protected by the
 // same auth stack as the other internal endpoints (e.g. /device-token):
 // API key, domain binding, HMAC signature.
@@ -280,11 +280,11 @@ router.get('/cloudflare-ranges', apiKeyAuth, domainAuthMiddleware, verifyHmacSig
   }
 });
 
-// ?? POST /risk/challenge/request ??????????????????????????????????????????
+// â”€â”€ POST /risk/challenge/request â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Issues an email OTP for the graduated 'challenge' tier of the
 // global-rotation ladder (see globalRotationDetector.js and /evaluate's
 // section 1c-ii). Reuses the same middleware stack as /device-token
-// (apiKeyAuth, domain binding w/ auto-register, HMAC signature) — same
+// (apiKeyAuth, domain binding w/ auto-register, HMAC signature) â€” same
 // trust boundary, same tenant-authenticated caller.
 const CHALLENGE_REQUEST_RATE = new Map();
 const CR_MAX_REQ   = 3;
@@ -298,9 +298,9 @@ setInterval(() => {
 
 // Second, independent limiter keyed on the RECIPIENT email (not the
 // client-controllable deviceFingerprint). Without this, a checkout user
-// can rotate fingerprint per page-load (clearing cookies/localStorage —
+// can rotate fingerprint per page-load (clearing cookies/localStorage â€”
 // trivial, no exploit needed) and re-trigger an OTP send to any third
-// party's email address with no effective ceiling — an email-bombing /
+// party's email address with no effective ceiling â€” an email-bombing /
 // harassment vector against people who never touched this checkout.
 // Slightly looser window than the device limiter (device rotation across
 // a shared IP/office is legitimate; the same email receiving many codes
@@ -339,7 +339,7 @@ router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegist
       CHALLENGE_REQUEST_RATE.set(rlKey, { count: 1, firstAt: now });
     }
 
-    // Second gate — keyed on the normalized recipient email, independent
+    // Second gate â€” keyed on the normalized recipient email, independent
     // of deviceFingerprint. See CHALLENGE_EMAIL_RATE comment above.
     const normalizedEmailForRate = normalizeEmail(email);
     const emailRlKey = `${merchantId}:${normalizedEmailForRate}`;
@@ -354,21 +354,21 @@ router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegist
     }
 
     // Security fix: crypto.randomInt() (CSPRNG) instead of Math.random()
-    // (V8's PRNG — not cryptographically secure, and its internal state
+    // (V8's PRNG â€” not cryptographically secure, and its internal state
     // has documented recovery attacks). With only 6 digits of entropy
     // (1M possibilities) already the binding constraint here, using a
     // non-CSPRNG source removes the one guarantee that space actually
     // relies on: unpredictability. crypto.randomInt(min, max) returns an
-    // integer in [min, max) — exclusive upper bound, so 1000000 (not
+    // integer in [min, max) â€” exclusive upper bound, so 1000000 (not
     // 999999) is correct to keep the same [100000, 999999] range.
     const otp = String(crypto.randomInt(100000, 1000000));
     // Reuses RISK_SECRET_SALT (already required at the top of this file
-    // for hashIp) — same convention as the rest of this file: HMAC-hash
+    // for hashIp) â€” same convention as the rest of this file: HMAC-hash
     // any value that must never be stored in the clear.
     const codeHash = crypto.createHmac('sha256', RISK_SECRET_SALT).update(otp).digest('hex');
     const expiresAt = new Date(now + CHALLENGE_OTP_TTL_MINUTES * 60 * 1000);
 
-    // One active challenge per (merchantId, deviceFingerprint, email) —
+    // One active challenge per (merchantId, deviceFingerprint, email) â€”
     // supersedes any prior unverified row. This is what lets
     // /challenge/verify look the row up with no challengeId round-tripped
     // to the client (see design discussion).
@@ -382,17 +382,17 @@ router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegist
     // Fail-open on email delivery failure: awaited (not fire-and-forget)
     // specifically so this endpoint can tell the caller whether the OTP
     // actually went out. Gmail API delivery has failed in this project
-    // before (documented invalid_grant incident) — if that happens here,
+    // before (documented invalid_grant incident) â€” if that happens here,
     // the customer would otherwise be told "check your email" for a code
     // that never arrives, with no way forward. emailSent:false lets the
     // caller (class-api-client.php's request_challenge()) skip the
     // challenge and let the order proceed rather than stranding a
-    // legitimate customer — same fail-open philosophy already used by
+    // legitimate customer â€” same fail-open philosophy already used by
     // this file's emergencyPause check.
     //
     // Trade-off worth confirming: this makes the response take as long as
     // sendChallengeOtpEmail's own retry logic (up to ~2 attempts / 3s
-    // delay — deliberately short, see email.js's RETRIES comment there).
+    // delay â€” deliberately short, see email.js's RETRIES comment there).
     // A few extra seconds here is preferable to silently stranding a
     // customer with no code and no recourse.
     let emailSent = true;
@@ -401,7 +401,7 @@ router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegist
       await sendChallengeOtpEmail(email, otp);
     } catch (err) {
       emailSent = false;
-      logger.error({ module: 'risk', endpoint: 'challenge-request', merchantId, error: err.message }, 'Failed to send challenge OTP email — caller should fail open');
+      logger.error({ module: 'risk', endpoint: 'challenge-request', merchantId, error: err.message }, 'Failed to send challenge OTP email â€” caller should fail open');
     }
 
     return res.status(200).json({ success: true, emailSent, expiresInSeconds: CHALLENGE_OTP_TTL_MINUTES * 60 });
@@ -411,9 +411,9 @@ router.post('/challenge/request', apiKeyAuth, domainAuthMiddlewareWithAutoRegist
   }
 });
 
-// ?? POST /risk/challenge/verify ????????????????????????????????????????????
+// â”€â”€ POST /risk/challenge/verify â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Verifies the OTP and, on success, mints a signed 24h challenge ticket
-// (mintChallengeTicket, deviceToken.js) — the plugin stores it as the
+// (mintChallengeTicket, deviceToken.js) â€” the plugin stores it as the
 // chargeguard_ct cookie. See /evaluate's section 1c-ii for how that
 // ticket is consumed on the next request to skip re-challenging.
 router.post('/challenge/verify', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
@@ -430,7 +430,7 @@ router.post('/challenge/verify', apiKeyAuth, domainAuthMiddlewareWithAutoRegiste
       orderBy: { createdAt: 'desc' },
     });
 
-    // Generic failure — avoids an enumeration oracle, same rationale used
+    // Generic failure â€” avoids an enumeration oracle, same rationale used
     // throughout this file (e.g. /reconcile's 404 branch).
     if (!challenge) {
       return res.status(400).json({ verified: false, error: 'Invalid or expired verification code' });
@@ -441,7 +441,7 @@ router.post('/challenge/verify', apiKeyAuth, domainAuthMiddlewareWithAutoRegiste
     }
 
     if (challenge.attempts >= CHALLENGE_MAX_ATTEMPTS) {
-      return res.status(429).json({ verified: false, error: 'Too many incorrect attempts — request a new code' });
+      return res.status(429).json({ verified: false, error: 'Too many incorrect attempts â€” request a new code' });
     }
 
     const codeHash = crypto.createHmac('sha256', RISK_SECRET_SALT).update(String(code)).digest('hex');
@@ -497,41 +497,41 @@ router.post('/challenge/verify', apiKeyAuth, domainAuthMiddlewareWithAutoRegiste
  */
 router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verifyHmacSignature, autoRegisterStoreMiddleware, async (req, res) => {
   try {
-    // ?? -1. Emergency Pause Check — the very first thing in the handler,
+    // â”€â”€ -1. Emergency Pause Check â€” the very first thing in the handler,
     // before any DB query or detection logic. Pure in-memory read (see
-    // lib/emergencyPause.js) — deliberately ahead of even the quota gate,
+    // lib/emergencyPause.js) â€” deliberately ahead of even the quota gate,
     // so a paused tenant doesn't pay for a single DB round trip on the
     // highest-traffic endpoint in this file. Does NOT touch /enrich or
-    // /woocommerce-webhook — see emergencyPause.js's module comment.
+    // /woocommerce-webhook â€” see emergencyPause.js's module comment.
     const pauseState = emergencyPause.isPaused(req.tenant.id);
     if (pauseState.paused) {
       logger.warn(
         { module: 'risk', endpoint: 'evaluate', merchantId: req.tenant.id, scope: pauseState.scope, expiresAt: pauseState.expiresAt },
-        'Emergency pause active — auto-approving without running detection'
+        'Emergency pause active â€” auto-approving without running detection'
       );
       return res.json({
         orderId: req.body?.orderId || null,
         score: 0,
         decision: 'approve',
-        flags: [{ severity: 'warning', text: 'Emergency override active — all orders are being approved' }],
+        flags: [{ severity: 'warning', text: 'Emergency override active â€” all orders are being approved' }],
         connectedRisk: 0,
         scored: false,
         emergencyPause: pauseState.scope, // 'global' | 'tenant'
       });
     }
 
-    // ?? 0. Subscription & Quota Status ???????????????????????????????????
+    // â”€â”€ 0. Subscription & Quota Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // NOTE: this no longer short-circuits the request. Quota only decides
     // whether calculateRiskScore() below is allowed to call expensive
     // external intel APIs (IP/email/BIN). Blacklist, velocity, BIN-sequence,
     // identity graph, and pattern-sharing checks always run, and the order
-    // can still be blocked purely on their output — closing the "burn the
+    // can still be blocked purely on their output â€” closing the "burn the
     // quota, then everything approves" bypass.
     const quotaStatus = await checkQuotaGate(req, 'evaluate');
     const limitedScoring = quotaStatus.exceeded;
-    // ?? End Subscription & Quota Status ??????????????????????????????????
+    // â”€â”€ End Subscription & Quota Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-    // ??????? ????????
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const { orderId, ipAddress: rawIpAddress, email, bin, deviceFingerprint, amount, billingCountry, shippingCountry, isNewCustomer, deviceToken, cardFingerprint, challengeTicket } = req.body;
     // merchantId is derived from the authenticated tenant (CWE-639 / OWASP API1:2023 fix).
     // It is never read from the request body or x-merchant-id header.
@@ -541,13 +541,13 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // WooCommerce plugin's ChargeGuard_Trusted_Proxy redesign): this
     // backend does not trust get_client_ip()'s output blindly. A private/
     // reserved IP, or an unverified Cloudflare edge IP, getting used
-    // as-is here would corrupt every IP-anchored control below —
+    // as-is here would corrupt every IP-anchored control below â€”
     // whitelist/blacklist matching, velocity counting, and identity-graph
-    // anchoring — usually by silently collapsing many distinct visitors
+    // anchoring â€” usually by silently collapsing many distinct visitors
     // onto one address. Gating ONCE here, rather than at each of those
     // call sites, is sufficient because every downstream use of
     // `ipAddress` in this file already null-guards correctly
-    // (`ipAddress ? ... : null` / `: 0`) — nulling it out here flows
+    // (`ipAddress ? ... : null` / `: 0`) â€” nulling it out here flows
     // through cleanly with no further changes needed. This never blocks
     // the order by itself; it only excludes IP from this evaluation's
     // signals and is recorded in signalsSnapshot.ipAnomaly for visibility.
@@ -557,31 +557,31 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     if (ipAnomaly) {
       logger.warn(
         { module: 'risk', endpoint: 'evaluate', merchantId, orderId, ipAnomaly },
-        'ipAddress failed plausibility check — excluding from IP-based detection for this request'
+        'ipAddress failed plausibility check â€” excluding from IP-based detection for this request'
       );
     }
 
     // Tier-1 fraud-isolation scope (opt-in). {} unless this tenant is in
-    // 'per_store' mode AND req.storeId was resolved by domainAuthMiddleware —
+    // 'per_store' mode AND req.storeId was resolved by domainAuthMiddleware â€”
     // see getStoreScope() in planAccess.js. Deliberately NOT applied to
     // checkBINSequence() or buildGraphFromOrder() below (Tier 2, always pooled).
     const storeScope = getStoreScope(req.tenant, req.storeId);
 
 
-        // Idempotency: ?????? ?? ??????? ??????? ???? ??? 5 ?????
-    const idempotencyWindow = 5 * 60 * 1000; // 5 ?????
+        // Idempotency: ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ 5 ï¿½ï¿½ï¿½ï¿½ï¿½
+    const idempotencyWindow = 5 * 60 * 1000; // 5 ï¿½ï¿½ï¿½ï¿½ï¿½
     const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
     // Defense-in-depth (C3): the compound key above already scopes this
     // lookup to this tenant, so existingOrder.merchantId !== merchantId
-    // should be unreachable — but asserting it explicitly costs nothing
+    // should be unreachable â€” but asserting it explicitly costs nothing
     // and mirrors /enrich's existing check, guarding against any future
     // regression (e.g. someone simplifying this back to a bare orderId).
     if (existingOrder && existingOrder.merchantId !== merchantId) {
-      logger.error({ module: 'risk', endpoint: 'evaluate', merchantId, orderId }, 'C3 guard tripped — compound key returned a different merchant\'s row; should be unreachable');
+      logger.error({ module: 'risk', endpoint: 'evaluate', merchantId, orderId }, 'C3 guard tripped â€” compound key returned a different merchant\'s row; should be unreachable');
       return res.status(403).json({ error: 'Merchant ID mismatch.' });
     }
     if (existingOrder && (Date.now() - new Date(existingOrder.createdAt).getTime()) < idempotencyWindow) {
-      // ????? ???? ??????
+      // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       const oldSnapshot = existingOrder.signalsSnapshot ? JSON.parse(existingOrder.signalsSnapshot) : {};
       prometheus.recordIdempotencyHit();
       return res.json({
@@ -598,16 +598,16 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
       
 
-    // [Bug #7 fix] íõÍÓÈ ãÑÉ æÇÍÏÉ¡ íõÓÊÎÏã İí whitelist/blacklist/disputes
-    // ÊÍÊ. undefined (ãÔ null) ÚãÏğÇ áãÇ email ÛÇíÈ — Prisma ÈíÊÌÇåá ÔÑæØ
-    // undefined İí ÇáÜ where ÊáŞÇÆíğÇ¡ ÈäİÓ Óáæß email ÇáÎÇã ÇáÃÕáí.
+    // [Bug #7 fix] ÙŠÙØ­Ø³Ø¨ Ù…Ø±Ø© ÙˆØ§Ø­Ø¯Ø©ØŒ ÙŠÙØ³ØªØ®Ø¯Ù… ÙÙŠ whitelist/blacklist/disputes
+    // ØªØ­Øª. undefined (Ù…Ø´ null) Ø¹Ù…Ø¯Ù‹Ø§ Ù„Ù…Ø§ email ØºØ§ÙŠØ¨ â€” Prisma Ø¨ÙŠØªØ¬Ø§Ù‡Ù„ Ø´Ø±ÙˆØ·
+    // undefined ÙÙŠ Ø§Ù„Ù€ where ØªÙ„Ù‚Ø§Ø¦ÙŠÙ‹Ø§ØŒ Ø¨Ù†ÙØ³ Ø³Ù„ÙˆÙƒ email Ø§Ù„Ø®Ø§Ù… Ø§Ù„Ø£ØµÙ„ÙŠ.
     const normalizedEmailForMatch = email ? normalizeEmail(email) : undefined;
-    // [Discovery 2 fix] äİÓ ãÈÏÃ normalizedEmailForMatch ÈÇáÍÑİ — íõÍÓÈ
-    // ãÑÉ æÇÍÏÉ¡ íõÓÊÎÏã İí whitelist (0a ÊÍÊ) æblacklist (0b) ãÚğÇ¡ ÈÏá
-    // ÊßÑÇÑ String(bin).replace(...) ãäİÕá İí ÃßÊÑ ãä ãßÇä.
+    // [Discovery 2 fix] Ù†ÙØ³ Ù…Ø¨Ø¯Ø£ normalizedEmailForMatch Ø¨Ø§Ù„Ø­Ø±Ù â€” ÙŠÙØ­Ø³Ø¨
+    // Ù…Ø±Ø© ÙˆØ§Ø­Ø¯Ø©ØŒ ÙŠÙØ³ØªØ®Ø¯Ù… ÙÙŠ whitelist (0a ØªØ­Øª) Ùˆblacklist (0b) Ù…Ø¹Ù‹Ø§ØŒ Ø¨Ø¯Ù„
+    // ØªÙƒØ±Ø§Ø± String(bin).replace(...) Ù…Ù†ÙØµÙ„ ÙÙŠ Ø£ÙƒØªØ± Ù…Ù† Ù…ÙƒØ§Ù†.
     const normalizedBinForMatch = bin ? String(bin).replace(/\D/g, '').slice(0, 6) : undefined;
 
-    // 0a. Whitelist Check — bypass all checks for trusted entities
+    // 0a. Whitelist Check â€” bypass all checks for trusted entities
     const whitelistConditions = [];
     if (normalizedEmailForMatch) whitelistConditions.push({ type: 'EMAIL', normalizedValue: normalizedEmailForMatch });
     if (ipAddress)               whitelistConditions.push({ type: 'IP',    value: ipAddress });
@@ -630,7 +630,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         prometheus.recordWhitelistBypass(whitelistCheck.type);
         logger.info(
           { module: 'risk', merchantId, type: whitelistCheck.type, orderId },
-          'Request bypassed all checks — whitelisted'
+          'Request bypassed all checks â€” whitelisted'
         );
         return res.json({
           orderId,
@@ -643,11 +643,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
 
-    // 0b. Blacklist Check — ãäØŞ ÇáÇÓÊÚáÇã ÏáæŞÊí Ìæå lib/blacklistGate.js
-    // (ãÕÏÑ æÇÍÏ¡ íÓÊÎÏãå ßãÇä /woocommerce-webhook's gate ÊÍÊ).
-    // [Discovery 2 fix] bin ãõÖÇİÉ — ßÇäÊ ÛÇíÈÉ ãä åĞÇ ÇáİÍÕ ÎÇáÕ¡ ÈÇáÑÛã
-    // ãä Åä ÇáÜ schema ÈíÏÚãåÇ (BlacklistEntry.type='BIN') æÇáÜ whitelist
-    // İæŞ ÈÇáİÚá ÈÊİÍÕåÇ. ÑÇÌÚ blacklistGate.js's findBlacklistMatch.
+    // 0b. Blacklist Check â€” Ù…Ù†Ø·Ù‚ Ø§Ù„Ø§Ø³ØªØ¹Ù„Ø§Ù… Ø¯Ù„ÙˆÙ‚ØªÙŠ Ø¬ÙˆÙ‡ lib/blacklistGate.js
+    // (Ù…ØµØ¯Ø± ÙˆØ§Ø­Ø¯ØŒ ÙŠØ³ØªØ®Ø¯Ù…Ù‡ ÙƒÙ…Ø§Ù† /woocommerce-webhook's gate ØªØ­Øª).
+    // [Discovery 2 fix] bin Ù…ÙØ¶Ø§ÙØ© â€” ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„ÙØ­Øµ Ø®Ø§Ù„ØµØŒ Ø¨Ø§Ù„Ø±ØºÙ…
+    // Ù…Ù† Ø¥Ù† Ø§Ù„Ù€ schema Ø¨ÙŠØ¯Ø¹Ù…Ù‡Ø§ (BlacklistEntry.type='BIN') ÙˆØ§Ù„Ù€ whitelist
+    // ÙÙˆÙ‚ Ø¨Ø§Ù„ÙØ¹Ù„ Ø¨ØªÙØ­ØµÙ‡Ø§. Ø±Ø§Ø¬Ø¹ blacklistGate.js's findBlacklistMatch.
     const blacklistCheck = await findBlacklistMatch(db, {
       merchantId,
       storeScope,
@@ -678,7 +678,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
 
        try {
         // Dedup entity: the blacklist row's own matched value (email, IP,
-        // or device fingerprint) — whichever actually triggered this hit —
+        // or device fingerprint) â€” whichever actually triggered this hit â€”
         // is the most precise identity to dedupe repeat blocks on.
         const blacklistIncrementQuota = shouldIncrementQuota(merchantId, 'blacklist', blacklistCheck.value);
 
@@ -706,7 +706,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       });
     }
 
-    // 0c. Email Hard-Block — disposable domain / no-MX. Deliberately calls
+    // 0c. Email Hard-Block â€” disposable domain / no-MX. Deliberately calls
     // checkEmailHardBlock() directly rather than going through
     // calculateRiskScore()'s getEmailIntelligence() call, so this runs even
     // when limitedScoring is true (quota exhausted). Placed after blacklist
@@ -762,10 +762,10 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
 
-    // 1. İÍÕ ÇáÓÑÚÉ (Velocity Check)
+    // 1. ÙØ­Øµ Ø§Ù„Ø³Ø±Ø¹Ø© (Velocity Check)
     const velocityCheck = await checkVelocity({ ip: ipAddress, deviceFingerprint, merchantId, storeId: storeScope.storeId ?? null });
 
-    // Observability only — checkVelocity() now degrades to a local
+    // Observability only â€” checkVelocity() now degrades to a local
     // in-memory fallback rather than failing open on a DB error (see
     // velocityDetector.js). This does not change control flow here:
     // velocityCheck.blocked (from either the authoritative or the
@@ -773,7 +773,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     if (velocityCheck.dbError) {
       logger.warn(
         { module: 'risk', endpoint: 'evaluate', merchantId, fallbackBlocked: velocityCheck.blocked },
-        'Velocity check ran in degraded mode — CardTestAttempt query failed, local fallback used'
+        'Velocity check ran in degraded mode â€” CardTestAttempt query failed, local fallback used'
       );
       try {
         if (typeof prometheus.recordVelocityDbError === 'function') {
@@ -833,15 +833,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // 1b. BIN Sequence Detection
     if (bin) {
       // tenantId is required here for tenant-scoped storage in
-      // binSequenceDetector.js — without it, attacks against one tenant
+      // binSequenceDetector.js â€” without it, attacks against one tenant
       // could false-block a different tenant's legitimate customers (CWE-653).
       const binSeq = await checkBINSequence({ tenantId: req.tenant.id, bin, ipAddress, deviceFingerprint });
       // L-fix: layer 0 means an existing active block is still rejecting
-      // requests — not a newly detected BIN pattern. Persisting here on
+      // requests â€” not a newly detected BIN pattern. Persisting here on
       // every layer-0 hit inflated cardsCount with repeat rejections during
       // the block window instead of genuine distinct BINs. The real alert
       // was already created/incremented at the moment the actual trigger
-      // (layer 1/2/3) fired — skip persistence for layer 0.
+      // (layer 1/2/3) fired â€” skip persistence for layer 0.
       if (binSeq.layer !== 0 && (binSeq.blocked || binSeq.riskAddition > 0)) {
         persistBinSequenceAlert(req.tenant.id, bin, binSeq, req.storeId ?? null)
           .catch(err => logger.error({ module: 'risk', err: err.message }, 'BinSequenceAlert persist failed'));
@@ -897,7 +897,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     // 1c. Device Fingerprint Trust & Rotation Detection
     // deviceSignal.trust classifies how much weight the device-anchored
     // signals in calculateRiskScore()/identityGraph.js should carry this
-    // request — see deviceToken.js and the deviceTrustFactor logic in
+    // request â€” see deviceToken.js and the deviceTrustFactor logic in
     // riskScoring.js. rotationBlocked mirrors checkVelocity/checkBINSequence:
     // an attacker generating many fresh, forged fingerprints from one IP
     // is itself a detectable pattern, independent of whether any single
@@ -915,20 +915,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
 
     if (ipAddress) {
-      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour — matches deviceVelocityCount's own window elsewhere
+      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour â€” matches deviceVelocityCount's own window elsewhere
       const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct device fingerprints from one IP in 1h
       const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
 
-      // [Synthetic-ID pollution fix] ÑÇÌÚ ÊÚáíŞ /woocommerce-webhook's ŞÓã
-      // 7c áäİÓ ÇáİíßÓ ÈÇáÍÑİ — ÃæÑÏÑÇÊ æÕáÊ ÚÈÑ ÇáÜ webhook ãä ÛíÑ
-      // fingerprint ÍŞíŞí ãÎÒøäÉ ÈÜ deviceFingerprint = `wc_<orderId>`
-      // (İÑíÏÉ áßá ÃæÑÏÑ ÈÇáÊÕãíã). Order table ãÔÊÑß Èíä /evaluate
-      // æwebhook¡ İÃí IP ÌÇáåÇ ÃæÑÏÑ æÇÍÏ ÈÓ ÚÈÑ ÇáÜ webhook fallback ßÇä
-      // ÈíÖíİ "device ãÎÊáİ" æåãí åäÇ İí ßá ãÑÉ.
-      // [TOCTOU fix] ÑÇÌÚ lib/atomicIdentityGate.js — ÇáŞÑÇÁÉ+ÇáŞÑÇÑ+ÇáÍÌÒ
-      // ÈíÍÕáæÇ ßÎØæÉ ĞÑíÉ æÇÍÏÉ ãÍãíÉ ÈÜ pg_advisory_xact_lock¡ ÈÏá
-      // ÇáŞÑÇÁÉ ÇáãäİÕáÉ ÒãäíğÇ (db.order.findMany) Çááí ßÇäÊ ÈÊÓãÍ áÜ N
-      // ØáÈ ãÊÒÇãä íÔæİæÇ ßáåã äİÓ ÇáÚÏÏ ÇáŞÏíã æíÚÏøæÇ ßáåã ãä ÇáÈæÇÈÉ.
+      // [Synthetic-ID pollution fix] Ø±Ø§Ø¬Ø¹ ØªØ¹Ù„ÙŠÙ‚ /woocommerce-webhook's Ù‚Ø³Ù…
+      // 7c Ù„Ù†ÙØ³ Ø§Ù„ÙÙŠÙƒØ³ Ø¨Ø§Ù„Ø­Ø±Ù â€” Ø£ÙˆØ±Ø¯Ø±Ø§Øª ÙˆØµÙ„Øª Ø¹Ø¨Ø± Ø§Ù„Ù€ webhook Ù…Ù† ØºÙŠØ±
+      // fingerprint Ø­Ù‚ÙŠÙ‚ÙŠ Ù…Ø®Ø²Ù‘Ù†Ø© Ø¨Ù€ deviceFingerprint = `wc_<orderId>`
+      // (ÙØ±ÙŠØ¯Ø© Ù„ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø± Ø¨Ø§Ù„ØªØµÙ…ÙŠÙ…). Order table Ù…Ø´ØªØ±Ùƒ Ø¨ÙŠÙ† /evaluate
+      // ÙˆwebhookØŒ ÙØ£ÙŠ IP Ø¬Ø§Ù„Ù‡Ø§ Ø£ÙˆØ±Ø¯Ø± ÙˆØ§Ø­Ø¯ Ø¨Ø³ Ø¹Ø¨Ø± Ø§Ù„Ù€ webhook fallback ÙƒØ§Ù†
+      // Ø¨ÙŠØ¶ÙŠÙ "device Ù…Ø®ØªÙ„Ù" ÙˆÙ‡Ù…ÙŠ Ù‡Ù†Ø§ ÙÙŠ ÙƒÙ„ Ù…Ø±Ø©.
+      // [TOCTOU fix] Ø±Ø§Ø¬Ø¹ lib/atomicIdentityGate.js â€” Ø§Ù„Ù‚Ø±Ø§Ø¡Ø©+Ø§Ù„Ù‚Ø±Ø§Ø±+Ø§Ù„Ø­Ø¬Ø²
+      // Ø¨ÙŠØ­ØµÙ„ÙˆØ§ ÙƒØ®Ø·ÙˆØ© Ø°Ø±ÙŠØ© ÙˆØ§Ø­Ø¯Ø© Ù…Ø­Ù…ÙŠØ© Ø¨Ù€ pg_advisory_xact_lockØŒ Ø¨Ø¯Ù„
+      // Ø§Ù„Ù‚Ø±Ø§Ø¡Ø© Ø§Ù„Ù…Ù†ÙØµÙ„Ø© Ø²Ù…Ù†ÙŠÙ‹Ø§ (db.order.findMany) Ø§Ù„Ù„ÙŠ ÙƒØ§Ù†Øª Ø¨ØªØ³Ù…Ø­ Ù„Ù€ N
+      // Ø·Ù„Ø¨ Ù…ØªØ²Ø§Ù…Ù† ÙŠØ´ÙˆÙÙˆØ§ ÙƒÙ„Ù‡Ù… Ù†ÙØ³ Ø§Ù„Ø¹Ø¯Ø¯ Ø§Ù„Ù‚Ø¯ÙŠÙ… ÙˆÙŠØ¹Ø¯Ù‘ÙˆØ§ ÙƒÙ„Ù‡Ù… Ù…Ù† Ø§Ù„Ø¨ÙˆØ§Ø¨Ø©.
       const isEligibleDevice = !!deviceFingerprint && !deviceFingerprint.startsWith(WC_SYNTHETIC_DEVICE_PREFIX);
       const rotationGate = await atomicIdentityGate.checkAndReserve({
         merchantId,
@@ -959,7 +959,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         }
 
          try {
-          // Keyed on ipAddress — this gate's own detection basis (distinct
+          // Keyed on ipAddress â€” this gate's own detection basis (distinct
           // fingerprints from one IP), so repeat blocks from the same IP
           // don't re-count, but a different IP rotating fingerprints still does.
           const rotIncrementQuota = shouldIncrementQuota(merchantId, 'device_rotation_ip', ipAddress);
@@ -969,7 +969,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
             storeId:         req.storeId ?? null,
             cardBin:         rotCardBin,
             cardType:        null,
-            reason:          'velocity', // reuses the existing VALID_REASONS enum — conceptually a velocity pattern
+            reason:          'velocity', // reuses the existing VALID_REASONS enum â€” conceptually a velocity pattern
             ipHash:          rotIpHash,
             amountAttempted: rotAmount,
             riskScore:       null,
@@ -990,12 +990,12 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
 
-    // 1c-ii. Global (Merchant-Scoped) Device Rotation Detection — complements
+    // 1c-ii. Global (Merchant-Scoped) Device Rotation Detection â€” complements
     // the per-IP check above rather than replacing it. Runs independently of
     // ipAddress: it tracks how fast entirely NEW fingerprints are appearing
     // for this merchant, so an attacker who rotates IP and fingerprint
     // together (defeating the per-IP check, which never sees more than 1
-    // fingerprint per IP) still trips this one. In-memory, zero DB calls —
+    // fingerprint per IP) still trips this one. In-memory, zero DB calls â€”
     // see lib/globalRotationDetector.js for the counter and its tradeoffs.
     if (deviceFingerprint) {
       const globalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
@@ -1042,7 +1042,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         });
       } else if (globalRotation.level === 'challenge') {
         // Graduated step-up (globalRotationDetector.js): 8-11 new
-        // fingerprints/10min for this merchant — suspicious enough to
+        // fingerprints/10min for this merchant â€” suspicious enough to
         // demand an email-OTP proof-of-humanity, not severe enough for an
         // outright block. Closes the "low and slow" evasion gap (an
         // attacker sustaining ~11 new fingerprints/10min forever, just
@@ -1062,7 +1062,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         if (!ticketOk) {
           logger.info(
             { module: 'risk', endpoint: 'evaluate', merchantId, orderId, newFingerprintCount: globalRotation.newFingerprintCount },
-            'Global device rotation at challenge tier — requesting OTP step-up'
+            'Global device rotation at challenge tier â€” requesting OTP step-up'
           );
           return res.status(200).json({
             orderId,
@@ -1073,20 +1073,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
             scored: false,
           });
         }
-        // ticketOk === true — this device+email pair already proved
+        // ticketOk === true â€” this device+email pair already proved
         // itself recently; fall through and continue scoring normally,
         // exactly like the 'clear'/'soft' levels do.
       }
     }
     // End 1c. Device Fingerprint Trust & Rotation Detection
 
-    // 1d. Raw (Unconditional) Device Velocity — íŞİá ÇáİÌæÉ Çááí ÓÇíÈåÇ
-    // checkVelocity() İæŞ: Ïå ÈíÔæİ ÈÓ ÇáãÍÇæáÇÊ Çááí ãÔ approve. ÈæÊ
-    // ÈËÇÈÊ ÇáÜ device fingerprint æÈíáİ Úáì BIN prefixes ãÎÊáİÉ¡ æÈíÇÎÏ
-    // ÓßæÑ æÇØí ßİÇíÉ Åäå approve İí ÃÛáÈ ÇáãÑÇÊ — ãÔ åíÙåÑ İí
-    // checkVelocity ÃÈÏğÇ ãåãÇ ßÇä ÚÏÏ ãÍÇæáÇÊå. ÑÇÌÚ
-    // lib/rawVelocityDetector.js ááÊİÇÕíá ÇáßÇãáÉ Úä áíå device ÈÓ (ãÔ
-    // IP) åæ ÇáãİÊÇÍ ÇáÕÍ åäÇ.
+    // 1d. Raw (Unconditional) Device Velocity â€” ÙŠÙ‚ÙÙ„ Ø§Ù„ÙØ¬ÙˆØ© Ø§Ù„Ù„ÙŠ Ø³Ø§ÙŠØ¨Ù‡Ø§
+    // checkVelocity() ÙÙˆÙ‚: Ø¯Ù‡ Ø¨ÙŠØ´ÙˆÙ Ø¨Ø³ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø§Øª Ø§Ù„Ù„ÙŠ Ù…Ø´ approve. Ø¨ÙˆØª
+    // Ø¨Ø«Ø§Ø¨Øª Ø§Ù„Ù€ device fingerprint ÙˆØ¨ÙŠÙ„Ù Ø¹Ù„Ù‰ BIN prefixes Ù…Ø®ØªÙ„ÙØ©ØŒ ÙˆØ¨ÙŠØ§Ø®Ø¯
+    // Ø³ÙƒÙˆØ± ÙˆØ§Ø·ÙŠ ÙƒÙØ§ÙŠØ© Ø¥Ù†Ù‡ approve ÙÙŠ Ø£ØºÙ„Ø¨ Ø§Ù„Ù…Ø±Ø§Øª â€” Ù…Ø´ Ù‡ÙŠØ¸Ù‡Ø± ÙÙŠ
+    // checkVelocity Ø£Ø¨Ø¯Ù‹Ø§ Ù…Ù‡Ù…Ø§ ÙƒØ§Ù† Ø¹Ø¯Ø¯ Ù…Ø­Ø§ÙˆÙ„Ø§ØªÙ‡. Ø±Ø§Ø¬Ø¹
+    // lib/rawVelocityDetector.js Ù„Ù„ØªÙØ§ØµÙŠÙ„ Ø§Ù„ÙƒØ§Ù…Ù„Ø© Ø¹Ù† Ù„ÙŠÙ‡ device Ø¨Ø³ (Ù…Ø´
+    // IP) Ù‡Ùˆ Ø§Ù„Ù…ÙØªØ§Ø­ Ø§Ù„ØµØ­ Ù‡Ù†Ø§.
     if (deviceFingerprint) {
       const rawDeviceVelocity = await checkRawDeviceVelocity(merchantId, deviceFingerprint);
       if (rawDeviceVelocity.blocked) {
@@ -1131,8 +1131,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         });
       }
     } else if (ipAddress) {
-      // Fallback — ÈÓ áãÇ ãİíÔ deviceFingerprint ÎÇáÕ. ÚÊÈÉ ÃÚáì ÈßÊíÑ
-      // ÚÔÇä äÊÌäÈ false positives Úáì ÔÈßÇÊ NAT/ãßÇÊÈ ãÔÊÑßÉ.
+      // Fallback â€” Ø¨Ø³ Ù„Ù…Ø§ Ù…ÙÙŠØ´ deviceFingerprint Ø®Ø§Ù„Øµ. Ø¹ØªØ¨Ø© Ø£Ø¹Ù„Ù‰ Ø¨ÙƒØªÙŠØ±
+      // Ø¹Ø´Ø§Ù† Ù†ØªØ¬Ù†Ø¨ false positives Ø¹Ù„Ù‰ Ø´Ø¨ÙƒØ§Øª NAT/Ù…ÙƒØ§ØªØ¨ Ù…Ø´ØªØ±ÙƒØ©.
       const rawIpHash = hashIp(ipAddress);
       const rawIpVelocity = await checkRawIpVelocityFallback(merchantId, rawIpHash);
       if (rawIpVelocity.blocked) {
@@ -1173,20 +1173,20 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
     // End 1d. Raw (Unconditional) Device Velocity
 
-    // 1e. Pre-Authorization Card Fingerprint Velocity — íŞİá ÇáİÌæÉ Çááí
-    // ßá ÇáØÈŞÇÊ İæŞ ÚãíÇÁ ÚäåÇ ÈÇáÊÕãíã: ÈæÊ ÈíËÈøÊ ÇáÜ device
-    // fingerprint (İÈíÚÏøí ãä rawVelocityDetector áÍÏ ÇáãÍÇæáÉ ÇáÊÇäíÉ)
-    // æíÓÊÎÏã ßÇÑÊ ÍŞíŞí ãÎÊáİ ÊãÇãğÇ İí ßá ãÍÇæáÉ — bin ÃÕáğÇ ãÈíæÕáÔ
-    // åäÇ ŞÈá ÇáÏİÚ (ADR-0)¡ İÜ BIN Sequence Detection (1b) ÚãíÇÁ
-    // ÈÇáßÇãá Úä ÇáäãØ Ïå. cardFingerprint íæÕá ÈÓ áãÇ ÇáÜ WooCommerce
-    // plugin íäÏå Stripe's get_payment_method() — æÏå ÈíÍÕá ÈÓ Úáì
-    // ÇáãÍÇæáÉ ÇáÊÇäíÉ İÃßÊÑ ãÍáíğÇ (ÚÏÇÏ PHP transient Ìæå
-    // class-dynamic-firewall.php)¡ İãİíÔ Ãí ÊßáİÉ ÃÏÇÁ ÅÖÇİíÉ Úáì Ãæá
-    // ãÍÇæáÉ ÔÑÚíÉ áÃí Úãíá. ÇáŞÑÇÑ "åá ääÏå åĞå ÇáØÈŞÉ¿" ÇÊÇÎÏ ÈÇáİÚá
-    // İí ÇáÜ PHPº ÇáÜ backend åäÇ ÈíÓÊåáß ÇáäÊíÌÉ ÈÓ¡ ãÇíßÑÑÔ ÇáãäØŞ.
-    // ÑÇÌÚ lib/binSequenceDetector.js's checkCardFingerprintVelocity
-    // (Layer 5) ááÊİÇÕíá ÇáßÇãáÉ (Redis-atomic¡ tenant-scoped¡ äİÓ äãØ
-    // Layer 4 ÈÇáÍÑİ).
+    // 1e. Pre-Authorization Card Fingerprint Velocity â€” ÙŠÙ‚ÙÙ„ Ø§Ù„ÙØ¬ÙˆØ© Ø§Ù„Ù„ÙŠ
+    // ÙƒÙ„ Ø§Ù„Ø·Ø¨Ù‚Ø§Øª ÙÙˆÙ‚ Ø¹Ù…ÙŠØ§Ø¡ Ø¹Ù†Ù‡Ø§ Ø¨Ø§Ù„ØªØµÙ…ÙŠÙ…: Ø¨ÙˆØª Ø¨ÙŠØ«Ø¨Ù‘Øª Ø§Ù„Ù€ device
+    // fingerprint (ÙØ¨ÙŠØ¹Ø¯Ù‘ÙŠ Ù…Ù† rawVelocityDetector Ù„Ø­Ø¯ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø© Ø§Ù„ØªØ§Ù†ÙŠØ©)
+    // ÙˆÙŠØ³ØªØ®Ø¯Ù… ÙƒØ§Ø±Øª Ø­Ù‚ÙŠÙ‚ÙŠ Ù…Ø®ØªÙ„Ù ØªÙ…Ø§Ù…Ù‹Ø§ ÙÙŠ ÙƒÙ„ Ù…Ø­Ø§ÙˆÙ„Ø© â€” bin Ø£ØµÙ„Ù‹Ø§ Ù…Ø¨ÙŠÙˆØµÙ„Ø´
+    // Ù‡Ù†Ø§ Ù‚Ø¨Ù„ Ø§Ù„Ø¯ÙØ¹ (ADR-0)ØŒ ÙÙ€ BIN Sequence Detection (1b) Ø¹Ù…ÙŠØ§Ø¡
+    // Ø¨Ø§Ù„ÙƒØ§Ù…Ù„ Ø¹Ù† Ø§Ù„Ù†Ù…Ø· Ø¯Ù‡. cardFingerprint ÙŠÙˆØµÙ„ Ø¨Ø³ Ù„Ù…Ø§ Ø§Ù„Ù€ WooCommerce
+    // plugin ÙŠÙ†Ø¯Ù‡ Stripe's get_payment_method() â€” ÙˆØ¯Ù‡ Ø¨ÙŠØ­ØµÙ„ Ø¨Ø³ Ø¹Ù„Ù‰
+    // Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø© Ø§Ù„ØªØ§Ù†ÙŠØ© ÙØ£ÙƒØªØ± Ù…Ø­Ù„ÙŠÙ‹Ø§ (Ø¹Ø¯Ø§Ø¯ PHP transient Ø¬ÙˆÙ‡
+    // class-dynamic-firewall.php)ØŒ ÙÙ…ÙÙŠØ´ Ø£ÙŠ ØªÙƒÙ„ÙØ© Ø£Ø¯Ø§Ø¡ Ø¥Ø¶Ø§ÙÙŠØ© Ø¹Ù„Ù‰ Ø£ÙˆÙ„
+    // Ù…Ø­Ø§ÙˆÙ„Ø© Ø´Ø±Ø¹ÙŠØ© Ù„Ø£ÙŠ Ø¹Ù…ÙŠÙ„. Ø§Ù„Ù‚Ø±Ø§Ø± "Ù‡Ù„ Ù†Ù†Ø¯Ù‡ Ù‡Ø°Ù‡ Ø§Ù„Ø·Ø¨Ù‚Ø©ØŸ" Ø§ØªØ§Ø®Ø¯ Ø¨Ø§Ù„ÙØ¹Ù„
+    // ÙÙŠ Ø§Ù„Ù€ PHPØ› Ø§Ù„Ù€ backend Ù‡Ù†Ø§ Ø¨ÙŠØ³ØªÙ‡Ù„Ùƒ Ø§Ù„Ù†ØªÙŠØ¬Ø© Ø¨Ø³ØŒ Ù…Ø§ÙŠÙƒØ±Ø±Ø´ Ø§Ù„Ù…Ù†Ø·Ù‚.
+    // Ø±Ø§Ø¬Ø¹ lib/binSequenceDetector.js's checkCardFingerprintVelocity
+    // (Layer 5) Ù„Ù„ØªÙØ§ØµÙŠÙ„ Ø§Ù„ÙƒØ§Ù…Ù„Ø© (Redis-atomicØŒ tenant-scopedØŒ Ù†ÙØ³ Ù†Ù…Ø·
+    // Layer 4 Ø¨Ø§Ù„Ø­Ø±Ù).
     if (cardFingerprint) {
       const cardFpVelocity = await checkCardFingerprintVelocity({
         tenantId: merchantId,
@@ -1196,8 +1196,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       });
 
       if (cardFpVelocity.blocked) {
-        // ãİíÔ bin æÕá İí åĞÇ ÇáãÓÇÑ ÈÇáÊÚÑíİ (ADR-0) — cardBin íİÖá
-        // null¡ äİÓ ãÚÇãáÉ raw_device_velocity/device_rotation İæŞ.
+        // Ù…ÙÙŠØ´ bin ÙˆØµÙ„ ÙÙŠ Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø± Ø¨Ø§Ù„ØªØ¹Ø±ÙŠÙ (ADR-0) â€” cardBin ÙŠÙØ¶Ù„
+        // nullØŒ Ù†ÙØ³ Ù…Ø¹Ø§Ù…Ù„Ø© raw_device_velocity/device_rotation ÙÙˆÙ‚.
         const cardFpIpHash = ipAddress ? hashIp(ipAddress) : null;
         let cardFpAmount = null;
         if (amount != null) {
@@ -1236,7 +1236,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
     // End 1e. Pre-Authorization Card Fingerprint Velocity
 
-    // 1. ???? ???? order
+    // 1. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ order
     const order = {
       id: orderId,
       email: email,
@@ -1258,11 +1258,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       isNewCustomer: isNewCustomer || false,
     };
 
-    // 2. ????? ???????? ????????
+    // 2. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const last7days = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
 
-    // ??? ??????? ??????? ?? ????? ????????
-    // ??? ??? 200 ??? ??? ????? ????????? (???? ????)
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ 200 ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
     const recentOrders = await db.order.findMany({
       where: { merchantId, ...storeScope, createdAt: { gte: last7days } },
       orderBy: { createdAt: 'desc' },
@@ -1278,36 +1278,36 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       amount: o.amount,
       createdAt: o.createdAt,
       riskLevel: o.riskLevel,
-      // [BIN Velocity fix] íÏÚã ãÓÇÑ ÇáÜ fallback İí riskScoring.js
-      // (áãÇ externalVelocity ãÔ ÔÇíá binVelocityCount*¡ Òí enrichmentProcessor.js)
+      // [BIN Velocity fix] ÙŠØ¯Ø¹Ù… Ù…Ø³Ø§Ø± Ø§Ù„Ù€ fallback ÙÙŠ riskScoring.js
+      // (Ù„Ù…Ø§ externalVelocity Ù…Ø´ Ø´Ø§ÙŠÙ„ binVelocityCount*ØŒ Ø²ÙŠ enrichmentProcessor.js)
       cardBinPrefix: o.cardBinPrefix,
     }));
 
-    // ???? ??? velocity counts ???????? ????????? ?????? (????)
+    // ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ velocity counts ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½)
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
 
-    // [False-positive fix] deviceVelocityCount ÈíÚÏø ÏáæŞÊí ÈÓ ÇáÃæÑÏÑÇÊ
-    // ÛíÑ ÇáÜ approved (review/block) ÎáÇá ÇáÓÇÚÉ¡ ãÔ ßá ÇáÃæÑÏÑÇÊ. Úãíá
-    // äÌÍ İí 3 ÚãáíÇÊ ÔÑÇÁ ÍŞíŞíÉ ãÔ äãØ card-testing — ÇáäãØ ÇáÍŞíŞí åæ
-    // ÊßÑÇÑ ÇáÑİÖ/ÇáÍÙÑ ãä äİÓ ÇáÌåÇÒ. ãåÇÌã íäÌÍ İí ßá ãÍÇæáÇÊå (ÍÇáÉ
-    // äÇÏÑÉ) íİÖá ãÊÛØí ÈÔßá ãÓÊŞá ÚÈÑ rawVelocityDetector.js's
-    // checkRawDeviceVelocity (ÚÊÈÉ 10 ãÍÇæáÇÊ/10 ÏŞÇíŞ¡ ÛíÑ ãÔÑæØÉ
-    // ÈÇáŞÑÇÑ ÃÕáÇğ) — İãİíÔ Ãí ÊÑÇÌÚ Ããäí ãä åĞÇ ÇáÊÚÏíá.
+    // [False-positive fix] deviceVelocityCount Ø¨ÙŠØ¹Ø¯Ù‘ Ø¯Ù„ÙˆÙ‚ØªÙŠ Ø¨Ø³ Ø§Ù„Ø£ÙˆØ±Ø¯Ø±Ø§Øª
+    // ØºÙŠØ± Ø§Ù„Ù€ approved (review/block) Ø®Ù„Ø§Ù„ Ø§Ù„Ø³Ø§Ø¹Ø©ØŒ Ù…Ø´ ÙƒÙ„ Ø§Ù„Ø£ÙˆØ±Ø¯Ø±Ø§Øª. Ø¹Ù…ÙŠÙ„
+    // Ù†Ø¬Ø­ ÙÙŠ 3 Ø¹Ù…Ù„ÙŠØ§Øª Ø´Ø±Ø§Ø¡ Ø­Ù‚ÙŠÙ‚ÙŠØ© Ù…Ø´ Ù†Ù…Ø· card-testing â€” Ø§Ù„Ù†Ù…Ø· Ø§Ù„Ø­Ù‚ÙŠÙ‚ÙŠ Ù‡Ùˆ
+    // ØªÙƒØ±Ø§Ø± Ø§Ù„Ø±ÙØ¶/Ø§Ù„Ø­Ø¸Ø± Ù…Ù† Ù†ÙØ³ Ø§Ù„Ø¬Ù‡Ø§Ø². Ù…Ù‡Ø§Ø¬Ù… ÙŠÙ†Ø¬Ø­ ÙÙŠ ÙƒÙ„ Ù…Ø­Ø§ÙˆÙ„Ø§ØªÙ‡ (Ø­Ø§Ù„Ø©
+    // Ù†Ø§Ø¯Ø±Ø©) ÙŠÙØ¶Ù„ Ù…ØªØºØ·ÙŠ Ø¨Ø´ÙƒÙ„ Ù…Ø³ØªÙ‚Ù„ Ø¹Ø¨Ø± rawVelocityDetector.js's
+    // checkRawDeviceVelocity (Ø¹ØªØ¨Ø© 10 Ù…Ø­Ø§ÙˆÙ„Ø§Øª/10 Ø¯Ù‚Ø§ÙŠÙ‚ØŒ ØºÙŠØ± Ù…Ø´Ø±ÙˆØ·Ø©
+    // Ø¨Ø§Ù„Ù‚Ø±Ø§Ø± Ø£ØµÙ„Ø§Ù‹) â€” ÙÙ…ÙÙŠØ´ Ø£ÙŠ ØªØ±Ø§Ø¬Ø¹ Ø£Ù…Ù†ÙŠ Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„ØªØ¹Ø¯ÙŠÙ„.
     const deviceVelocityCount = deviceFingerprint ? await db.order.count({
       where: { merchantId, ...storeScope, deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
 
-    // [False-positive fix] äİÓ İáÓİÉ deviceVelocityCount İæŞ — ÈÓ ãÚ
-    // trade-off æÇÚí: sustained_ip_burst (riskScoring.js) ãÕãã ÃÕáÇğ
-    // áíãÓß ãåÇÌã äÌÍ íÊİÇÏì ÈÇŞí ÇáØÈŞÇÊ (device/email) ØÇáãÇ ÇÓÊÎÏã
-    // äİÓ ÇáÜ IP¡ ÍÊì áæ ßá ãÍÇæáÇÊå approved. İáÊÑÉ decision åäÇ ÈÊİŞÏ
-    // ÇáŞÏÑÉ Ïí äÙÑíğÇ¡ áßä ÚãáíğÇ checkVelocity's IP-based check
-    // (CardTestAttempt¡ ÚÊÈÉ 5 ãÍÇæáÇÊ ãÑİæÖÉ ÎáÇá 10 ÏŞÇíŞ ÈÓ) ÈíãÓß
-    // Ãí burst ÍŞíŞí ãä ãÍÇæáÇÊ ãÑİæÖÉ ÃÓÑÚ æÃÔÏ ÈßÊíÑ ãä åĞÇ ÇáİÍÕ
-    // (10 ÎáÇá 24 ÓÇÚÉ) ŞÈá ãÇ íæÕáå ÃÕáÇğ — İãİíÔ İÌæÉ ÃãäíÉ ÍŞíŞíÉ
-    // ÈÊÊİÊÍ¡ æÏå Çááí ÈíÎáí ÇáİáÊÑÉ åäÇ ÂãäÉ ÈäİÓ ãäØŞ ÇáÜ device.
+    // [False-positive fix] Ù†ÙØ³ ÙÙ„Ø³ÙØ© deviceVelocityCount ÙÙˆÙ‚ â€” Ø¨Ø³ Ù…Ø¹
+    // trade-off ÙˆØ§Ø¹ÙŠ: sustained_ip_burst (riskScoring.js) Ù…ØµÙ…Ù… Ø£ØµÙ„Ø§Ù‹
+    // Ù„ÙŠÙ…Ø³Ùƒ Ù…Ù‡Ø§Ø¬Ù… Ù†Ø¬Ø­ ÙŠØªÙØ§Ø¯Ù‰ Ø¨Ø§Ù‚ÙŠ Ø§Ù„Ø·Ø¨Ù‚Ø§Øª (device/email) Ø·Ø§Ù„Ù…Ø§ Ø§Ø³ØªØ®Ø¯Ù…
+    // Ù†ÙØ³ Ø§Ù„Ù€ IPØŒ Ø­ØªÙ‰ Ù„Ùˆ ÙƒÙ„ Ù…Ø­Ø§ÙˆÙ„Ø§ØªÙ‡ approved. ÙÙ„ØªØ±Ø© decision Ù‡Ù†Ø§ Ø¨ØªÙÙ‚Ø¯
+    // Ø§Ù„Ù‚Ø¯Ø±Ø© Ø¯ÙŠ Ù†Ø¸Ø±ÙŠÙ‹Ø§ØŒ Ù„ÙƒÙ† Ø¹Ù…Ù„ÙŠÙ‹Ø§ checkVelocity's IP-based check
+    // (CardTestAttemptØŒ Ø¹ØªØ¨Ø© 5 Ù…Ø­Ø§ÙˆÙ„Ø§Øª Ù…Ø±ÙÙˆØ¶Ø© Ø®Ù„Ø§Ù„ 10 Ø¯Ù‚Ø§ÙŠÙ‚ Ø¨Ø³) Ø¨ÙŠÙ…Ø³Ùƒ
+    // Ø£ÙŠ burst Ø­Ù‚ÙŠÙ‚ÙŠ Ù…Ù† Ù…Ø­Ø§ÙˆÙ„Ø§Øª Ù…Ø±ÙÙˆØ¶Ø© Ø£Ø³Ø±Ø¹ ÙˆØ£Ø´Ø¯ Ø¨ÙƒØªÙŠØ± Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„ÙØ­Øµ
+    // (10 Ø®Ù„Ø§Ù„ 24 Ø³Ø§Ø¹Ø©) Ù‚Ø¨Ù„ Ù…Ø§ ÙŠÙˆØµÙ„Ù‡ Ø£ØµÙ„Ø§Ù‹ â€” ÙÙ…ÙÙŠØ´ ÙØ¬ÙˆØ© Ø£Ù…Ù†ÙŠØ© Ø­Ù‚ÙŠÙ‚ÙŠØ©
+    // Ø¨ØªØªÙØªØ­ØŒ ÙˆØ¯Ù‡ Ø§Ù„Ù„ÙŠ Ø¨ÙŠØ®Ù„ÙŠ Ø§Ù„ÙÙ„ØªØ±Ø© Ù‡Ù†Ø§ Ø¢Ù…Ù†Ø© Ø¨Ù†ÙØ³ Ù…Ù†Ø·Ù‚ Ø§Ù„Ù€ device.
     const ipVelocityCount = ipAddress ? await db.order.count({
       where: { merchantId, ...storeScope, ipAddress, createdAt: { gte: last24h }, decision: { not: 'approve' } }
     }) : 0;
@@ -1316,19 +1316,19 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       where: { merchantId, ...storeScope, email, createdAt: { gte: last6h } }
     }) : 0;
 
-    // [BIN Velocity fix] cardBinPrefix ááÃæÑÏÑ ÇáÍÇáí — äİÓ idiom ÇáÇÓÊÎÑÇÌ
-    // ÇáãÓÊÎÏã ÈÇáİÚá İí ßá ãßÇä ÊÇäí İí åĞÇ Çáãáİ (blacklistCardBin¡
-    // emailBlockCardBin¡ ÅáÎ) ááÇÊÓÇŞ. ãİíÔ orderId íÓÊËäì åäÇ áÃä ÇáÃæÑÏÑ
-    // áÓå ãÚãáæÔ upsert İí ÇáÏÇÊÇÈíÒ İí åĞå ÇáãÑÍáÉ ãä ÇáÜ handler.
+    // [BIN Velocity fix] cardBinPrefix Ù„Ù„Ø£ÙˆØ±Ø¯Ø± Ø§Ù„Ø­Ø§Ù„ÙŠ â€” Ù†ÙØ³ idiom Ø§Ù„Ø§Ø³ØªØ®Ø±Ø§Ø¬
+    // Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙŠ ÙƒÙ„ Ù…ÙƒØ§Ù† ØªØ§Ù†ÙŠ ÙÙŠ Ù‡Ø°Ø§ Ø§Ù„Ù…Ù„Ù (blacklistCardBinØŒ
+    // emailBlockCardBinØŒ Ø¥Ù„Ø®) Ù„Ù„Ø§ØªØ³Ø§Ù‚. Ù…ÙÙŠØ´ orderId ÙŠØ³ØªØ«Ù†Ù‰ Ù‡Ù†Ø§ Ù„Ø£Ù† Ø§Ù„Ø£ÙˆØ±Ø¯Ø±
+    // Ù„Ø³Ù‡ Ù…Ø¹Ù…Ù„ÙˆØ´ upsert ÙÙŠ Ø§Ù„Ø¯Ø§ØªØ§Ø¨ÙŠØ² ÙÙŠ Ù‡Ø°Ù‡ Ø§Ù„Ù…Ø±Ø­Ù„Ø© Ù…Ù† Ø§Ù„Ù€ handler.
     let cardBinPrefixForVelocity = null;
     if (bin != null) {
       const b = String(bin).replace(/\D/g, '').slice(0, 6);
       if (b.length === 6) cardBinPrefixForVelocity = b;
     }
 
-    // [BIN Velocity fix] 3 äæÇİĞ ÒãäíÉ ÏŞíŞÉ (DB-backed)¡ ÈäİÓ äãØ
-    // device/ip/email İæŞ ÈÇáÙÈØ. Promise.all ÈÏá sequential awaits —
-    // ÊÍÓíä ÃÏÇÁ ÈÓíØ æãÚÒæá¡ ÇáÇÓÊÚáÇãÇÊ ãÓÊŞáÉ Úä ÈÚÖåÇ ÊãÇãğÇ.
+    // [BIN Velocity fix] 3 Ù†ÙˆØ§ÙØ° Ø²Ù…Ù†ÙŠØ© Ø¯Ù‚ÙŠÙ‚Ø© (DB-backed)ØŒ Ø¨Ù†ÙØ³ Ù†Ù…Ø·
+    // device/ip/email ÙÙˆÙ‚ Ø¨Ø§Ù„Ø¸Ø¨Ø·. Promise.all Ø¨Ø¯Ù„ sequential awaits â€”
+    // ØªØ­Ø³ÙŠÙ† Ø£Ø¯Ø§Ø¡ Ø¨Ø³ÙŠØ· ÙˆÙ…Ø¹Ø²ÙˆÙ„ØŒ Ø§Ù„Ø§Ø³ØªØ¹Ù„Ø§Ù…Ø§Øª Ù…Ø³ØªÙ‚Ù„Ø© Ø¹Ù† Ø¨Ø¹Ø¶Ù‡Ø§ ØªÙ…Ø§Ù…Ù‹Ø§.
     let binVelocityCount10min = 0;
     let binVelocityCount1h = 0;
     let binVelocityCount24h = 0;
@@ -1341,15 +1341,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       ]);
     }
 
-    // ????? ??? ????? ??? computedSignals (???? ??????? ??? riskScoring ??????)
-    // ????? ????????? ?????? ?? signalsSnapshot
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ computedSignals (ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ riskScoring ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ signalsSnapshot
 
-    // ??? ???????? ??????? (??? 90 ???)
-    // [Undefined-OR fix] Prisma ÈÊÊÌÇåá Ãí ãİÊÇÍ ŞíãÊå undefined¡ İÜ
-    // deviceFingerprint (ãİßæßÉ ÎÇã ãä req.body — undefined áæ ÇáÜ
-    // plugin ãÈÚÊÔ ÇáÍŞá) Ãæ normalizedEmailForMatch (undefined áæ email
-    // ÛÇíÈ) ßÇäÊ ÈÊÍæá İÑÚåÇ Ìæå OR áÔÑØ İÇÖí { order: {} } = ÕÍ ÏÇíãğÇ¡
-    // İÊÑÌøÚ Ãæá 200 dispute áßá ÇáÊÇÌÑ ÈÏá ÇáãÑÊÈØÉ ÈåĞÇ ÇáÃæÑÏÑ İŞØ.
+    // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ 90 ï¿½ï¿½ï¿½)
+    // [Undefined-OR fix] Prisma Ø¨ØªØªØ¬Ø§Ù‡Ù„ Ø£ÙŠ Ù…ÙØªØ§Ø­ Ù‚ÙŠÙ…ØªÙ‡ undefinedØŒ ÙÙ€
+    // deviceFingerprint (Ù…ÙÙƒÙˆÙƒØ© Ø®Ø§Ù… Ù…Ù† req.body â€” undefined Ù„Ùˆ Ø§Ù„Ù€
+    // plugin Ù…Ø¨Ø¹ØªØ´ Ø§Ù„Ø­Ù‚Ù„) Ø£Ùˆ normalizedEmailForMatch (undefined Ù„Ùˆ email
+    // ØºØ§ÙŠØ¨) ÙƒØ§Ù†Øª Ø¨ØªØ­ÙˆÙ„ ÙØ±Ø¹Ù‡Ø§ Ø¬ÙˆÙ‡ OR Ù„Ø´Ø±Ø· ÙØ§Ø¶ÙŠ { order: {} } = ØµØ­ Ø¯Ø§ÙŠÙ…Ù‹Ø§ØŒ
+    // ÙØªØ±Ø¬Ù‘Ø¹ Ø£ÙˆÙ„ 200 dispute Ù„ÙƒÙ„ Ø§Ù„ØªØ§Ø¬Ø± Ø¨Ø¯Ù„ Ø§Ù„Ù…Ø±ØªØ¨Ø·Ø© Ø¨Ù‡Ø°Ø§ Ø§Ù„Ø£ÙˆØ±Ø¯Ø± ÙÙ‚Ø·.
     const disputeOrConditions = [];
     if (normalizedEmailForMatch) disputeOrConditions.push({ order: { normalizedEmail: normalizedEmailForMatch } });
     if (deviceFingerprint) disputeOrConditions.push({ order: { deviceFingerprint } });
@@ -1368,7 +1368,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       : [];
     const blacklist = [];
 
-    // 3. ???? ????? ??????? ?????? ?????
+    // 3. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     const orderForGraph = {
       deviceFingerprint: deviceFingerprint,
       deviceId: deviceFingerprint,
@@ -1385,7 +1385,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     }
         const evaluateStart = Date.now();
 
-    // 4. ??????? ???? ??????? (?? ????? velocityCounts)
+    // 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ velocityCounts)
     const merchantConfig = {
       countryOverrides: req.tenant.countryOverrides || {},
       deviceSignal, // see riskScoring.js's deviceTrustFactor for how this is consumed
@@ -1398,15 +1398,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       blacklist,
       merchantId,
       false,
-      // [BIN Velocity fix] binVelocityCount10min/1h/24h ãÖÇİÉ — ÑÇÌÚ
-      // riskScoring.js áßíİíÉ ÇÓÊåáÇßåÇ ÈÏá allOrders.filter ÇáãßÓæÑÉ.
+      // [BIN Velocity fix] binVelocityCount10min/1h/24h Ù…Ø¶Ø§ÙØ© â€” Ø±Ø§Ø¬Ø¹
+      // riskScoring.js Ù„ÙƒÙŠÙÙŠØ© Ø§Ø³ØªÙ‡Ù„Ø§ÙƒÙ‡Ø§ Ø¨Ø¯Ù„ allOrders.filter Ø§Ù„Ù…ÙƒØ³ÙˆØ±Ø©.
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount, binVelocityCount10min, binVelocityCount1h, binVelocityCount24h },
-      null,           // cardHashRecord — ãÊÇÍ İŞØ İí /enrich
+      null,           // cardHashRecord â€” Ù…ØªØ§Ø­ ÙÙ‚Ø· ÙÙŠ /enrich
       merchantConfig,
       limitedScoring
     );
 
-    // 5. ???? ?????????
+    // 5. ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const response = {
       orderId: orderId,
       score: riskResult.score,
@@ -1414,7 +1414,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
                 riskResult.decision.includes('Review') ? 'review' : 'block',
       flags: riskResult.flags,
       connectedRisk: 0,
-      // `scored` is now always true — every request runs at least the
+      // `scored` is now always true â€” every request runs at least the
       // cheap, always-on detector set. `limitedScoring` is the new,
       // granular replacement for the old `scored:false`: it tells the
       // dashboard/plugin that external IP/email/BIN intelligence was
@@ -1424,15 +1424,15 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       limitedScoring,
     };
 
-    // ??????? connectedRisk ?????? ?? ????? Identity Graph
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ connectedRisk ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ Identity Graph
   response.connectedRisk = riskResult.graphRisk || 0;
-   // ÊÓÌíá ÇáãÍÇæáÉ áÊÛĞíÉ checkVelocity() áÇÍŞğÇ — Úáì Ãí ŞÑÇÑ ãÔ approve
-    // (íÚäí review Ãæ block)¡ ãÔ block ÈÓ. áæ ÓÌøáäÇ ÈÓ áãÇ ÇáŞÑÇÑ íÈŞì
-    // 'block'¡ Ãí äãØ åÌæã ÈíİÖá ÚÇáŞ ÚäÏ 'review' (ÈÇáÙÈØ Òí åÌæã
-    // ÇáÇÎÊÈÇÑ ÇáÍŞíŞí) ãÔ åíÛĞí CardTestAttempt ÃÈÏÇğ¡ æcheckVelocity()
-    // ÊİÖá ÚãíÇÁ Úäå ááÃÈÏ. ÇáÊæÓíÚ áÜ 'review' íŞİá ÇáÍáŞÉ ÇáÏÇÆÑíÉ ãä
-    // ÛíÑ ãÇ äÓÌá ßá ÃæÑÏÑ approve ÚÇÏí (ÇáÃÛáÈíÉ ÇáÓÇÍŞÉ ãä ÇáÊÑÇİíß)¡
-    // İÍÌã ÇáÌÏæá íİÖá ãÊÍßã İíå æãäÇÓÈ áãÏÉ ÇáÇÍÊİÇÙ 60 íæã.
+   // ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ù…Ø­Ø§ÙˆÙ„Ø© Ù„ØªØºØ°ÙŠØ© checkVelocity() Ù„Ø§Ø­Ù‚Ù‹Ø§ â€” Ø¹Ù„Ù‰ Ø£ÙŠ Ù‚Ø±Ø§Ø± Ù…Ø´ approve
+    // (ÙŠØ¹Ù†ÙŠ review Ø£Ùˆ block)ØŒ Ù…Ø´ block Ø¨Ø³. Ù„Ùˆ Ø³Ø¬Ù‘Ù„Ù†Ø§ Ø¨Ø³ Ù„Ù…Ø§ Ø§Ù„Ù‚Ø±Ø§Ø± ÙŠØ¨Ù‚Ù‰
+    // 'block'ØŒ Ø£ÙŠ Ù†Ù…Ø· Ù‡Ø¬ÙˆÙ… Ø¨ÙŠÙØ¶Ù„ Ø¹Ø§Ù„Ù‚ Ø¹Ù†Ø¯ 'review' (Ø¨Ø§Ù„Ø¸Ø¨Ø· Ø²ÙŠ Ù‡Ø¬ÙˆÙ…
+    // Ø§Ù„Ø§Ø®ØªØ¨Ø§Ø± Ø§Ù„Ø­Ù‚ÙŠÙ‚ÙŠ) Ù…Ø´ Ù‡ÙŠØºØ°ÙŠ CardTestAttempt Ø£Ø¨Ø¯Ø§Ù‹ØŒ ÙˆcheckVelocity()
+    // ØªÙØ¶Ù„ Ø¹Ù…ÙŠØ§Ø¡ Ø¹Ù†Ù‡ Ù„Ù„Ø£Ø¨Ø¯. Ø§Ù„ØªÙˆØ³ÙŠØ¹ Ù„Ù€ 'review' ÙŠÙ‚ÙÙ„ Ø§Ù„Ø­Ù„Ù‚Ø© Ø§Ù„Ø¯Ø§Ø¦Ø±ÙŠØ© Ù…Ù†
+    // ØºÙŠØ± Ù…Ø§ Ù†Ø³Ø¬Ù„ ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø± approve Ø¹Ø§Ø¯ÙŠ (Ø§Ù„Ø£ØºÙ„Ø¨ÙŠØ© Ø§Ù„Ø³Ø§Ø­Ù‚Ø© Ù…Ù† Ø§Ù„ØªØ±Ø§ÙÙŠÙƒ)ØŒ
+    // ÙØ­Ø¬Ù… Ø§Ù„Ø¬Ø¯ÙˆÙ„ ÙŠÙØ¶Ù„ Ù…ØªØ­ÙƒÙ… ÙÙŠÙ‡ ÙˆÙ…Ù†Ø§Ø³Ø¨ Ù„Ù…Ø¯Ø© Ø§Ù„Ø§Ø­ØªÙØ§Ø¸ 60 ÙŠÙˆÙ….
     if (response.decision !== 'approve') {
       recordFailedAttempt({
         ip: ipAddress,
@@ -1444,14 +1444,14 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       });
     }
 
-    // ÊÓÌíá ÇáÜ BlockedAttempt/quota — íİÖá ãÑÈæØ ÈÜ block İŞØ ÚãÏğÇ (ãÔ
-    // review)¡ áÃäå ÚÏÇÏ İæÊÑÉ/ÊŞÑíÑ İÚáí áÚÏÏ "ÇáåÌãÇÊ ÇáãÍÌæÈÉ"¡ æãÔ
-    // ÇáãİÑæÖ íÊæÓÚ Òí ÊÓÌíá ÇáÜ velocity İæŞ.
+    // ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ù€ BlockedAttempt/quota â€” ÙŠÙØ¶Ù„ Ù…Ø±Ø¨ÙˆØ· Ø¨Ù€ block ÙÙ‚Ø· Ø¹Ù…Ø¯Ù‹Ø§ (Ù…Ø´
+    // review)ØŒ Ù„Ø£Ù†Ù‡ Ø¹Ø¯Ø§Ø¯ ÙÙˆØªØ±Ø©/ØªÙ‚Ø±ÙŠØ± ÙØ¹Ù„ÙŠ Ù„Ø¹Ø¯Ø¯ "Ø§Ù„Ù‡Ø¬Ù…Ø§Øª Ø§Ù„Ù…Ø­Ø¬ÙˆØ¨Ø©"ØŒ ÙˆÙ…Ø´
+    // Ø§Ù„Ù…ÙØ±ÙˆØ¶ ÙŠØªÙˆØ³Ø¹ Ø²ÙŠ ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ù€ velocity ÙÙˆÙ‚.
     if (response.decision === 'block') {
-      // ?? Quota Counter: coupled to the enforcement decision ?????????????
+      // â”€â”€ Quota Counter: coupled to the enforcement decision â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
       // BlockedAttempt logging + monthlyBlockedCount increment happen here,
       // atomically, because this is the authoritative point where the block
-      // decision is made — not in the separate, best-effort /blocked-attempt
+      // decision is made â€” not in the separate, best-effort /blocked-attempt
       // call from the plugin, which can under-count under load (its own
       // 60/min rate limiter) or drop silently on network failure. The
       // counter must never depend on a less-trusted client's follow-up call
@@ -1499,7 +1499,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       } catch (counterErr) {
         // Logged, not fatal: a failed counter write shouldn't turn an
         // already-computed, correct block decision into a 500 for the
-        // merchant. This is the one residual drift window in this design —
+        // merchant. This is the one residual drift window in this design â€”
         // see write-up for the tradeoff.
         logger.error(
           { module: 'risk', endpoint: 'evaluate', tenantId: req.tenant.id, error: counterErr.message },
@@ -1508,13 +1508,13 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       }
     }
 
-    // 6. ??? ????? ?? ????? ????????
+    // 6. ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (orderId) {
         const computed = riskResult.computedSignals || {};
-      // ??????? ????? ???????? ?????? ?? externalVelocity (???????? ?? ??????)
-      const deviceVelocityCountFinal = deviceVelocityCount;   // ?? ???? ??????
-      const ipVelocityCountFinal = ipVelocityCount;           // ?? ???? ??????
-      const emailVelocityCountFinal = emailVelocityCount;     // ?? ???? ??????
+      // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ externalVelocity (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
+      const deviceVelocityCountFinal = deviceVelocityCount;   // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+      const ipVelocityCountFinal = ipVelocityCount;           // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+      const emailVelocityCountFinal = emailVelocityCount;     // ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       const isNewCustomerComputed = computed.isNewCustomer || false;
       const amountAnomaly = (computed.orderMultiple || 0) >= 3;
 
@@ -1534,11 +1534,11 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         deviceVelocityCount: deviceVelocityCountFinal,
         ipVelocityCount: ipVelocityCountFinal,
         emailVelocityCount: emailVelocityCountFinal,
-        // [BIN Velocity learning-loop fix] ßÇäÊ ÛÇíÈÉ ÊãÇãğÇ ãä ÇáÜ snapshot
-        // ÑÛã ÅäåÇ ÈÇáİÚá ãÍÓæÈÉ İæŞ (binVelocityCount10min/1h/24h) æãõÓÊÎÏãÉ
-        // İÚáíğÇ İí riskScoring.js áÍÓÇÈ ÇáÚŞæÈÉ — íÚäí ÇáŞÑÇÑ ßÇä ÈíÊÇÎÏ
-        // ÕÍ¡ áßä ãİíÔ Ãí ãÓÇÑ ááÊÚáøã ãäå áÃä extractSignalsFromSnapshot()
-        // (feedbackLoop.js) ãÍÊÇÌÉ ÇáÍŞæá Ïí åäÇ ÚÔÇä ÊŞÏÑ ÊÓÊÎÑÌåÇ.
+        // [BIN Velocity learning-loop fix] ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© ØªÙ…Ø§Ù…Ù‹Ø§ Ù…Ù† Ø§Ù„Ù€ snapshot
+        // Ø±ØºÙ… Ø¥Ù†Ù‡Ø§ Ø¨Ø§Ù„ÙØ¹Ù„ Ù…Ø­Ø³ÙˆØ¨Ø© ÙÙˆÙ‚ (binVelocityCount10min/1h/24h) ÙˆÙ…ÙØ³ØªØ®Ø¯Ù…Ø©
+        // ÙØ¹Ù„ÙŠÙ‹Ø§ ÙÙŠ riskScoring.js Ù„Ø­Ø³Ø§Ø¨ Ø§Ù„Ø¹Ù‚ÙˆØ¨Ø© â€” ÙŠØ¹Ù†ÙŠ Ø§Ù„Ù‚Ø±Ø§Ø± ÙƒØ§Ù† Ø¨ÙŠØªØ§Ø®Ø¯
+        // ØµØ­ØŒ Ù„ÙƒÙ† Ù…ÙÙŠØ´ Ø£ÙŠ Ù…Ø³Ø§Ø± Ù„Ù„ØªØ¹Ù„Ù‘Ù… Ù…Ù†Ù‡ Ù„Ø£Ù† extractSignalsFromSnapshot()
+        // (feedbackLoop.js) Ù…Ø­ØªØ§Ø¬Ø© Ø§Ù„Ø­Ù‚ÙˆÙ„ Ø¯ÙŠ Ù‡Ù†Ø§ Ø¹Ø´Ø§Ù† ØªÙ‚Ø¯Ø± ØªØ³ØªØ®Ø±Ø¬Ù‡Ø§.
         binVelocityCount10min,
         binVelocityCount1h,
         binVelocityCount24h,
@@ -1555,23 +1555,23 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       };
 
       // [C4 fix] merchantId/storeId/orderId are now injected by
-      // upsertOrderByBusinessKey from the business key below — do not
+      // upsertOrderByBusinessKey from the business key below â€” do not
       // duplicate them inside create/update. storeId here is deliberately
       // req.storeId (unconditional attribution, mirrors BlockedAttempt.storeId),
       // NOT storeScope.storeId (which only reflects fraudIsolationMode
-      // ==='per_store' and is for DETECTION-query filtering only — see
+      // ==='per_store' and is for DETECTION-query filtering only â€” see
       // getStoreScope() in planAccess.js).
       const savedOrder = await upsertOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId }, {
         create: {
           amount: amount || 0,
           currency: 'USD',
           email: email || null,
-          // [Bug #7 fix] áãØÇÈŞÉ disputes/blacklist áÇÍŞğÇ — email İæŞ
-          // íİÖá ÎÇã ááÚÑÖ/ÇáÜ audit trail.
+          // [Bug #7 fix] Ù„Ù…Ø·Ø§Ø¨Ù‚Ø© disputes/blacklist Ù„Ø§Ø­Ù‚Ù‹Ø§ â€” email ÙÙˆÙ‚
+          // ÙŠÙØ¶Ù„ Ø®Ø§Ù… Ù„Ù„Ø¹Ø±Ø¶/Ø§Ù„Ù€ audit trail.
           normalizedEmail: email ? normalizeEmail(email) : null,
-          // [BIN Velocity fix] ÑÇÌÚ cardBinPrefixForVelocity İæŞ. ÚÇÏÉğ
-          // null åäÇ (BIN ãÈíæÕáÔ ŞÈá ÇáÏİÚ ÍÓÈ ADR-0) — ÈÓ ÇáßÊÇÈÉ
-          // ÏÇíãğÇ ÕÍíÍÉ áæ æÕá ãÓÊŞÈáÇğ ÚÈÑ ÊßÇãá ãÎÊáİ.
+          // [BIN Velocity fix] Ø±Ø§Ø¬Ø¹ cardBinPrefixForVelocity ÙÙˆÙ‚. Ø¹Ø§Ø¯Ø©Ù‹
+          // null Ù‡Ù†Ø§ (BIN Ù…Ø¨ÙŠÙˆØµÙ„Ø´ Ù‚Ø¨Ù„ Ø§Ù„Ø¯ÙØ¹ Ø­Ø³Ø¨ ADR-0) â€” Ø¨Ø³ Ø§Ù„ÙƒØªØ§Ø¨Ø©
+          // Ø¯Ø§ÙŠÙ…Ù‹Ø§ ØµØ­ÙŠØ­Ø© Ù„Ùˆ ÙˆØµÙ„ Ù…Ø³ØªÙ‚Ø¨Ù„Ø§Ù‹ Ø¹Ø¨Ø± ØªÙƒØ§Ù…Ù„ Ù…Ø®ØªÙ„Ù.
           cardBinPrefix: cardBinPrefixForVelocity,
           ipAddress: ipAddress || null,
           deviceFingerprint: deviceFingerprint || null,
@@ -1598,7 +1598,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
         },
       });
 
-      // ??? RiskEvaluation ??? ??? ?????? block ?? review
+      // ï¿½ï¿½ï¿½ RiskEvaluation ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ block ï¿½ï¿½ review
       if (response.decision === 'block' || response.decision === 'review') {
         await db.riskEvaluation.upsert({
         where: { orderId: savedOrder.id },
@@ -1636,7 +1636,7 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
     prometheus.recordEvaluateDecision(response.decision);
     res.json(response);
   } catch (error) {
-    // Full detail stays server-side — the client response is generic in
+    // Full detail stays server-side â€” the client response is generic in
     // production. /evaluate is the highest-traffic endpoint in this file
     // (hit on every checkout), so this was the highest-value leak to close.
     logger.error({ module: 'risk', endpoint: 'evaluate', error: error.message, stack: error.stack }, 'Evaluate error');
@@ -1644,8 +1644,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
   }
 });
 
-// ???? ????? ?????? ?? ????? ????? (Feedback Loop)
-// ?????? orderId ? isFraud (true = ????? ??? ??????, false = ????? ??? ??????)
+// ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ (Feedback Loop)
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ orderId ï¿½ isFraud (true = ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½, false = ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
 const { processFeedback } = require('../lib/feedbackLoop');
 /**
  * @swagger
@@ -1674,7 +1674,7 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
   try {
     const { orderId, isFraud } = req.body;
     // CRITICAL FIX (C4): merchantId is derived from the authenticated tenant
-    // (never trusted from the request body — CWE-639 / OWASP API1:2023),
+    // (never trusted from the request body â€” CWE-639 / OWASP API1:2023),
     // and is now explicitly passed to processFeedback() so the lookup
     // inside feedbackLoop.js can be scoped to this tenant's own orders.
     // Previously this call passed no merchant context at all, meaning any
@@ -1690,8 +1690,8 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       return res.status(400).json({ error: 'isFraud is required (true/false)' });
     }
 
-    // ??????? ???? ??????
-    // ???? isFraud ?????? (true = lost, false = won)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ï¿½ï¿½ï¿½ï¿½ isFraud ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (true = lost, false = won)
     await processFeedback(orderId, isFraud ? 'lost' : 'won', merchantId);
 
     res.json({ success: true, message: 'Feedback recorded successfully' });
@@ -1711,7 +1711,7 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 // Checkout order. See class-api-client.php reconcile_order() for the caller.
 //
 // Field names (preOrderId / orderId) match what reconcile_order() actually
-// sends — not oldOrderId/newOrderId.
+// sends â€” not oldOrderId/newOrderId.
 /**
  * @swagger
  * /risk/reconcile:
@@ -1742,7 +1742,7 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { preOrderId, orderId } = req.body;
-    // merchantId derived from the authenticated tenant only — never trust
+    // merchantId derived from the authenticated tenant only â€” never trust
     // a client-supplied merchant identifier (CWE-639 / OWASP API1:2023),
     // consistent with every other route in this file.
     const merchantId = req.tenant.id;
@@ -1754,12 +1754,12 @@ router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       return res.status(400).json({ error: 'orderId is required' });
     }
 
-    // Scoped lookup via the compound key — this can structurally only
+    // Scoped lookup via the compound key â€” this can structurally only
     // return a row belonging to the calling tenant, or no row at all
     // (same pattern as feedbackLoop.js's C4-guarded lookup).
     const existing = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId: preOrderId });
 
-    // Generic 404 — deliberately does not distinguish "no such pre-order"
+    // Generic 404 â€” deliberately does not distinguish "no such pre-order"
     // from "pre-order belongs to a different tenant", to avoid an
     // enumeration oracle (same rationale as processFeedbackSimplified's
     // order-not-found branch in feedbackLoop.js).
@@ -1775,7 +1775,7 @@ router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       });
     } catch (updateErr) {
       if (updateErr.code === 'P2002') {
-        // newOrderId already exists for this tenant — most likely a
+        // newOrderId already exists for this tenant â€” most likely a
         // duplicate/retried reconciliation call. Not a server fault.
         logger.info({ module: 'risk', endpoint: 'reconcile', merchantId, preOrderId, orderId }, 'Reconcile: target orderId already exists for this tenant');
         return res.status(409).json({ error: 'An order with this orderId already exists for this merchant' });
@@ -1791,7 +1791,7 @@ router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
   }
 });
 
-// ???? ????? ????? ??????? buildGraphFromOrder
+// ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ buildGraphFromOrder
 /**
  * @swagger
  * /risk/test-graph:
@@ -1818,7 +1818,7 @@ router.post('/reconcile', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
  *         description: Internal error
  */
 router.post('/test-graph', apiKeyAuth, async (req, res) => {
-  // ??? ?????? ?? ???? ???????
+  // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
   if (process.env.NODE_ENV === 'production') {
     return res.status(404).json({ error: 'Endpoint not available in production' });
   }
@@ -1848,7 +1848,7 @@ router.post('/test-graph', apiKeyAuth, async (req, res) => {
   }
 });
 // ========== Blacklist Management Endpoints ==========
-// ????? ???? ??? ??????? ???????
+// ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist:
@@ -1881,14 +1881,14 @@ router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
     if (!type || !value) {
       return res.status(400).json({ error: 'type and value are required' });
     }
-    // ?????? ?? ??? ?????
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
     if (!validTypes.includes(type)) {
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
     }
 
-    // [Bug #7 fix] normalizedValue åí Çááí åÊÊŞÇÑä İÚáíğÇ İí /evaluate
-    // æ /woocommerce-webhook — ÑÇÌÚ computeNormalizedValue() İæŞ.
+    // [Bug #7 fix] normalizedValue Ù‡ÙŠ Ø§Ù„Ù„ÙŠ Ù‡ØªØªÙ‚Ø§Ø±Ù† ÙØ¹Ù„ÙŠÙ‹Ø§ ÙÙŠ /evaluate
+    // Ùˆ /woocommerce-webhook â€” Ø±Ø§Ø¬Ø¹ computeNormalizedValue() ÙÙˆÙ‚.
     const normalizedValue = computeNormalizedValue(type, value);
 
     const blacklistEntry = await db.blacklistEntry.create({
@@ -1913,7 +1913,7 @@ router.post('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
   }
 });
 
-// ??? ???? ?? ??????? ???????
+// ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist/{id}:
@@ -1944,7 +1944,7 @@ router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
     const { id } = req.params;
     const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // ?????? ?? ?? ?????? ????? ??? ??? ??????
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -1960,7 +1960,7 @@ router.delete('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSign
   }
 });
 // ========== GET Blacklist (Query) ==========
-// ??????? ??????? ??????? ?????? ??????
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/blacklist:
@@ -1995,7 +1995,7 @@ router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
     const { type, includeExpired } = req.query;
     const where = { merchantId };
 
-    // ????? ??? ????? (???????)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½)
     if (type) {
       const validTypes = ['EMAIL', 'IP', 'DEVICE_FINGERPRINT'];
       if (!validTypes.includes(type)) {
@@ -2004,7 +2004,7 @@ router.get('/blacklist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
       where.type = type;
     }
 
-    // ????? ????????: ???? ??????? ???? ??? ??????? ??????? (??? ?????? ?? expiresAt null)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½: ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ expiresAt null)
     if (includeExpired !== 'true') {
       where.OR = [
         { expiresAt: null },
@@ -2057,7 +2057,7 @@ router.put('/blacklist/:id', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
      const { id } = req.params;
     const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // ?????? ?? ????? ??????
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existing = await db.blacklistEntry.findFirst({
       where: { id, merchantId },
     });
@@ -2098,10 +2098,10 @@ router.post('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       return res.status(400).json({ error: `type must be one of: ${validTypes.join(', ')}` });
     }
 
-    // [Bug #7 fix] ÇÊÛíøÑ ÇáÇÓã ãä normalizedValue áÜ storedValue — ÇáÇÓã
-    // ÇáŞÏíã ÈŞì ãÍÌæÒ ááÚãæÏ ÇáÌÏíÏ Çááí ÈíõÓÊÎÏã İí ÇáãØÇÈŞÉ ÇáÃãäíÉ
-    // (ÊÍÊ). storedValue åæ Çááí ÈíÊßÊÈ İí ÚãæÏ value äİÓå: BIN ÈíÊŞáá
-    // áÜ 6 ÃÑŞÇã (Òí ãÇ ßÇä ÈÇáÙÈØ)¡ EMAIL/IP ÈíÊÎÒäæÇ Òí ãÇ ÇÊÈÚÊæÇ.
+    // [Bug #7 fix] Ø§ØªØºÙŠÙ‘Ø± Ø§Ù„Ø§Ø³Ù… Ù…Ù† normalizedValue Ù„Ù€ storedValue â€” Ø§Ù„Ø§Ø³Ù…
+    // Ø§Ù„Ù‚Ø¯ÙŠÙ… Ø¨Ù‚Ù‰ Ù…Ø­Ø¬ÙˆØ² Ù„Ù„Ø¹Ù…ÙˆØ¯ Ø§Ù„Ø¬Ø¯ÙŠØ¯ Ø§Ù„Ù„ÙŠ Ø¨ÙŠÙØ³ØªØ®Ø¯Ù… ÙÙŠ Ø§Ù„Ù…Ø·Ø§Ø¨Ù‚Ø© Ø§Ù„Ø£Ù…Ù†ÙŠØ©
+    // (ØªØ­Øª). storedValue Ù‡Ùˆ Ø§Ù„Ù„ÙŠ Ø¨ÙŠØªÙƒØªØ¨ ÙÙŠ Ø¹Ù…ÙˆØ¯ value Ù†ÙØ³Ù‡: BIN Ø¨ÙŠØªÙ‚Ù„Ù„
+    // Ù„Ù€ 6 Ø£Ø±Ù‚Ø§Ù… (Ø²ÙŠ Ù…Ø§ ÙƒØ§Ù† Ø¨Ø§Ù„Ø¸Ø¨Ø·)ØŒ EMAIL/IP Ø¨ÙŠØªØ®Ø²Ù†ÙˆØ§ Ø²ÙŠ Ù…Ø§ Ø§ØªØ¨Ø¹ØªÙˆØ§.
     const storedValue = type === 'BIN'
       ? String(value).replace(/\D/g, '').slice(0, 6)
       : value;
@@ -2110,10 +2110,10 @@ router.post('/whitelist', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature,
       return res.status(400).json({ error: 'BIN must be exactly 6 digits' });
     }
 
-    // [Bug #7 fix] normalizedValue: ÚãæÏ ÇáãØÇÈŞÉ ÇáÃãäíÉ. ÈíÊÍÓÈ ãä
-    // storedValue (ãÔ value ÇáÎÇã) ÚÔÇä ÊŞáíá ÇáÜ BIN áÜ 6 ÃÑŞÇã íİÖá
-    // ãÊÓŞ. Ïå ÈíŞİá ÇáäÕ ÇáÎÇÕ ÈÇáÜ whitelist ãä äİÓ ÇáËÛÑÉ — ßÇäÊ
-    // ÅíãíáÇÊ ÇáÜ whitelist ãÇÊÊØÈøŞÔ ÎÇáÕ ŞÈá ßÏå.
+    // [Bug #7 fix] normalizedValue: Ø¹Ù…ÙˆØ¯ Ø§Ù„Ù…Ø·Ø§Ø¨Ù‚Ø© Ø§Ù„Ø£Ù…Ù†ÙŠØ©. Ø¨ÙŠØªØ­Ø³Ø¨ Ù…Ù†
+    // storedValue (Ù…Ø´ value Ø§Ù„Ø®Ø§Ù…) Ø¹Ø´Ø§Ù† ØªÙ‚Ù„ÙŠÙ„ Ø§Ù„Ù€ BIN Ù„Ù€ 6 Ø£Ø±Ù‚Ø§Ù… ÙŠÙØ¶Ù„
+    // Ù…ØªØ³Ù‚. Ø¯Ù‡ Ø¨ÙŠÙ‚ÙÙ„ Ø§Ù„Ù†Øµ Ø§Ù„Ø®Ø§Øµ Ø¨Ø§Ù„Ù€ whitelist Ù…Ù† Ù†ÙØ³ Ø§Ù„Ø«ØºØ±Ø© â€” ÙƒØ§Ù†Øª
+    // Ø¥ÙŠÙ…ÙŠÙ„Ø§Øª Ø§Ù„Ù€ whitelist Ù…Ø§ØªØªØ·Ø¨Ù‘Ù‚Ø´ Ø®Ø§Ù„Øµ Ù‚Ø¨Ù„ ÙƒØ¯Ù‡.
     const normalizedValue = computeNormalizedValue(type, storedValue);
 
     const whitelistEntry = await db.whitelistEntry.create({
@@ -2203,7 +2203,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       return res.status(400).json({ error: 'Raw body missing' });
     }
 
-    // 2. Parse raw body to JSON (???? parsedBody ?????)
+    // 2. Parse raw body to JSON (ï¿½ï¿½ï¿½ï¿½ parsedBody ï¿½ï¿½ï¿½ï¿½ï¿½)
     let parsedBody;
     try {
       parsedBody = JSON.parse(rawBody.toString());
@@ -2218,7 +2218,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     //
     // Tenant resolution now goes through the same centralized requireAuth()
     // middleware used by every other route in this file, instead of a manual
-    // resolveTenantByApiKey/isActive/emailVerified copy (CWE-1059 drift fix —
+    // resolveTenantByApiKey/isActive/emailVerified copy (CWE-1059 drift fix â€”
     // see runAuthMiddleware/webhookAuth definitions above). This also gives
     // the webhook endpoint the same standardized 401/403 response shape and
     // uniform 200ms auth-failure timing delay as every other endpoint.
@@ -2228,18 +2228,18 @@ router.post('/woocommerce-webhook', async (req, res) => {
 
     // Note: webhookAuth's select object must also include fraudIsolationMode
     // (see Change 3a-equivalent for webhookAuth definition) for this to be
-    // anything other than {} — see next required edit below.
+    // anything other than {} â€” see next required edit below.
 
-    // ?? Best-effort store attribution (Agency multi-store) ???????????????
+    // â”€â”€ Best-effort store attribution (Agency multi-store) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // domainAuthMiddleware is NOT applied on this route (see historical
-    // comments below on the two recordBlockedAttempt calls) — and cannot
+    // comments below on the two recordBlockedAttempt calls) â€” and cannot
     // be applied as-is, because it requires X-Store-Domain, which native
     // WooCommerce webhook delivery does not send. WooCommerce's own
     // delivery mechanism sends X-WC-Webhook-Source (the site's home URL)
     // instead; X-Store-Domain is kept as a fallback in case a future
     // plugin/proxy configuration ever adds it on this path. This call is
     // fail-open by design: on a missing header or no Store match,
-    // req.storeId stays null, identical to pre-fix behavior — it never
+    // req.storeId stays null, identical to pre-fix behavior â€” it never
     // rejects the request. See resolveStoreIdBestEffort() in domainAuth.js
     // for why this is a separate function from domainAuthMiddleware rather
     // than a relaxed mode of it.
@@ -2247,15 +2247,15 @@ router.post('/woocommerce-webhook', async (req, res) => {
     req.storeId = await resolveStoreIdBestEffort(merchantId, webhookSourceDomain);
     const storeScope = getStoreScope(req.tenant, req.storeId);
 
-    // ?? WooCommerce Signature Verification (mirrors /evaluate's ordering:
-    // auth ? signature ? quota ? business logic) ???????????????????????????
+    // â”€â”€ WooCommerce Signature Verification (mirrors /evaluate's ordering:
+    // auth â†’ signature â†’ quota â†’ business logic) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Moved ahead of the quota gate (Issue #3 fix). Previously this ran
     // AFTER checkQuotaGate, so an authenticated-but-unsigned/misconfigured
     // request from a near-quota tenant surfaced as "quota exceeded" instead
-    // of "invalid signature" — masking the real root cause in logs and
+    // of "invalid signature" â€” masking the real root cause in logs and
     // alerts. No security change: requireAuth() already gated both checks
     // before and after this reorder.
-    // Per-tenant secret — WooCommerce signs each merchant's webhook
+    // Per-tenant secret â€” WooCommerce signs each merchant's webhook
     // deliveries with THAT merchant's own webhookSecret (generated at
     // /tenants/register and stored on Tenant.webhookSecret), not a
     // deployment-wide value. req.tenant is already resolved and scoped to
@@ -2269,21 +2269,21 @@ router.post('/woocommerce-webhook', async (req, res) => {
       const signatureBuf = Buffer.from(signature);
 
       // crypto.timingSafeEqual throws on unequal-length buffers rather than
-      // returning false — with a real per-tenant secret now in play, a
+      // returning false â€” with a real per-tenant secret now in play, a
       // forged/garbled signature header is a live possibility, so guard the
       // length explicitly rather than let it fall into the outer catch as
       // a generic 500.
       const isValid = expectedBuf.length === signatureBuf.length &&
         crypto.timingSafeEqual(expectedBuf, signatureBuf);
       if (!isValid) {
-        // [Bug #13 fix] ÇáÊİÇÕíá ÇáÊÔÎíÕíÉ (ÔÇãáÉ ãÚÇíäÉ Ãæá 50 ÍÑİ ãä
-        // ÇáÜ raw body — ÈíÇäÇÊ ÃæÑÏÑ ÍŞíŞíÉ¡ PII ãÍÊãá) ßÇäÊ ÈÊÊÓÌá
-        // *ÏÇíãğÇ* İí äÏÇÁ logger.warn ãäİÕá İæŞ¡ ÈÛÖ ÇáäÙÑ Úä äÌÇÍ
-        // ÇáÊÍŞŞ ãä ÇáÊæŞíÚ ãä ÚÏãå — íÚäí ßá ÃæÑÏÑ ÔÑÚí æÕá ÈÊæŞíÚ ÕÍíÍ
-        // (ÇáÍÇáÉ ÇáÛÇáÈÉ) ßÇä ÈíÓÑøÈ ÌÒÁ ãä ÈíÇäÇÊå İí ÇááæÌÒ ãä ÛíÑ Ãí
-        // ÏÇÚí. ÏãÌäÇå İí äÏÇÁ æÇÍÏ åäÇ¡ ãÇ ÈíÊäİĞÔ ÅáÇ æŞÊ æÌæÏ ãÔßáÉ
-        // İÚáíÉ (mismatch) ÊÓÊÇåá ÇáÊÔÎíÕ — äİÓ İáÓİÉ "I11 fix" ÇáãæËŞÉ
-        // İí lib/woocommerce.js.
+        // [Bug #13 fix] Ø§Ù„ØªÙØ§ØµÙŠÙ„ Ø§Ù„ØªØ´Ø®ÙŠØµÙŠØ© (Ø´Ø§Ù…Ù„Ø© Ù…Ø¹Ø§ÙŠÙ†Ø© Ø£ÙˆÙ„ 50 Ø­Ø±Ù Ù…Ù†
+        // Ø§Ù„Ù€ raw body â€” Ø¨ÙŠØ§Ù†Ø§Øª Ø£ÙˆØ±Ø¯Ø± Ø­Ù‚ÙŠÙ‚ÙŠØ©ØŒ PII Ù…Ø­ØªÙ…Ù„) ÙƒØ§Ù†Øª Ø¨ØªØªØ³Ø¬Ù„
+        // *Ø¯Ø§ÙŠÙ…Ù‹Ø§* ÙÙŠ Ù†Ø¯Ø§Ø¡ logger.warn Ù…Ù†ÙØµÙ„ ÙÙˆÙ‚ØŒ Ø¨ØºØ¶ Ø§Ù„Ù†Ø¸Ø± Ø¹Ù† Ù†Ø¬Ø§Ø­
+        // Ø§Ù„ØªØ­Ù‚Ù‚ Ù…Ù† Ø§Ù„ØªÙˆÙ‚ÙŠØ¹ Ù…Ù† Ø¹Ø¯Ù…Ù‡ â€” ÙŠØ¹Ù†ÙŠ ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø± Ø´Ø±Ø¹ÙŠ ÙˆØµÙ„ Ø¨ØªÙˆÙ‚ÙŠØ¹ ØµØ­ÙŠØ­
+        // (Ø§Ù„Ø­Ø§Ù„Ø© Ø§Ù„ØºØ§Ù„Ø¨Ø©) ÙƒØ§Ù† Ø¨ÙŠØ³Ø±Ù‘Ø¨ Ø¬Ø²Ø¡ Ù…Ù† Ø¨ÙŠØ§Ù†Ø§ØªÙ‡ ÙÙŠ Ø§Ù„Ù„ÙˆØ¬Ø² Ù…Ù† ØºÙŠØ± Ø£ÙŠ
+        // Ø¯Ø§Ø¹ÙŠ. Ø¯Ù…Ø¬Ù†Ø§Ù‡ ÙÙŠ Ù†Ø¯Ø§Ø¡ ÙˆØ§Ø­Ø¯ Ù‡Ù†Ø§ØŒ Ù…Ø§ Ø¨ÙŠØªÙ†ÙØ°Ø´ Ø¥Ù„Ø§ ÙˆÙ‚Øª ÙˆØ¬ÙˆØ¯ Ù…Ø´ÙƒÙ„Ø©
+        // ÙØ¹Ù„ÙŠØ© (mismatch) ØªØ³ØªØ§Ù‡Ù„ Ø§Ù„ØªØ´Ø®ÙŠØµ â€” Ù†ÙØ³ ÙÙ„Ø³ÙØ© "I11 fix" Ø§Ù„Ù…ÙˆØ«Ù‚Ø©
+        // ÙÙŠ lib/woocommerce.js.
         logger.warn({
           module: 'risk',
           tenantId: merchantId,
@@ -2293,29 +2293,29 @@ router.post('/woocommerce-webhook', async (req, res) => {
           firstRawBodyChars: rawBody.toString('utf8').slice(0, 50),
           secretConfigured: !!wcSecret,
           signaturePresent: !!signature,
-        }, 'Signature mismatch — rejecting forged webhook request');
+        }, 'Signature mismatch â€” rejecting forged webhook request');
         return res.status(401).json({ error: 'Invalid signature' });
       }
     } else if (wcSecret && !signature) {
-      // Secret configured but signature missing — reject
+      // Secret configured but signature missing â€” reject
       return res.status(401).json({ error: 'Missing signature' });
     } else if (!wcSecret) {
-      // Legacy tenant that predates webhookSecret provisioning — skip this
+      // Legacy tenant that predates webhookSecret provisioning â€” skip this
       // defense-in-depth layer gracefully rather than rejecting all
       // traffic. webhookAuth (X-Api-Key) has already authenticated this
       // request to a real, active, verified tenant; this only means that
       // one tenant is missing the extra WooCommerce-signature check, not
       // that the request is unauthenticated.
-      logger.warn({ module: 'risk', tenantId: merchantId }, 'WooCommerce webhook signature check skipped — tenant has no webhookSecret configured');
+      logger.warn({ module: 'risk', tenantId: merchantId }, 'WooCommerce webhook signature check skipped â€” tenant has no webhookSecret configured');
     }
 
-    // ?? Quota Status (mirrors /evaluate's non-blocking behavior) ???????????
+    // â”€â”€ Quota Status (mirrors /evaluate's non-blocking behavior) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Both order-evaluation paths must agree on what "quota exhausted"
     // means: it now only gates expensive external intel calls inside
     // calculateRiskScore(), never the detection pipeline itself.
     const quotaStatus = await checkQuotaGate(req, 'woocommerce-webhook');
     const limitedScoring = quotaStatus.exceeded;
-    // ?? End Quota Status ??????????????????????????????????????????????????
+    // â”€â”€ End Quota Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
    // 5. Extract order data
    const { extractOrderData, buildRiskEvaluationRequest } = require('../lib/woocommerce');
@@ -2327,7 +2327,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
      return res.status(400).json({ error: 'Invalid payload structure' });
    }
 
-   // Same defense-in-depth gate as /evaluate — see the comment there.
+   // Same defense-in-depth gate as /evaluate â€” see the comment there.
    // extractOrderData() has no way to know whether the plugin's
    // get_client_ip() resolved correctly; this backend re-validates
    // independently before extracted.ipAddress touches any IP-anchored
@@ -2340,7 +2340,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
        if (extracted.ipAddress) {
          logger.warn(
            { module: 'risk', endpoint: 'woocommerce-webhook', orderId: extracted.orderId, ipAnomaly: webhookIpAnomaly },
-           'ipAddress failed plausibility check — excluding from IP-based detection for this request'
+           'ipAddress failed plausibility check â€” excluding from IP-based detection for this request'
          );
        }
        extracted.ipAddress = null;
@@ -2351,17 +2351,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
 
    // 6. Idempotency: check if order already processed
    const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId: extracted.orderId });
-    // Defense-in-depth (C3): mirrors the /evaluate guard above — should be
+    // Defense-in-depth (C3): mirrors the /evaluate guard above â€” should be
     // unreachable given the compound key, asserted anyway.
     if (existingOrder && existingOrder.merchantId !== merchantId) {
-      logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', merchantId, orderId: extracted.orderId }, 'C3 guard tripped — compound key returned a different merchant\'s row; should be unreachable');
+      logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', merchantId, orderId: extracted.orderId }, 'C3 guard tripped â€” compound key returned a different merchant\'s row; should be unreachable');
       return res.status(403).json({ error: 'Merchant ID mismatch.' });
     }
     if (existingOrder) {
       // Return cached response (within reasonable time window, e.g., 24h)
       const ageHours = (Date.now() - new Date(existingOrder.createdAt).getTime()) / (1000 * 60 * 60);
       if (ageHours < 24) {
-        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request ? returning cached result');
+        logger.info({ module: 'risk', orderId: extracted.orderId }, 'Idempotent request ï¿½ returning cached result');
         return res.json({
           orderId: extracted.orderId,
           score: existingOrder.riskScore,
@@ -2375,7 +2375,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     const riskRequest = buildRiskEvaluationRequest(extracted);
     riskRequest.merchantId = merchantId;
 
-    // ??????? ???? ?????? ?? Webhook (??? ????)
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ Webhook (ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
     let deviceFingerprint = parsedBody.device_fingerprint || null;
     if (!deviceFingerprint && parsedBody.meta_data) {
         const fpMeta = parsedBody.meta_data.find(m => m.key === '_chargeguard_device_fingerprint');
@@ -2383,9 +2383,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
     riskRequest.deviceFingerprint = deviceFingerprint || `${WC_SYNTHETIC_DEVICE_PREFIX}${extracted.orderId}`; // fallback
 
-    // Same treatment for the server-signed device token — mirrors the
+    // Same treatment for the server-signed device token â€” mirrors the
     // fingerprint extraction immediately above. Sourced from order meta
-    // (_chargeguard_device_token, persisted at checkout — see
+    // (_chargeguard_device_token, persisted at checkout â€” see
     // class-dynamic-firewall.php) via the same meta_data field the
     // webhook payload already carries.
     let deviceToken = parsedBody.device_token || null;
@@ -2406,17 +2406,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
     const webhookMerchantConfig = { deviceSignal: webhookDeviceSignal };
 
-    // [Bug #7 fix] äİÓ ãäØŞ normalizedEmailForMatch İí /evaluate.
+    // [Bug #7 fix] Ù†ÙØ³ Ù…Ù†Ø·Ù‚ normalizedEmailForMatch ÙÙŠ /evaluate.
     const normalizedExtractedEmail = extracted.email ? normalizeEmail(extracted.email) : undefined;
-    // [Discovery 2/3 fix] äİÓ ãäØŞ normalizedBinForMatch İí /evaluate —
-    // íõÍÓÈ ãÑÉ æÇÍÏÉ¡ íõÓÊÎÏã İí 7a (whitelist) æ7a1 (blacklist) ÊÍÊ.
+    // [Discovery 2/3 fix] Ù†ÙØ³ Ù…Ù†Ø·Ù‚ normalizedBinForMatch ÙÙŠ /evaluate â€”
+    // ÙŠÙØ­Ø³Ø¨ Ù…Ø±Ø© ÙˆØ§Ø­Ø¯Ø©ØŒ ÙŠÙØ³ØªØ®Ø¯Ù… ÙÙŠ 7a (whitelist) Ùˆ7a1 (blacklist) ØªØ­Øª.
     const normalizedExtractedBin = extracted.bin ? String(extracted.bin).replace(/\D/g, '').slice(0, 6) : undefined;
 
     // 7a. Whitelist Check
-    // [Discovery 3 fix] BIN ßÇäÊ ÛÇíÈÉ ãä åĞÇ ÇáİÍÕ ÊÍÏíÏğÇ — ÈÇáÑÛã ãä
-    // æÌæÏåÇ İí /evaluate's 0a (ÇáãÑÌÚ) æİí enrichmentProcessor.js's
-    // whitelist check. äİÓ İÆÉ Discovery 1/2 (ÍŞá ãÏÚæã ÈÇáßÇãá ÈÓ äÇŞÕ
-    // ãä ãÓÇÑ æÇÍÏ ÈÚíäå).
+    // [Discovery 3 fix] BIN ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„ÙØ­Øµ ØªØ­Ø¯ÙŠØ¯Ù‹Ø§ â€” Ø¨Ø§Ù„Ø±ØºÙ… Ù…Ù†
+    // ÙˆØ¬ÙˆØ¯Ù‡Ø§ ÙÙŠ /evaluate's 0a (Ø§Ù„Ù…Ø±Ø¬Ø¹) ÙˆÙÙŠ enrichmentProcessor.js's
+    // whitelist check. Ù†ÙØ³ ÙØ¦Ø© Discovery 1/2 (Ø­Ù‚Ù„ Ù…Ø¯Ø¹ÙˆÙ… Ø¨Ø§Ù„ÙƒØ§Ù…Ù„ Ø¨Ø³ Ù†Ø§Ù‚Øµ
+    // Ù…Ù† Ù…Ø³Ø§Ø± ÙˆØ§Ø­Ø¯ Ø¨Ø¹ÙŠÙ†Ù‡).
     const webhookWhitelistConditions = [];
     if (normalizedExtractedEmail) webhookWhitelistConditions.push({ type: 'EMAIL', normalizedValue: normalizedExtractedEmail });
     if (extracted.ipAddress)      webhookWhitelistConditions.push({ type: 'IP',   value: extracted.ipAddress });
@@ -2439,7 +2439,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
         prometheus.recordWhitelistBypass(webhookWhitelistCheck.type);
         logger.info(
           { module: 'risk', merchantId, type: webhookWhitelistCheck.type, orderId: extracted.orderId },
-          'Webhook request bypassed all checks — whitelisted'
+          'Webhook request bypassed all checks â€” whitelisted'
         );
         return res.json({
           orderId: extracted.orderId,
@@ -2452,28 +2452,28 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // 7a1. Blacklist Check — [Discovery 1 fix] ßÇäÊ ÛÇíÈÉ ÊãÇãğÇ ãä åĞÇ
-    // ÇáãÓÇÑ. ÇáİÍÕ ÇáÏÇÎáí Ìæå calculateRiskScore() (inBlacklist İí
-    // riskScoring.js) ãÔ ÈÏíá ßÇİò: åæ soft -80 penalty ÈÓ (ãÔ hard
-    // block)¡ æßÇä ÃÕáÇğ ãÚØæÈğÇ ÈäíæíğÇ áÍÏ İíßÓ ãäİÕá (ÑÇÌÚ
-    // riskScoring.js). Ïå ÈíŞİá ÇáÊäÇŞÖ ÇáÃãäí Èíä /evaluate (ÚäÏå 0b
-    // ãä ÇáÃæá) æ/woocommerce-webhook (ßÇä ãä ÛíÑåÇ) — ßíÇä ÇÊÍÙÑ ããßä
-    // ßÇä íÚÏí ÈÇáßÇãá áæ æÕá ÚÈÑ WooCommerce's native order webhook
-    // ÈÏá /evaluate.
+    // 7a1. Blacklist Check â€” [Discovery 1 fix] ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© ØªÙ…Ø§Ù…Ù‹Ø§ Ù…Ù† Ù‡Ø°Ø§
+    // Ø§Ù„Ù…Ø³Ø§Ø±. Ø§Ù„ÙØ­Øµ Ø§Ù„Ø¯Ø§Ø®Ù„ÙŠ Ø¬ÙˆÙ‡ calculateRiskScore() (inBlacklist ÙÙŠ
+    // riskScoring.js) Ù…Ø´ Ø¨Ø¯ÙŠÙ„ ÙƒØ§ÙÙ: Ù‡Ùˆ soft -80 penalty Ø¨Ø³ (Ù…Ø´ hard
+    // block)ØŒ ÙˆÙƒØ§Ù† Ø£ØµÙ„Ø§Ù‹ Ù…Ø¹Ø·ÙˆØ¨Ù‹Ø§ Ø¨Ù†ÙŠÙˆÙŠÙ‹Ø§ Ù„Ø­Ø¯ ÙÙŠÙƒØ³ Ù…Ù†ÙØµÙ„ (Ø±Ø§Ø¬Ø¹
+    // riskScoring.js). Ø¯Ù‡ Ø¨ÙŠÙ‚ÙÙ„ Ø§Ù„ØªÙ†Ø§Ù‚Ø¶ Ø§Ù„Ø£Ù…Ù†ÙŠ Ø¨ÙŠÙ† /evaluate (Ø¹Ù†Ø¯Ù‡ 0b
+    // Ù…Ù† Ø§Ù„Ø£ÙˆÙ„) Ùˆ/woocommerce-webhook (ÙƒØ§Ù† Ù…Ù† ØºÙŠØ±Ù‡Ø§) â€” ÙƒÙŠØ§Ù† Ø§ØªØ­Ø¸Ø± Ù…Ù…ÙƒÙ†
+    // ÙƒØ§Ù† ÙŠØ¹Ø¯ÙŠ Ø¨Ø§Ù„ÙƒØ§Ù…Ù„ Ù„Ùˆ ÙˆØµÙ„ Ø¹Ø¨Ø± WooCommerce's native order webhook
+    // Ø¨Ø¯Ù„ /evaluate.
     //
-    // [ŞÑÇÑ ãÍÓæã] storeScope ãõÖÇİÉ åäÇ — ÇáÈáÇß áíÓÊ hard block ŞÇØÚ¡
-    // ãÔ soft signal¡ İÇáÇÊÓÇŞ ÇáÕÍíÍ åæ ãÚ /evaluate's 0b (ÇáãÑÌÚ
-    // ÇáÃãäí¡ Çááí ÈíÓÊÎÏã storeScope ãä ÇáÃæá)¡ ãÔ ãÚ ÚÏøÇÏÇÊ ÇáÓÑÚÉ
-    // ÇáÊáÇÊÉ ÊÍÊ (deviceVelocityCount/ipVelocityCount/emailVelocityCount)
-    // Çááí ÊÌÇåáåÇ áÜ storeScope ãŞÈæá áÃäåÇ soft signals ÈÓ ÈÊÃËÑ Úáì
-    // score. ãä ÛíÑ ÇáİíßÓ Ïå¡ ÈáÇß áíÓÊ ÊÇÌÑ Agency ãÎÕÕÉ áÜ Store A
-    // ßÇäÊ åÊÊİÍÕ (æÊõØÈøŞ ÍÙÑ) ÚÈÑ ßá ãÊÇÌÑå ÈãÇ İíåã Store B ÛíÑ
-    // ÇáãÑÊÈØ — ÚÈÑ åĞÇ ÇáãÓÇÑ İŞØ — ÊäÇŞÖ Ããäí ãä äİÓ İÆÉ Discovery 1
-    // ÇáÃÕáíÉ¡ ÈÓ Úáì ãÓÊæì store ÈÏá tenant.
+    // [Ù‚Ø±Ø§Ø± Ù…Ø­Ø³ÙˆÙ…] storeScope Ù…ÙØ¶Ø§ÙØ© Ù‡Ù†Ø§ â€” Ø§Ù„Ø¨Ù„Ø§Ùƒ Ù„ÙŠØ³Øª hard block Ù‚Ø§Ø·Ø¹ØŒ
+    // Ù…Ø´ soft signalØŒ ÙØ§Ù„Ø§ØªØ³Ø§Ù‚ Ø§Ù„ØµØ­ÙŠØ­ Ù‡Ùˆ Ù…Ø¹ /evaluate's 0b (Ø§Ù„Ù…Ø±Ø¬Ø¹
+    // Ø§Ù„Ø£Ù…Ù†ÙŠØŒ Ø§Ù„Ù„ÙŠ Ø¨ÙŠØ³ØªØ®Ø¯Ù… storeScope Ù…Ù† Ø§Ù„Ø£ÙˆÙ„)ØŒ Ù…Ø´ Ù…Ø¹ Ø¹Ø¯Ù‘Ø§Ø¯Ø§Øª Ø§Ù„Ø³Ø±Ø¹Ø©
+    // Ø§Ù„ØªÙ„Ø§ØªØ© ØªØ­Øª (deviceVelocityCount/ipVelocityCount/emailVelocityCount)
+    // Ø§Ù„Ù„ÙŠ ØªØ¬Ø§Ù‡Ù„Ù‡Ø§ Ù„Ù€ storeScope Ù…Ù‚Ø¨ÙˆÙ„ Ù„Ø£Ù†Ù‡Ø§ soft signals Ø¨Ø³ Ø¨ØªØ£Ø«Ø± Ø¹Ù„Ù‰
+    // score. Ù…Ù† ØºÙŠØ± Ø§Ù„ÙÙŠÙƒØ³ Ø¯Ù‡ØŒ Ø¨Ù„Ø§Ùƒ Ù„ÙŠØ³Øª ØªØ§Ø¬Ø± Agency Ù…Ø®ØµØµØ© Ù„Ù€ Store A
+    // ÙƒØ§Ù†Øª Ù‡ØªØªÙØ­Øµ (ÙˆØªÙØ·Ø¨Ù‘Ù‚ Ø­Ø¸Ø±) Ø¹Ø¨Ø± ÙƒÙ„ Ù…ØªØ§Ø¬Ø±Ù‡ Ø¨Ù…Ø§ ÙÙŠÙ‡Ù… Store B ØºÙŠØ±
+    // Ø§Ù„Ù…Ø±ØªØ¨Ø· â€” Ø¹Ø¨Ø± Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø± ÙÙ‚Ø· â€” ØªÙ†Ø§Ù‚Ø¶ Ø£Ù…Ù†ÙŠ Ù…Ù† Ù†ÙØ³ ÙØ¦Ø© Discovery 1
+    // Ø§Ù„Ø£ØµÙ„ÙŠØ©ØŒ Ø¨Ø³ Ø¹Ù„Ù‰ Ù…Ø³ØªÙˆÙ‰ store Ø¨Ø¯Ù„ tenant.
     //
-    // [Discovery 2 fix] bin ãõÖÇİÉ ßãÇä — ÑÇÌÚ blacklistGate.js's
-    // findBlacklistMatch. extracted.bin äÇÏÑğÇ ãÇ íÊæİÑ ÚÈÑ åĞÇ ÇáãÓÇÑ İí
-    // ÇáÅäÊÇÌ (ÑÇÌÚ ADR-0)¡ áßä ÇáİÍÕ ÏáæŞÊí ÕÍíÍ áæ æÕá ãÓÊŞÈáğÇ.
+    // [Discovery 2 fix] bin Ù…ÙØ¶Ø§ÙØ© ÙƒÙ…Ø§Ù† â€” Ø±Ø§Ø¬Ø¹ blacklistGate.js's
+    // findBlacklistMatch. extracted.bin Ù†Ø§Ø¯Ø±Ù‹Ø§ Ù…Ø§ ÙŠØªÙˆÙØ± Ø¹Ø¨Ø± Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø± ÙÙŠ
+    // Ø§Ù„Ø¥Ù†ØªØ§Ø¬ (Ø±Ø§Ø¬Ø¹ ADR-0)ØŒ Ù„ÙƒÙ† Ø§Ù„ÙØ­Øµ Ø¯Ù„ÙˆÙ‚ØªÙŠ ØµØ­ÙŠØ­ Ù„Ùˆ ÙˆØµÙ„ Ù…Ø³ØªÙ‚Ø¨Ù„Ù‹Ø§.
     const webhookBlacklistCheck = await findBlacklistMatch(db, {
       merchantId,
       storeScope,
@@ -2525,15 +2525,15 @@ router.post('/woocommerce-webhook', async (req, res) => {
       });
     }
 
-    // 7a2. Email Hard-Block — disposable domain / no-MX. [Bug #6 fix]
-    // ßÇäÊ ÛÇíÈÉ ÊãÇãğÇ ãä åĞÇ ÇáãÓÇÑ. ÊÚãá ÈÔßá ãØÇÈŞ áŞÓã 0c İí
-    // /evaluate — æÈÔßá ãÊÚãÏ ÈÏæä Ãí ÔÑØ Úáì limitedScoring¡ áÃä æŞÊ
-    // äİÇÏ ÇáßæÊÇ calculateRiskScore() ÈíŞİá getEmailIntelligence() ÊãÇãğÇ
-    // (ÑÇÌÚ ÇáÜ Promise.allSettled Ìæå calculateRiskScore) — íÚäí ÃæÑÏÑ
-    // ÇáÜ webhook æŞÊåÇ ßÇä ÈíæÕá áÜ decision äåÇÆí ÈÏæä Ãí ÅÔÇÑÉ Åíãíá
-    // ÎÇáÕ¡ ÍÇÏ æáÇ äÇÚã. ÇÊÍØÊ ÈÚÏ whitelist (ÃÑÎÕ ÈæÇÈÉ¡ bypass ÇáÃæá)
-    // æŞÈá BIN-sequence¡ ÈäİÓ ãäØŞ "ÇáÃÑÎÕ æÇáÃßËÑ ÍÓãğÇ ÇáÃæá" ÇáãÓÊÎÏã
-    // İí /evaluate.
+    // 7a2. Email Hard-Block â€” disposable domain / no-MX. [Bug #6 fix]
+    // ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© ØªÙ…Ø§Ù…Ù‹Ø§ Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø±. ØªØ¹Ù…Ù„ Ø¨Ø´ÙƒÙ„ Ù…Ø·Ø§Ø¨Ù‚ Ù„Ù‚Ø³Ù… 0c ÙÙŠ
+    // /evaluate â€” ÙˆØ¨Ø´ÙƒÙ„ Ù…ØªØ¹Ù…Ø¯ Ø¨Ø¯ÙˆÙ† Ø£ÙŠ Ø´Ø±Ø· Ø¹Ù„Ù‰ limitedScoringØŒ Ù„Ø£Ù† ÙˆÙ‚Øª
+    // Ù†ÙØ§Ø¯ Ø§Ù„ÙƒÙˆØªØ§ calculateRiskScore() Ø¨ÙŠÙ‚ÙÙ„ getEmailIntelligence() ØªÙ…Ø§Ù…Ù‹Ø§
+    // (Ø±Ø§Ø¬Ø¹ Ø§Ù„Ù€ Promise.allSettled Ø¬ÙˆÙ‡ calculateRiskScore) â€” ÙŠØ¹Ù†ÙŠ Ø£ÙˆØ±Ø¯Ø±
+    // Ø§Ù„Ù€ webhook ÙˆÙ‚ØªÙ‡Ø§ ÙƒØ§Ù† Ø¨ÙŠÙˆØµÙ„ Ù„Ù€ decision Ù†Ù‡Ø§Ø¦ÙŠ Ø¨Ø¯ÙˆÙ† Ø£ÙŠ Ø¥Ø´Ø§Ø±Ø© Ø¥ÙŠÙ…ÙŠÙ„
+    // Ø®Ø§Ù„ØµØŒ Ø­Ø§Ø¯ ÙˆÙ„Ø§ Ù†Ø§Ø¹Ù…. Ø§ØªØ­Ø·Øª Ø¨Ø¹Ø¯ whitelist (Ø£Ø±Ø®Øµ Ø¨ÙˆØ§Ø¨Ø©ØŒ bypass Ø§Ù„Ø£ÙˆÙ„)
+    // ÙˆÙ‚Ø¨Ù„ BIN-sequenceØŒ Ø¨Ù†ÙØ³ Ù…Ù†Ø·Ù‚ "Ø§Ù„Ø£Ø±Ø®Øµ ÙˆØ§Ù„Ø£ÙƒØ«Ø± Ø­Ø³Ù…Ù‹Ø§ Ø§Ù„Ø£ÙˆÙ„" Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù…
+    // ÙÙŠ /evaluate.
     if (extracted.email) {
       const webhookEmailHardBlock = await checkEmailHardBlock(extracted.email);
       if (webhookEmailHardBlock.blocked) {
@@ -2578,21 +2578,21 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // 7a3. Velocity Hard-Block — [Discovery 4 fix] ßÇäÊ ÛÇíÈÉ ÊãÇãğÇ ãä
-    // åĞÇ ÇáãÓÇÑ. checkVelocity() (äİÓ ÇáİäßÔä ÇáãÓÊÎÏã İí /evaluate's
-    // ŞÓã 1) ÈíİÍÕ CardTestAttempt — ãÍÇæáÇÊ ãÍÙæÑÉ ÓÇÈŞÉ áäİÓ IP/device
-    // ÎáÇá 10 ÏŞÇÆŞ. ŞÈá ÇáİíßÓ¡ burst ÓÑíÚ ÚÈÑ ÇáÜ webhook ßÇä ÈíæÕá
-    // áÜ calculateRiskScore() íÇÎÏ soft penalty ÈÓ (device_velocity_blocked
-    // flag Ìæå ÇáÜ score) — İÑŞ ÌæåÑí Úä hard 403 İæÑí¡ áÃä ÇáÜ soft
-    // penalty ããßä íÊæÇÒä ÈÜ positive signals (MAX_POSITIVE_BOOST) Ãæ
-    // íŞÚ İí Review ãÔ Block. ÇáÊÑÊíÈ åäÇ (ÈÚÏ email hard-block¡ ŞÈá
-    // BIN-sequence) ãØÇÈŞ áÜ /evaluate ÈÇáÍÑİ (ŞÓã 1 ŞÈá ŞÓã 1b).
+    // 7a3. Velocity Hard-Block â€” [Discovery 4 fix] ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© ØªÙ…Ø§Ù…Ù‹Ø§ Ù…Ù†
+    // Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø±. checkVelocity() (Ù†ÙØ³ Ø§Ù„ÙÙ†ÙƒØ´Ù† Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… ÙÙŠ /evaluate's
+    // Ù‚Ø³Ù… 1) Ø¨ÙŠÙØ­Øµ CardTestAttempt â€” Ù…Ø­Ø§ÙˆÙ„Ø§Øª Ù…Ø­Ø¸ÙˆØ±Ø© Ø³Ø§Ø¨Ù‚Ø© Ù„Ù†ÙØ³ IP/device
+    // Ø®Ù„Ø§Ù„ 10 Ø¯Ù‚Ø§Ø¦Ù‚. Ù‚Ø¨Ù„ Ø§Ù„ÙÙŠÙƒØ³ØŒ burst Ø³Ø±ÙŠØ¹ Ø¹Ø¨Ø± Ø§Ù„Ù€ webhook ÙƒØ§Ù† Ø¨ÙŠÙˆØµÙ„
+    // Ù„Ù€ calculateRiskScore() ÙŠØ§Ø®Ø¯ soft penalty Ø¨Ø³ (device_velocity_blocked
+    // flag Ø¬ÙˆÙ‡ Ø§Ù„Ù€ score) â€” ÙØ±Ù‚ Ø¬ÙˆÙ‡Ø±ÙŠ Ø¹Ù† hard 403 ÙÙˆØ±ÙŠØŒ Ù„Ø£Ù† Ø§Ù„Ù€ soft
+    // penalty Ù…Ù…ÙƒÙ† ÙŠØªÙˆØ§Ø²Ù† Ø¨Ù€ positive signals (MAX_POSITIVE_BOOST) Ø£Ùˆ
+    // ÙŠÙ‚Ø¹ ÙÙŠ Review Ù…Ø´ Block. Ø§Ù„ØªØ±ØªÙŠØ¨ Ù‡Ù†Ø§ (Ø¨Ø¹Ø¯ email hard-blockØŒ Ù‚Ø¨Ù„
+    // BIN-sequence) Ù…Ø·Ø§Ø¨Ù‚ Ù„Ù€ /evaluate Ø¨Ø§Ù„Ø­Ø±Ù (Ù‚Ø³Ù… 1 Ù‚Ø¨Ù„ Ù‚Ø³Ù… 1b).
     //
-    // deviceFingerprint åäÇ åí ÇáŞíãÉ ÇáÍŞíŞíÉ (ŞÈá fallback ÇáÜ
-    // `wc_${orderId}` ÊÍÊ İí ŞÓã ÇÓÊÎÑÇÌ riskRequest.deviceFingerprint) —
-    // ÚãÏğÇ¡ ãÔ riskRequest.deviceFingerprint. ÊãÑíÑ ÇáŞíãÉ ÇáÇÕØäÇÚíÉ
-    // åäÇ ãÔ ÎØÑ Ããäí (ßá ŞíãÉ İÑíÏÉ¡ ãÓÊÍíá ÊæÕá threshold ÇáÊßÑÇÑ) áßäåÇ
-    // ÊáæøË ÈíÇäÇÊ ÈáÇ İÇíÏÉ İí CardTestAttempt.
+    // deviceFingerprint Ù‡Ù†Ø§ Ù‡ÙŠ Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ø­Ù‚ÙŠÙ‚ÙŠØ© (Ù‚Ø¨Ù„ fallback Ø§Ù„Ù€
+    // `wc_${orderId}` ØªØ­Øª ÙÙŠ Ù‚Ø³Ù… Ø§Ø³ØªØ®Ø±Ø§Ø¬ riskRequest.deviceFingerprint) â€”
+    // Ø¹Ù…Ø¯Ù‹Ø§ØŒ Ù…Ø´ riskRequest.deviceFingerprint. ØªÙ…Ø±ÙŠØ± Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ø§ØµØ·Ù†Ø§Ø¹ÙŠØ©
+    // Ù‡Ù†Ø§ Ù…Ø´ Ø®Ø·Ø± Ø£Ù…Ù†ÙŠ (ÙƒÙ„ Ù‚ÙŠÙ…Ø© ÙØ±ÙŠØ¯Ø©ØŒ Ù…Ø³ØªØ­ÙŠÙ„ ØªÙˆØµÙ„ threshold Ø§Ù„ØªÙƒØ±Ø§Ø±) Ù„ÙƒÙ†Ù‡Ø§
+    // ØªÙ„ÙˆÙ‘Ø« Ø¨ÙŠØ§Ù†Ø§Øª Ø¨Ù„Ø§ ÙØ§ÙŠØ¯Ø© ÙÙŠ CardTestAttempt.
     const webhookVelocityCheck = await checkVelocity({
       ip: extracted.ipAddress,
       deviceFingerprint,
@@ -2603,7 +2603,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     if (webhookVelocityCheck.dbError) {
       logger.warn(
         { module: 'risk', endpoint: 'woocommerce-webhook', merchantId, fallbackBlocked: webhookVelocityCheck.blocked },
-        'Velocity check ran in degraded mode — CardTestAttempt query failed, local fallback used'
+        'Velocity check ran in degraded mode â€” CardTestAttempt query failed, local fallback used'
       );
       try {
         if (typeof prometheus.recordVelocityDbError === 'function') {
@@ -2658,7 +2658,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
      // 7b. BIN Sequence Detection
     if (extracted.bin) {
       // tenantId is required here for tenant-scoped storage in
-      // binSequenceDetector.js (CWE-653 fix) — merchantId is already
+      // binSequenceDetector.js (CWE-653 fix) â€” merchantId is already
       // resolved above from the authenticated tenant (req.tenant.id).
       const binSeq = await checkBINSequence({
         tenantId: merchantId,
@@ -2667,11 +2667,11 @@ router.post('/woocommerce-webhook', async (req, res) => {
         deviceFingerprint: riskRequest.deviceFingerprint
       });
       // tenantId resolved from the authenticated tenant (merchantId, derived
-      // from req.tenant.id via the webhook's requireAuth resolution above) —
+      // from req.tenant.id via the webhook's requireAuth resolution above) â€”
       // previously hardcoded to null, which meant BinSequenceAlert rows from
       // this path had no tenant association and were invisible to the
       // dashboard and to notifyBINSequenceAlert's tenant lookup.
-      // L-fix: same rationale as /evaluate above — layer 0 is a repeat
+      // L-fix: same rationale as /evaluate above â€” layer 0 is a repeat
       // rejection from an existing active block, not a new BIN detection.
       // Skip persistence to avoid inflating cardsCount with block-window
       // traffic instead of genuine distinct BINs.
@@ -2694,9 +2694,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
         }
 
         // storeId is now best-effort resolved above from X-WC-Webhook-Source
-        // (see resolveStoreIdBestEffort call near the top of this handler) —
+        // (see resolveStoreIdBestEffort call near the top of this handler) â€”
         // still null if the header was missing or unmatched, exactly as
-        // before. cardType remains always null — extractOrderData() does not
+        // before. cardType remains always null â€” extractOrderData() does not
         // capture a card-type field from the WooCommerce payload.
         try {
           const webhookBinSeqIncrementQuota = shouldIncrementQuota(merchantId, 'card_testing', webhookBinSeqCardBin || extracted.bin);
@@ -2728,34 +2728,34 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // 7c. Device Fingerprint Trust & Rotation Detection — [Discovery 4
-    // fix] ßÇäÊ ÛÇíÈÉ ÊãÇãğÇ ãä åĞÇ ÇáãÓÇÑ. webhookDeviceSignal ÇÊÚÑøİÊ
-    // İæŞ (æŞÊ İÍÕ deviceToken) áßä rotationCount İÖáÊ 0 ÏÇíãğÇ — ãİíÔ
-    // ßæÏ ßÇä ÈíÍÓÈåÇ Ãæ íÓÊÎÏãåÇ ááÍÙÑ. äİÓ ãäØŞíä ãÓÊŞáíä ãä /evaluate's
-    // ŞÓã 1c ÈÇáÍÑİ: (Ã) per-IP — ÚÏÏ device fingerprints ãÎÊáİÉ ãä äİÓ
-    // IP ÎáÇá ÓÇÚÉ¡ (È) global — ãÚÏá ÙåæÑ fingerprints ÌÏíÏÉ ßáíğÇ áåĞÇ
-    // ÇáÊÇÌÑ ÈÛÖ ÇáäÙÑ Úä IP.
+    // 7c. Device Fingerprint Trust & Rotation Detection â€” [Discovery 4
+    // fix] ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© ØªÙ…Ø§Ù…Ù‹Ø§ Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø±. webhookDeviceSignal Ø§ØªØ¹Ø±Ù‘ÙØª
+    // ÙÙˆÙ‚ (ÙˆÙ‚Øª ÙØ­Øµ deviceToken) Ù„ÙƒÙ† rotationCount ÙØ¶Ù„Øª 0 Ø¯Ø§ÙŠÙ…Ù‹Ø§ â€” Ù…ÙÙŠØ´
+    // ÙƒÙˆØ¯ ÙƒØ§Ù† Ø¨ÙŠØ­Ø³Ø¨Ù‡Ø§ Ø£Ùˆ ÙŠØ³ØªØ®Ø¯Ù…Ù‡Ø§ Ù„Ù„Ø­Ø¸Ø±. Ù†ÙØ³ Ù…Ù†Ø·Ù‚ÙŠÙ† Ù…Ø³ØªÙ‚Ù„ÙŠÙ† Ù…Ù† /evaluate's
+    // Ù‚Ø³Ù… 1c Ø¨Ø§Ù„Ø­Ø±Ù: (Ø£) per-IP â€” Ø¹Ø¯Ø¯ device fingerprints Ù…Ø®ØªÙ„ÙØ© Ù…Ù† Ù†ÙØ³
+    // IP Ø®Ù„Ø§Ù„ Ø³Ø§Ø¹Ø©ØŒ (Ø¨) global â€” Ù…Ø¹Ø¯Ù„ Ø¸Ù‡ÙˆØ± fingerprints Ø¬Ø¯ÙŠØ¯Ø© ÙƒÙ„ÙŠÙ‹Ø§ Ù„Ù‡Ø°Ø§
+    // Ø§Ù„ØªØ§Ø¬Ø± Ø¨ØºØ¶ Ø§Ù„Ù†Ø¸Ø± Ø¹Ù† IP.
     //
-    // ?? İÑŞ ÌæåÑí Úä /evaluate: deviceFingerprint åäÇ (ÇáãÊÛíøÑ ÇáÎÇã¡
-    // ŞÈá fallback ÇáÜ `wc_${orderId}` ÇáãõÓÊÎÏã İí riskRequest.deviceFingerprint
-    // ÊÍÊ) åí ÇáãÓÊÎÏãÉ ÚãÏğÇ¡ ãÔ riskRequest.deviceFingerprint — áÃä
-    // ÇáÜ fallback ÇáÇÕØäÇÚí İÑíÏ áßá ÃæÑÏÑ ÈÇáÊÕãíã¡ İÇÓÊÎÏÇãå İí İÍÕ
-    // "distinct fingerprints" ßÇä åíÎáŞ false positive ÍŞíŞí: Ãí ÊÇÌÑ
-    // ÈÏæä JS pixel ÍŞíŞí åíÈŞì ÚäÏå "fingerprint ÌÏíÏ" ãÚ ßá ÃæÑÏÑ
-    // ÔÑÚí¡ æíæÕá áÚÊÈÉ ÇáÍÙÑ ÈÓÑÚÉ Úáì Ãí ÍÌã ÊÑÇİíß ØÈíÚí. ßãÇä: ÚãæÏ
-    // Order.deviceFingerprint ÈíÊÎÒä İíå ÇáŞíãÉ ÇáÇÕØäÇÚíÉ Ïí ÈÇáİÚá ãä
-    // ßá ÃæÑÏÑ webhook ÓÇÈŞ (ÑÇÌÚ ŞÓã 12 ÊÍÊ) — íÚäí ÇáÇÓÊÚáÇã äİÓå
-    // áÇÒã íÓÊËäíåÇ¡ ãÔ ÈÓ ãäØŞ ÇáÚÏø ÇáÍÇáí¡ áÅä ÇáÊáæøË ãæÌæÏ ÊÇÑíÎíğÇ
-    // İí ÇáÏÇÊÇÈíÒ ãÓÈŞğÇ.
+    // âš ï¸ ÙØ±Ù‚ Ø¬ÙˆÙ‡Ø±ÙŠ Ø¹Ù† /evaluate: deviceFingerprint Ù‡Ù†Ø§ (Ø§Ù„Ù…ØªØºÙŠÙ‘Ø± Ø§Ù„Ø®Ø§Ù…ØŒ
+    // Ù‚Ø¨Ù„ fallback Ø§Ù„Ù€ `wc_${orderId}` Ø§Ù„Ù…ÙØ³ØªØ®Ø¯Ù… ÙÙŠ riskRequest.deviceFingerprint
+    // ØªØ­Øª) Ù‡ÙŠ Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù…Ø© Ø¹Ù…Ø¯Ù‹Ø§ØŒ Ù…Ø´ riskRequest.deviceFingerprint â€” Ù„Ø£Ù†
+    // Ø§Ù„Ù€ fallback Ø§Ù„Ø§ØµØ·Ù†Ø§Ø¹ÙŠ ÙØ±ÙŠØ¯ Ù„ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø± Ø¨Ø§Ù„ØªØµÙ…ÙŠÙ…ØŒ ÙØ§Ø³ØªØ®Ø¯Ø§Ù…Ù‡ ÙÙŠ ÙØ­Øµ
+    // "distinct fingerprints" ÙƒØ§Ù† Ù‡ÙŠØ®Ù„Ù‚ false positive Ø­Ù‚ÙŠÙ‚ÙŠ: Ø£ÙŠ ØªØ§Ø¬Ø±
+    // Ø¨Ø¯ÙˆÙ† JS pixel Ø­Ù‚ÙŠÙ‚ÙŠ Ù‡ÙŠØ¨Ù‚Ù‰ Ø¹Ù†Ø¯Ù‡ "fingerprint Ø¬Ø¯ÙŠØ¯" Ù…Ø¹ ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø±
+    // Ø´Ø±Ø¹ÙŠØŒ ÙˆÙŠÙˆØµÙ„ Ù„Ø¹ØªØ¨Ø© Ø§Ù„Ø­Ø¸Ø± Ø¨Ø³Ø±Ø¹Ø© Ø¹Ù„Ù‰ Ø£ÙŠ Ø­Ø¬Ù… ØªØ±Ø§ÙÙŠÙƒ Ø·Ø¨ÙŠØ¹ÙŠ. ÙƒÙ…Ø§Ù†: Ø¹Ù…ÙˆØ¯
+    // Order.deviceFingerprint Ø¨ÙŠØªØ®Ø²Ù† ÙÙŠÙ‡ Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ø§ØµØ·Ù†Ø§Ø¹ÙŠØ© Ø¯ÙŠ Ø¨Ø§Ù„ÙØ¹Ù„ Ù…Ù†
+    // ÙƒÙ„ Ø£ÙˆØ±Ø¯Ø± webhook Ø³Ø§Ø¨Ù‚ (Ø±Ø§Ø¬Ø¹ Ù‚Ø³Ù… 12 ØªØ­Øª) â€” ÙŠØ¹Ù†ÙŠ Ø§Ù„Ø§Ø³ØªØ¹Ù„Ø§Ù… Ù†ÙØ³Ù‡
+    // Ù„Ø§Ø²Ù… ÙŠØ³ØªØ«Ù†ÙŠÙ‡Ø§ØŒ Ù…Ø´ Ø¨Ø³ Ù…Ù†Ø·Ù‚ Ø§Ù„Ø¹Ø¯Ù‘ Ø§Ù„Ø­Ø§Ù„ÙŠØŒ Ù„Ø¥Ù† Ø§Ù„ØªÙ„ÙˆÙ‘Ø« Ù…ÙˆØ¬ÙˆØ¯ ØªØ§Ø±ÙŠØ®ÙŠÙ‹Ø§
+    // ÙÙŠ Ø§Ù„Ø¯Ø§ØªØ§Ø¨ÙŠØ² Ù…Ø³Ø¨Ù‚Ù‹Ø§.
     if (extracted.ipAddress) {
-      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour — matches /evaluate's own window
+      const ROTATION_WINDOW_MS = 60 * 60 * 1000; // 1 hour â€” matches /evaluate's own window
       const ROTATION_BLOCK_THRESHOLD = 6; // 6+ distinct REAL device fingerprints from one IP in 1h
       const rotationWindowStart = new Date(Date.now() - ROTATION_WINDOW_MS);
 
-      // [TOCTOU fix] äİÓ ÇáÂáíÉ ÇáĞÑíÉ ÇáãÓÊÎÏãÉ İí /evaluate's 1c ÈÇáÍÑİ
-      // — äİÓ scope ('ip_rotation') æäİÓ ÕíÛÉ groupKey (ÇáÜ IP ÇáÎÇã) ÚãÏğÇ¡
-      // ÚÔÇä ØáÈ ãä åäÇ æØáÈ ãä /evaluate áäİÓ ÇáÊÇÌÑ/ÇáÜ IP íÊÕÇÑÚæÇ Úáì
-      // äİÓ ÇáÜ advisory lock ÈÏá ãÇ íÊÕÑİæÇ ßãÕÏÑíä ãäÚÒáíä Úä ÈÚÖ.
+      // [TOCTOU fix] Ù†ÙØ³ Ø§Ù„Ø¢Ù„ÙŠØ© Ø§Ù„Ø°Ø±ÙŠØ© Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù…Ø© ÙÙŠ /evaluate's 1c Ø¨Ø§Ù„Ø­Ø±Ù
+      // â€” Ù†ÙØ³ scope ('ip_rotation') ÙˆÙ†ÙØ³ ØµÙŠØºØ© groupKey (Ø§Ù„Ù€ IP Ø§Ù„Ø®Ø§Ù…) Ø¹Ù…Ø¯Ù‹Ø§ØŒ
+      // Ø¹Ø´Ø§Ù† Ø·Ù„Ø¨ Ù…Ù† Ù‡Ù†Ø§ ÙˆØ·Ù„Ø¨ Ù…Ù† /evaluate Ù„Ù†ÙØ³ Ø§Ù„ØªØ§Ø¬Ø±/Ø§Ù„Ù€ IP ÙŠØªØµØ§Ø±Ø¹ÙˆØ§ Ø¹Ù„Ù‰
+      // Ù†ÙØ³ Ø§Ù„Ù€ advisory lock Ø¨Ø¯Ù„ Ù…Ø§ ÙŠØªØµØ±ÙÙˆØ§ ÙƒÙ…ØµØ¯Ø±ÙŠÙ† Ù…Ù†Ø¹Ø²Ù„ÙŠÙ† Ø¹Ù† Ø¨Ø¹Ø¶.
       const webhookIsEligibleDevice = !!deviceFingerprint && !deviceFingerprint.startsWith(WC_SYNTHETIC_DEVICE_PREFIX);
       const webhookRotationGate = await atomicIdentityGate.checkAndReserve({
         merchantId,
@@ -2793,7 +2793,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
             storeId:         req.storeId ?? null,
             cardBin:         webhookRotCardBin,
             cardType:        null,
-            reason:          'velocity', // reuses the existing VALID_REASONS enum — same choice as /evaluate
+            reason:          'velocity', // reuses the existing VALID_REASONS enum â€” same choice as /evaluate
             ipHash:          webhookRotIpHash,
             amountAttempted: webhookRotAmount,
             riskScore:       null,
@@ -2815,19 +2815,19 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }
 
-    // Global rotation — [Discovery 4 fix] ãİíÔ ÊáæøË ÊÇÑíÎí åäÇ (in-memory
-    // ãÔ DB)¡ áßä áÇÒã äÊÌäÈ ÊÓÌíá ÇáÜ synthetic fallback ID ßÜ "fingerprint
-    // ÌÏíÏ" İí ßá ãÑÉ — ÈæÇÈÉ `if (deviceFingerprint)` (ÇáŞíãÉ ÇáÍŞíŞíÉ)
-    // ÈÓ ßİÇíÉ åäÇ¡ ÚßÓ ÇáİÍÕ İæŞ Çááí ÇÍÊÇÌ İíßÓ Úáì ãÓÊæì ÇáÇÓÊÚáÇã ßãÇä.
+    // Global rotation â€” [Discovery 4 fix] Ù…ÙÙŠØ´ ØªÙ„ÙˆÙ‘Ø« ØªØ§Ø±ÙŠØ®ÙŠ Ù‡Ù†Ø§ (in-memory
+    // Ù…Ø´ DB)ØŒ Ù„ÙƒÙ† Ù„Ø§Ø²Ù… Ù†ØªØ¬Ù†Ø¨ ØªØ³Ø¬ÙŠÙ„ Ø§Ù„Ù€ synthetic fallback ID ÙƒÙ€ "fingerprint
+    // Ø¬Ø¯ÙŠØ¯" ÙÙŠ ÙƒÙ„ Ù…Ø±Ø© â€” Ø¨ÙˆØ§Ø¨Ø© `if (deviceFingerprint)` (Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ø­Ù‚ÙŠÙ‚ÙŠØ©)
+    // Ø¨Ø³ ÙƒÙØ§ÙŠØ© Ù‡Ù†Ø§ØŒ Ø¹ÙƒØ³ Ø§Ù„ÙØ­Øµ ÙÙˆÙ‚ Ø§Ù„Ù„ÙŠ Ø§Ø­ØªØ§Ø¬ ÙÙŠÙƒØ³ Ø¹Ù„Ù‰ Ù…Ø³ØªÙˆÙ‰ Ø§Ù„Ø§Ø³ØªØ¹Ù„Ø§Ù… ÙƒÙ…Ø§Ù†.
     if (deviceFingerprint) {
       const webhookGlobalRotation = recordAndCheckGlobalRotation(merchantId, deviceFingerprint);
 
       if (webhookGlobalRotation.level === 'block') {
-        // NOTE: 'challenge' level is deliberately NOT handled here — this
+        // NOTE: 'challenge' level is deliberately NOT handled here â€” this
         // endpoint fires asynchronously after WooCommerce has already
         // created the order (no live customer session to present an OTP
         // to). It falls through and scores normally, same as 'clear'/
-        // 'soft'. See design discussion — confirm before changing.
+        // 'soft'. See design discussion â€” confirm before changing.
         let webhookGlobalRotCardBin = null;
         if (extracted.bin != null) {
           const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
@@ -2871,10 +2871,10 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
     // End 7c. Device Fingerprint Trust & Rotation Detection
 
-    // 7d. Raw (Unconditional) Device Velocity — äİÓ ãäØŞ /evaluate's
-    // ŞÓã 1d ÈÇáÍÑİ. deviceFingerprint åäÇ ÇáÎÇã ÚãÏğÇ (ŞÈá fallback
-    // wc_${orderId}) — äİÓ ÊÍĞíÑ ŞÓã 7c İæŞ: ÇáŞíãÉ ÇáÇÕØäÇÚíÉ İÑíÏÉ áßá
-    // ÃæÑÏÑ ÈÇáÊÕãíã¡ İÇÓÊÎÏÇãåÇ åäÇ ßÇä åíÎáŞ false positive ÍŞíŞí.
+    // 7d. Raw (Unconditional) Device Velocity â€” Ù†ÙØ³ Ù…Ù†Ø·Ù‚ /evaluate's
+    // Ù‚Ø³Ù… 1d Ø¨Ø§Ù„Ø­Ø±Ù. deviceFingerprint Ù‡Ù†Ø§ Ø§Ù„Ø®Ø§Ù… Ø¹Ù…Ø¯Ù‹Ø§ (Ù‚Ø¨Ù„ fallback
+    // wc_${orderId}) â€” Ù†ÙØ³ ØªØ­Ø°ÙŠØ± Ù‚Ø³Ù… 7c ÙÙˆÙ‚: Ø§Ù„Ù‚ÙŠÙ…Ø© Ø§Ù„Ø§ØµØ·Ù†Ø§Ø¹ÙŠØ© ÙØ±ÙŠØ¯Ø© Ù„ÙƒÙ„
+    // Ø£ÙˆØ±Ø¯Ø± Ø¨Ø§Ù„ØªØµÙ…ÙŠÙ…ØŒ ÙØ§Ø³ØªØ®Ø¯Ø§Ù…Ù‡Ø§ Ù‡Ù†Ø§ ÙƒØ§Ù† Ù‡ÙŠØ®Ù„Ù‚ false positive Ø­Ù‚ÙŠÙ‚ÙŠ.
     if (deviceFingerprint) {
       const webhookRawDeviceVelocity = await checkRawDeviceVelocity(merchantId, deviceFingerprint);
       if (webhookRawDeviceVelocity.blocked) {
@@ -2976,9 +2976,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
       riskLevel: o.riskLevel,
       cardBinPrefix: o.cardBinPrefix,
     }));
-    // [Undefined-OR fix] äİÓ İíßÓ /evaluate ÈÇáÍÑİ — riskRequest.deviceFingerprint
-    // ÏÇíãğÇ truthy (fallback wc_${orderId} ãÖãæä) İãÍÊÇÌÔ ÍÑÇÓÉ¡ áßä
-    // normalizedExtractedEmail æextracted.ipAddress ããßä íßæäæÇ undefined/null.
+    // [Undefined-OR fix] Ù†ÙØ³ ÙÙŠÙƒØ³ /evaluate Ø¨Ø§Ù„Ø­Ø±Ù â€” riskRequest.deviceFingerprint
+    // Ø¯Ø§ÙŠÙ…Ù‹Ø§ truthy (fallback wc_${orderId} Ù…Ø¶Ù…ÙˆÙ†) ÙÙ…Ø­ØªØ§Ø¬Ø´ Ø­Ø±Ø§Ø³Ø©ØŒ Ù„ÙƒÙ†
+    // normalizedExtractedEmail Ùˆextracted.ipAddress Ù…Ù…ÙƒÙ† ÙŠÙƒÙˆÙ†ÙˆØ§ undefined/null.
     const webhookDisputeOrConditions = [];
     if (normalizedExtractedEmail) webhookDisputeOrConditions.push({ order: { normalizedEmail: normalizedExtractedEmail } });
     webhookDisputeOrConditions.push({ order: { deviceFingerprint: riskRequest.deviceFingerprint } });
@@ -2993,24 +2993,24 @@ router.post('/woocommerce-webhook', async (req, res) => {
       include: { order: true },
       take: 200,
     });
-    // [Discovery 1 fix] ÇáÈæÇÈÉ ÇáãÈßÑÉ (7a1) İæŞ ÈÊÑİÖ Ãí ÊØÇÈŞ İÚáí ÈÜ
-    // 403 ŞÈá ãÇ äæÕá åäÇ — íÚäí Ãí ÃæÑÏÑ æÕá ááÓØÑ Ïå ãÓÊÍíá íßæä
-    // ãÊØÇÈŞ ãÚ ÈáÇß áíÓÊ ÈäİÓ ÇáÔÑæØ. ÇáÇÓÊÚáÇã ÇáŞÏíã åäÇ (blacklistOr +
-    // findMany) ßÇä DB call ãßÑÑ ÈáÇ İÇíÏÉ — äİÓ ãäØŞ /evaluate's
-    // `const blacklist = [];` ÈÚÏ 0b ÈÇáÍÑİ.
+    // [Discovery 1 fix] Ø§Ù„Ø¨ÙˆØ§Ø¨Ø© Ø§Ù„Ù…Ø¨ÙƒØ±Ø© (7a1) ÙÙˆÙ‚ Ø¨ØªØ±ÙØ¶ Ø£ÙŠ ØªØ·Ø§Ø¨Ù‚ ÙØ¹Ù„ÙŠ Ø¨Ù€
+    // 403 Ù‚Ø¨Ù„ Ù…Ø§ Ù†ÙˆØµÙ„ Ù‡Ù†Ø§ â€” ÙŠØ¹Ù†ÙŠ Ø£ÙŠ Ø£ÙˆØ±Ø¯Ø± ÙˆØµÙ„ Ù„Ù„Ø³Ø·Ø± Ø¯Ù‡ Ù…Ø³ØªØ­ÙŠÙ„ ÙŠÙƒÙˆÙ†
+    // Ù…ØªØ·Ø§Ø¨Ù‚ Ù…Ø¹ Ø¨Ù„Ø§Ùƒ Ù„ÙŠØ³Øª Ø¨Ù†ÙØ³ Ø§Ù„Ø´Ø±ÙˆØ·. Ø§Ù„Ø§Ø³ØªØ¹Ù„Ø§Ù… Ø§Ù„Ù‚Ø¯ÙŠÙ… Ù‡Ù†Ø§ (blacklistOr +
+    // findMany) ÙƒØ§Ù† DB call Ù…ÙƒØ±Ø± Ø¨Ù„Ø§ ÙØ§ÙŠØ¯Ø© â€” Ù†ÙØ³ Ù…Ù†Ø·Ù‚ /evaluate's
+    // `const blacklist = [];` Ø¨Ø¹Ø¯ 0b Ø¨Ø§Ù„Ø­Ø±Ù.
     const blacklist = [];
 
     // 9. Velocity counts
     const last1h = new Date(Date.now() - 60 * 60 * 1000);
     const last6h = new Date(Date.now() - 6 * 60 * 60 * 1000);
     const last24h = new Date(Date.now() - 24 * 60 * 60 * 1000);
-    // [False-positive fix] ÑÇÌÚ äİÓ ÇáÊÚáíŞ İí /evaluate ÃÚáÇå — äİÓ
-    // ÇáãäØŞ ÈÇáÍÑİ¡ áÇÒã íÊÕáÍ åäÇ ßãÇä ÚÔÇä ÃæÑÏÑÇÊ ÇáÜ webhook
-    // (Classic Checkout ÅáÎ) ÊÇÎÏ äİÓ ÇáãÚÇãáÉ.
+    // [False-positive fix] Ø±Ø§Ø¬Ø¹ Ù†ÙØ³ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ ÙÙŠ /evaluate Ø£Ø¹Ù„Ø§Ù‡ â€” Ù†ÙØ³
+    // Ø§Ù„Ù…Ù†Ø·Ù‚ Ø¨Ø§Ù„Ø­Ø±ÙØŒ Ù„Ø§Ø²Ù… ÙŠØªØµÙ„Ø­ Ù‡Ù†Ø§ ÙƒÙ…Ø§Ù† Ø¹Ø´Ø§Ù† Ø£ÙˆØ±Ø¯Ø±Ø§Øª Ø§Ù„Ù€ webhook
+    // (Classic Checkout Ø¥Ù„Ø®) ØªØ§Ø®Ø¯ Ù†ÙØ³ Ø§Ù„Ù…Ø¹Ø§Ù…Ù„Ø©.
     const deviceVelocityCount = riskRequest.deviceFingerprint ? await db.order.count({
       where: { merchantId, deviceFingerprint: riskRequest.deviceFingerprint, createdAt: { gte: last1h }, decision: { not: 'approve' } }
     }) : 0;
-    // [False-positive fix] ÑÇÌÚ äİÓ ÇáÊÚáíŞ İí /evaluate ÃÚáÇå.
+    // [False-positive fix] Ø±Ø§Ø¬Ø¹ Ù†ÙØ³ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ ÙÙŠ /evaluate Ø£Ø¹Ù„Ø§Ù‡.
     const ipVelocityCount = extracted.ipAddress ? await db.order.count({
       where: { merchantId, ipAddress: extracted.ipAddress, createdAt: { gte: last24h }, decision: { not: 'approve' } }
     }) : 0;
@@ -3018,9 +3018,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
       where: { merchantId, email: extracted.email, createdAt: { gte: last6h } }
     }) : 0;
 
-    // [BIN Velocity fix] äİÓ ãäØŞ /evaluate — ÈÏæä storeScope ÚãÏğÇ¡ ÇÊÓÇŞğÇ
-    // ãÚ ÈÇŞí ÚÏøÇÏÇÊ ÇáÓÑÚÉ ÇáËáÇËÉ İí åĞÇ ÇáÜ endpoint ÊÍÏíÏğÇ (ÊäÇŞÖåã
-    // ãÚ /evaluate ÈÎÕæÕ storeScope ãæÌæÏ ÈÇáİÚá ãä ŞÈá æÎÇÑÌ äØÇŞ åĞÇ ÇáİíßÓ).
+    // [BIN Velocity fix] Ù†ÙØ³ Ù…Ù†Ø·Ù‚ /evaluate â€” Ø¨Ø¯ÙˆÙ† storeScope Ø¹Ù…Ø¯Ù‹Ø§ØŒ Ø§ØªØ³Ø§Ù‚Ù‹Ø§
+    // Ù…Ø¹ Ø¨Ø§Ù‚ÙŠ Ø¹Ø¯Ù‘Ø§Ø¯Ø§Øª Ø§Ù„Ø³Ø±Ø¹Ø© Ø§Ù„Ø«Ù„Ø§Ø«Ø© ÙÙŠ Ù‡Ø°Ø§ Ø§Ù„Ù€ endpoint ØªØ­Ø¯ÙŠØ¯Ù‹Ø§ (ØªÙ†Ø§Ù‚Ø¶Ù‡Ù…
+    // Ù…Ø¹ /evaluate Ø¨Ø®ØµÙˆØµ storeScope Ù…ÙˆØ¬ÙˆØ¯ Ø¨Ø§Ù„ÙØ¹Ù„ Ù…Ù† Ù‚Ø¨Ù„ ÙˆØ®Ø§Ø±Ø¬ Ù†Ø·Ø§Ù‚ Ù‡Ø°Ø§ Ø§Ù„ÙÙŠÙƒØ³).
     let webhookCardBinPrefix = null;
     if (extracted.bin != null) {
       const b = String(extracted.bin).replace(/\D/g, '').slice(0, 6);
@@ -3069,8 +3069,8 @@ router.post('/woocommerce-webhook', async (req, res) => {
       merchantId,
       true,  // saveEvaluation
       { deviceVelocityCount, ipVelocityCount, emailVelocityCount, binVelocityCount10min, binVelocityCount1h, binVelocityCount24h },
-      null,            // cardHashRecord — not available on this path
-      webhookMerchantConfig, // threads deviceSignal into deviceTrustFactor — see above
+      null,            // cardHashRecord â€” not available on this path
+      webhookMerchantConfig, // threads deviceSignal into deviceTrustFactor â€” see above
       limitedScoring
     );
 
@@ -3088,17 +3088,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
       deviceVelocityCount,
       ipVelocityCount,
       emailVelocityCount,
-      // [BIN Velocity learning-loop fix] ÑÇÌÚ äİÓ ÇáÊÚáíŞ İí /evaluate İæŞ
-      // — binVelocityCount10min/1h/24h ãÍÓæÈÉ ÈÇáİÚá İæŞ (ŞÓã "BIN Velocity
-      // fix") æãõãÑÑÉ áÜ calculateRiskScore ÚÈÑ externalVelocity¡ áßä ßÇäÊ
-      // ÛÇíÈÉ ãä åäÇ İãİíÔ Ãí ÈíÇäÇÊ ÊÚáøã ÊæÕá SignalStat ãä ãÓÇÑ ÇáÜ webhook.
+      // [BIN Velocity learning-loop fix] Ø±Ø§Ø¬Ø¹ Ù†ÙØ³ Ø§Ù„ØªØ¹Ù„ÙŠÙ‚ ÙÙŠ /evaluate ÙÙˆÙ‚
+      // â€” binVelocityCount10min/1h/24h Ù…Ø­Ø³ÙˆØ¨Ø© Ø¨Ø§Ù„ÙØ¹Ù„ ÙÙˆÙ‚ (Ù‚Ø³Ù… "BIN Velocity
+      // fix") ÙˆÙ…ÙÙ…Ø±Ø±Ø© Ù„Ù€ calculateRiskScore Ø¹Ø¨Ø± externalVelocityØŒ Ù„ÙƒÙ† ÙƒØ§Ù†Øª
+      // ØºØ§ÙŠØ¨Ø© Ù…Ù† Ù‡Ù†Ø§ ÙÙ…ÙÙŠØ´ Ø£ÙŠ Ø¨ÙŠØ§Ù†Ø§Øª ØªØ¹Ù„Ù‘Ù… ØªÙˆØµÙ„ SignalStat Ù…Ù† Ù…Ø³Ø§Ø± Ø§Ù„Ù€ webhook.
       binVelocityCount10min,
       binVelocityCount1h,
       binVelocityCount24h,
       shippingBillingMismatch: extracted.billingCountry !== extracted.shippingCountry,
-      // [Bug #5 fix] ßÇäÊ hardcoded false. ÚãáíğÇ áÓå low-impact (ÑÇÌÚ
-      // ADR-0 — bin ãÈíæÕáÔ áÜ webhook İí ÇáÅäÊÇÌ ÃÕáğÇ)¡ áßä áæ bin æÕá
-      // ãÓÊŞÈáğÇ (custom integration¡ ÅáÎ) ÇáİÍÕ ÏáæŞÊí ÕÍíÍ.
+      // [Bug #5 fix] ÙƒØ§Ù†Øª hardcoded false. Ø¹Ù…Ù„ÙŠÙ‹Ø§ Ù„Ø³Ù‡ low-impact (Ø±Ø§Ø¬Ø¹
+      // ADR-0 â€” bin Ù…Ø¨ÙŠÙˆØµÙ„Ø´ Ù„Ù€ webhook ÙÙŠ Ø§Ù„Ø¥Ù†ØªØ§Ø¬ Ø£ØµÙ„Ù‹Ø§)ØŒ Ù„ÙƒÙ† Ù„Ùˆ bin ÙˆØµÙ„
+      // Ù…Ø³ØªÙ‚Ø¨Ù„Ù‹Ø§ (custom integrationØŒ Ø¥Ù„Ø®) Ø§Ù„ÙØ­Øµ Ø¯Ù„ÙˆÙ‚ØªÙŠ ØµØ­ÙŠØ­.
       binIssuerMismatch: riskResult.binIntel && riskResult.binIntel.issuerCountry !== extracted.billingCountry,
       amountAnomaly: (riskResult.computedSignals?.orderMultiple || 0) >= 3,
       ipIntel: riskResult.ipIntel || null,
@@ -3111,17 +3111,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
     };
 
     // 12. Save order and risk evaluation
-    // [Concurrency fix] ÇáßÊÇÈÉ ãÍãíÉ ÈÜ pg_advisory_xact_lock Úáì
-    // (merchantId, orderId) + double-checked locking: ÈÚÏ ÃÎĞ ÇáŞİá äÚíÏ
-    // İÍÕ existingOrder. áæ ãæÌæÏ ÈÇáİÚá (ØáÈ ãÊÒÇãä ÓÈŞäÇ æßÊÈ ÃËäÇÁ
-    // ÇäÊÙÇÑäÇ ÇáŞİá)¡ äÊæŞİ Úä ÇáßÊÇÈÉ æäÚÊãÏ Úáì äÊíÌÊå ÇáãÎÒóøäÉ ÈÏá ãÇ
-    // äßÊÈ İæŞåÇ ÈäÊíÌÊäÇ ÇáãÍÓæÈÉ ÈÔßá ãÓÊŞá — åĞÇ íãäÚ last-write-wins
-    // ÇáãÄßÏ ÈÇáÇÎÊÈÇÑ (20 ØáÈ ãÊÒÇãä¡ 90% ÑÏæÇ score=70 áßä ÇáãÎÒóøä İÚáíğÇ
-    // 47). ÇáŞİá transaction-scoped İíÊÍÑÑ ÊáŞÇÆíğÇ ÚäÏ commit/rollback.
-    // Trade-off ãæËŞ: åĞÇ áÇ íãäÚ double-compute (ßá ØáÈ áÓå ÈíÍÓÈ
-    // calculateRiskScore() ÈÔßá ãÓÊŞá ŞÈá ÇáæÕæá åäÇ) — İŞØ íÖãä Ãä ÇáäÊíÌÉ
-    // ÇáäåÇÆíÉ ÇáãÎÒóøäÉ æÇáãÑÌÚÉ ááÚãíá ÊßæäÇä áäİÓ ÇáÍÓÇÈ ÏÇÆãğÇ.
-    let webhookRaceWinner = null; // áæ ÑÇÕÏíä race¡ åäÇ äÍØ äÊíÌÉ ÇáİÇÆÒ ÇáİÚáí
+    // [Concurrency fix] Ø§Ù„ÙƒØªØ§Ø¨Ø© Ù…Ø­Ù…ÙŠØ© Ø¨Ù€ pg_advisory_xact_lock Ø¹Ù„Ù‰
+    // (merchantId, orderId) + double-checked locking: Ø¨Ø¹Ø¯ Ø£Ø®Ø° Ø§Ù„Ù‚ÙÙ„ Ù†Ø¹ÙŠØ¯
+    // ÙØ­Øµ existingOrder. Ù„Ùˆ Ù…ÙˆØ¬ÙˆØ¯ Ø¨Ø§Ù„ÙØ¹Ù„ (Ø·Ù„Ø¨ Ù…ØªØ²Ø§Ù…Ù† Ø³Ø¨Ù‚Ù†Ø§ ÙˆÙƒØªØ¨ Ø£Ø«Ù†Ø§Ø¡
+    // Ø§Ù†ØªØ¸Ø§Ø±Ù†Ø§ Ø§Ù„Ù‚ÙÙ„)ØŒ Ù†ØªÙˆÙ‚Ù Ø¹Ù† Ø§Ù„ÙƒØªØ§Ø¨Ø© ÙˆÙ†Ø¹ØªÙ…Ø¯ Ø¹Ù„Ù‰ Ù†ØªÙŠØ¬ØªÙ‡ Ø§Ù„Ù…Ø®Ø²ÙÙ‘Ù†Ø© Ø¨Ø¯Ù„ Ù…Ø§
+    // Ù†ÙƒØªØ¨ ÙÙˆÙ‚Ù‡Ø§ Ø¨Ù†ØªÙŠØ¬ØªÙ†Ø§ Ø§Ù„Ù…Ø­Ø³ÙˆØ¨Ø© Ø¨Ø´ÙƒÙ„ Ù…Ø³ØªÙ‚Ù„ â€” Ù‡Ø°Ø§ ÙŠÙ…Ù†Ø¹ last-write-wins
+    // Ø§Ù„Ù…Ø¤ÙƒØ¯ Ø¨Ø§Ù„Ø§Ø®ØªØ¨Ø§Ø± (20 Ø·Ù„Ø¨ Ù…ØªØ²Ø§Ù…Ù†ØŒ 90% Ø±Ø¯ÙˆØ§ score=70 Ù„ÙƒÙ† Ø§Ù„Ù…Ø®Ø²ÙÙ‘Ù† ÙØ¹Ù„ÙŠÙ‹Ø§
+    // 47). Ø§Ù„Ù‚ÙÙ„ transaction-scoped ÙÙŠØªØ­Ø±Ø± ØªÙ„Ù‚Ø§Ø¦ÙŠÙ‹Ø§ Ø¹Ù†Ø¯ commit/rollback.
+    // Trade-off Ù…ÙˆØ«Ù‚: Ù‡Ø°Ø§ Ù„Ø§ ÙŠÙ…Ù†Ø¹ double-compute (ÙƒÙ„ Ø·Ù„Ø¨ Ù„Ø³Ù‡ Ø¨ÙŠØ­Ø³Ø¨
+    // calculateRiskScore() Ø¨Ø´ÙƒÙ„ Ù…Ø³ØªÙ‚Ù„ Ù‚Ø¨Ù„ Ø§Ù„ÙˆØµÙˆÙ„ Ù‡Ù†Ø§) â€” ÙÙ‚Ø· ÙŠØ¶Ù…Ù† Ø£Ù† Ø§Ù„Ù†ØªÙŠØ¬Ø©
+    // Ø§Ù„Ù†Ù‡Ø§Ø¦ÙŠØ© Ø§Ù„Ù…Ø®Ø²ÙÙ‘Ù†Ø© ÙˆØ§Ù„Ù…Ø±Ø¬Ø¹Ø© Ù„Ù„Ø¹Ù…ÙŠÙ„ ØªÙƒÙˆÙ†Ø§Ù† Ù„Ù†ÙØ³ Ø§Ù„Ø­Ø³Ø§Ø¨ Ø¯Ø§Ø¦Ù…Ù‹Ø§.
+    let webhookRaceWinner = null; // Ù„Ùˆ Ø±Ø§ØµØ¯ÙŠÙ† raceØŒ Ù‡Ù†Ø§ Ù†Ø­Ø· Ù†ØªÙŠØ¬Ø© Ø§Ù„ÙØ§Ø¦Ø² Ø§Ù„ÙØ¹Ù„ÙŠ
 
     await db.$transaction(async (tx) => {
       await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${merchantId} || ':' || ${extracted.orderId}))`;
@@ -3133,7 +3133,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
 
       // [C4 fix] merchantId/storeId/orderId are now injected by
-      // upsertOrderByBusinessKey from the business key below — do not
+      // upsertOrderByBusinessKey from the business key below â€” do not
       // duplicate them inside create/update. req.storeId here comes from
       // resolveStoreIdBestEffort() via X-WC-Webhook-Source, set earlier
       // in this handler.
@@ -3142,9 +3142,9 @@ router.post('/woocommerce-webhook', async (req, res) => {
           amount: extracted.amount,
           currency: 'USD',
           email: extracted.email,
-          // [Bug #7 fix] ÑÇÌÚ ÊÚáíŞ /evaluate İæŞ — äİÓ ÇáãäØŞ ÈÇáÙÈØ.
+          // [Bug #7 fix] Ø±Ø§Ø¬Ø¹ ØªØ¹Ù„ÙŠÙ‚ /evaluate ÙÙˆÙ‚ â€” Ù†ÙØ³ Ø§Ù„Ù…Ù†Ø·Ù‚ Ø¨Ø§Ù„Ø¸Ø¨Ø·.
           normalizedEmail: extracted.email ? normalizeEmail(extracted.email) : null,
-          // [BIN Velocity fix] ÑÇÌÚ webhookCardBinPrefix İæŞ.
+          // [BIN Velocity fix] Ø±Ø§Ø¬Ø¹ webhookCardBinPrefix ÙÙˆÙ‚.
           cardBinPrefix: webhookCardBinPrefix,
           ipAddress: extracted.ipAddress,
           deviceFingerprint: riskRequest.deviceFingerprint,
@@ -3207,21 +3207,21 @@ router.post('/woocommerce-webhook', async (req, res) => {
       }
     }, { timeout: 15000, maxWait: 5000 });
 
-    // ?? Quota Counter: webhook risk-scoring block path ??????????????????
+    // â”€â”€ Quota Counter: webhook risk-scoring block path â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     // Second of two block-producing decision points on this route (the
     // first being the BIN-sequence early-return above). Without this,
     // blocks resolved via calculateRiskScore() through the webhook were
     // written to Order/RiskEvaluation but never counted in BlockedAttempt
-    // or monthlyBlockedCount — this closes that gap.
+    // or monthlyBlockedCount â€” this closes that gap.
     const webhookFinalDecision = riskResult.decision.includes('Approve') ? 'approve' : (riskResult.decision.includes('Review') ? 'review' : 'block');
 
-    // [Discovery 4 fix] ßÇäÊ ÛÇíÈÉ ãä åĞÇ ÇáãÓÇÑ — íÚäí Ãí åÌæã ßÇÑÏ
-    // ÊíÓÊäÌ Ìå ÈÇáßÇãá ÚÈÑ ÇáÜ webhook (ãÔ /evaluate) ãßÇäÔ ÈíÛĞøí
-    // CardTestAttempt ÎÇáÕ¡ İÜ checkVelocity() (ÇáãõÖÇİÉ İæŞ İí 7a3¡ æÃí
-    // äÏÇÁ ãÓÊŞÈáí ãä /evaluate áäİÓ IP/device) ßÇäÊ ÊİÖá ÚãíÇÁ Úä äÔÇØ
-    // ÍŞíŞí ÍÕá åäÇ. äİÓ ÔÑØ /evaluate ÈÇáÍÑİ — Ãí ŞÑÇÑ ÛíÑ approve
-    // (íÔãá review¡ áŞİá äİÓ ÇáİÌæÉ ÇáÏÇÆÑíÉ ÇáãæËŞÉ İí /evaluate).
-    // deviceFingerprint (ÇáÍŞíŞíÉ¡ áÇ ÇáÇÕØäÇÚíÉ) ÚãÏğÇ — ÑÇÌÚ ÊÚáíŞ 7c İæŞ.
+    // [Discovery 4 fix] ÙƒØ§Ù†Øª ØºØ§ÙŠØ¨Ø© Ù…Ù† Ù‡Ø°Ø§ Ø§Ù„Ù…Ø³Ø§Ø± â€” ÙŠØ¹Ù†ÙŠ Ø£ÙŠ Ù‡Ø¬ÙˆÙ… ÙƒØ§Ø±Ø¯
+    // ØªÙŠØ³ØªÙ†Ø¬ Ø¬Ù‡ Ø¨Ø§Ù„ÙƒØ§Ù…Ù„ Ø¹Ø¨Ø± Ø§Ù„Ù€ webhook (Ù…Ø´ /evaluate) Ù…ÙƒØ§Ù†Ø´ Ø¨ÙŠØºØ°Ù‘ÙŠ
+    // CardTestAttempt Ø®Ø§Ù„ØµØŒ ÙÙ€ checkVelocity() (Ø§Ù„Ù…ÙØ¶Ø§ÙØ© ÙÙˆÙ‚ ÙÙŠ 7a3ØŒ ÙˆØ£ÙŠ
+    // Ù†Ø¯Ø§Ø¡ Ù…Ø³ØªÙ‚Ø¨Ù„ÙŠ Ù…Ù† /evaluate Ù„Ù†ÙØ³ IP/device) ÙƒØ§Ù†Øª ØªÙØ¶Ù„ Ø¹Ù…ÙŠØ§Ø¡ Ø¹Ù† Ù†Ø´Ø§Ø·
+    // Ø­Ù‚ÙŠÙ‚ÙŠ Ø­ØµÙ„ Ù‡Ù†Ø§. Ù†ÙØ³ Ø´Ø±Ø· /evaluate Ø¨Ø§Ù„Ø­Ø±Ù â€” Ø£ÙŠ Ù‚Ø±Ø§Ø± ØºÙŠØ± approve
+    // (ÙŠØ´Ù…Ù„ reviewØŒ Ù„Ù‚ÙÙ„ Ù†ÙØ³ Ø§Ù„ÙØ¬ÙˆØ© Ø§Ù„Ø¯Ø§Ø¦Ø±ÙŠØ© Ø§Ù„Ù…ÙˆØ«Ù‚Ø© ÙÙŠ /evaluate).
+    // deviceFingerprint (Ø§Ù„Ø­Ù‚ÙŠÙ‚ÙŠØ©ØŒ Ù„Ø§ Ø§Ù„Ø§ØµØ·Ù†Ø§Ø¹ÙŠØ©) Ø¹Ù…Ø¯Ù‹Ø§ â€” Ø±Ø§Ø¬Ø¹ ØªØ¹Ù„ÙŠÙ‚ 7c ÙÙˆÙ‚.
     if (webhookFinalDecision !== 'approve') {
       recordFailedAttempt({
         ip: extracted.ipAddress,
@@ -3274,17 +3274,17 @@ router.post('/woocommerce-webhook', async (req, res) => {
     }
 
     // Return response
-    // [Concurrency fix] áæ ÍÕá race æØáÈ ãÊÒÇãä ÓÈŞäÇ ÈÇáßÊÇÈÉ
-    // (webhookRaceWinner !== null)¡ äÑÌøÚ ÇáŞíã ÇáãÎÒóøäÉ ÇáİÚáíÉ ÈÏá
-    // riskResult ÇáãÍÓæÈ ãÍáíğÇ — íÖãä ÊØÇÈŞ ÇáÑÏ ãÚ ÇáÜ DB 100% ÍÊì ÊÍÊ
-    // ÊÒÇãä ÍŞíŞí¡ ãÔ ÈÓ İí ÍÇáÉ ÇáßÊÇÈÉ ÇáØÇÒÌÉ ÇáÚÇÏíÉ.
+    // [Concurrency fix] Ù„Ùˆ Ø­ØµÙ„ race ÙˆØ·Ù„Ø¨ Ù…ØªØ²Ø§Ù…Ù† Ø³Ø¨Ù‚Ù†Ø§ Ø¨Ø§Ù„ÙƒØªØ§Ø¨Ø©
+    // (webhookRaceWinner !== null)ØŒ Ù†Ø±Ø¬Ù‘Ø¹ Ø§Ù„Ù‚ÙŠÙ… Ø§Ù„Ù…Ø®Ø²ÙÙ‘Ù†Ø© Ø§Ù„ÙØ¹Ù„ÙŠØ© Ø¨Ø¯Ù„
+    // riskResult Ø§Ù„Ù…Ø­Ø³ÙˆØ¨ Ù…Ø­Ù„ÙŠÙ‹Ø§ â€” ÙŠØ¶Ù…Ù† ØªØ·Ø§Ø¨Ù‚ Ø§Ù„Ø±Ø¯ Ù…Ø¹ Ø§Ù„Ù€ DB 100% Ø­ØªÙ‰ ØªØ­Øª
+    // ØªØ²Ø§Ù…Ù† Ø­Ù‚ÙŠÙ‚ÙŠØŒ Ù…Ø´ Ø¨Ø³ ÙÙŠ Ø­Ø§Ù„Ø© Ø§Ù„ÙƒØªØ§Ø¨Ø© Ø§Ù„Ø·Ø§Ø²Ø¬Ø© Ø§Ù„Ø¹Ø§Ø¯ÙŠØ©.
     const webhookResponseSnapshot = webhookRaceWinner
       ? (() => {
           let wonFlags = riskResult.flags;
           try {
             const parsed = JSON.parse(webhookRaceWinner.signalsSnapshot || '{}');
             if (parsed && Array.isArray(parsed.flags)) wonFlags = parsed.flags;
-          } catch (_) { /* fallback Úáì riskResult.flags áæ ÇáÜ parse İÔá */ }
+          } catch (_) { /* fallback Ø¹Ù„Ù‰ riskResult.flags Ù„Ùˆ Ø§Ù„Ù€ parse ÙØ´Ù„ */ }
           return {
             score: webhookRaceWinner.riskScore,
             decision: webhookRaceWinner.decision,
@@ -3310,7 +3310,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
     });
 
   } catch (error) {
-    // Status code (500) is unchanged — this is what the plugin's circuit
+    // Status code (500) is unchanged â€” this is what the plugin's circuit
     // breaker (class-api-client.php) keys on. Only the response body is
     // sanitized.
     logger.error({ module: 'risk', endpoint: 'woocommerce-webhook', error: error.message, stack: error.stack }, 'Webhook error');
@@ -3318,7 +3318,7 @@ router.post('/woocommerce-webhook', async (req, res) => {
   }
 });
 // ========== Check Device Endpoint ==========
-// ??????? ?????? ???? ??????? ?????????? ?? ??????? ???????
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { fingerprint } = req.body;
@@ -3328,7 +3328,7 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
 
   const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // 1. ????? ?? ???? ?????? ?? Identity Graph    const { getConnectedRisk } = require('../lib/identityGraph');
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ Identity Graph    const { getConnectedRisk } = require('../lib/identityGraph');
     const mockOrder = {
       deviceFingerprint: fingerprint,
       fingerprintVersion: 'v3',
@@ -3339,17 +3339,17 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
 
     try {
       const graphResult = await getConnectedRisk(mockOrder, merchantId);
-      // ??? ??? connectedRisk >= 80 ?????? ??????? ?????? ??????
+      // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ connectedRisk >= 80 ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
       if (graphResult.connectedRisk >= 45) {
         blocked = true;
         reason = 'Device fingerprint linked to high-risk network';
       }
     } catch (err) {
       logger.error({ module: 'risk', endpoint: 'check-device', err }, 'Graph lookup error');
-      // ??? ???: ?? ???? ???????? ??? ??? ?????
+      // ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½: ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½
     }
 
-    // 2. (???????) ????? ?? ??????? ??????? ????????
+    // 2. (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½) ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     if (!blocked) {
       const blacklisted = await db.blacklistEntry.findFirst({
         where: {
@@ -3371,14 +3371,14 @@ router.post('/check-device', apiKeyAuth, domainAuthMiddleware, verifyHmacSignatu
     res.json({ blocked, reason });
   } catch (error) {
     logger.error({ module: 'risk', endpoint: 'check-device', error: error.message, stack: error.stack }, 'Check-device error');
-    // blocked: false preserved — the plugin reads this field on every
+    // blocked: false preserved â€” the plugin reads this field on every
     // response shape from this endpoint, including error paths.
     res.status(500).json({ blocked: false, ...safeErrorPayload(error) });
   }
 });
 
 // ========== Enrich Endpoint ==========
-// ??????? ?????? ????? ??????? BIN ?? ?????? ????? ???????? (??? Stripe)
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ BIN ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ (ï¿½ï¿½ï¿½ Stripe)
 router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, async (req, res) => {
   try {
     const { 
@@ -3406,31 +3406,31 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
 
     const merchantId = req.tenant.id; // never trust client-supplied merchantId (CWE-639)
 
-    // Tier-1 fraud-isolation scope (opt-in) — same call as /evaluate and
+    // Tier-1 fraud-isolation scope (opt-in) â€” same call as /evaluate and
     // /woocommerce-webhook (CWE-1059 drift fix: this was previously
     // omitted here, causing a ReferenceError on every /enrich call).
     const storeScope = getStoreScope(req.tenant, req.storeId);
 
-    // ?? Quota Status (mirrors /evaluate and /woocommerce-webhook) ??????????
-    // Previously missing entirely on this path — a tenant that exhausted
+    // â”€â”€ Quota Status (mirrors /evaluate and /woocommerce-webhook) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // Previously missing entirely on this path â€” a tenant that exhausted
     // its monthly block quota still received full external IP/email/BIN
     // intelligence on every post-payment enrichment call, indefinitely.
     // Quota only gates the expensive external lookups inside
     // calculateRiskScore(); it never blocks or short-circuits this request.
     const quotaStatus = await checkQuotaGate(req, 'enrich');
     const limitedScoring = quotaStatus.exceeded;
-    // ?? End Quota Status ??????????????????????????????????????????????????
+    // â”€â”€ End Quota Status â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 
-    // 1. ????? ?? ????? ???????
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
 
-    // 2. ??? ?? ???? ????? ???? pending enrichment
+    // 2. ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½È¡ ï¿½ï¿½ï¿½ï¿½ pending enrichment
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
           // merchantId is already resolved from the authenticated tenant
-          // above (never trusted from the body) — this closes the
+          // above (never trusted from the body) â€” this closes the
           // cross-tenant scoping gap described in the schema migration.
           merchantId,
           orderId,
@@ -3445,7 +3445,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
         orderId 
       });
     }
-// 3. ?????? ?? ????? ?????? + core enrichment logic — delegated to the
+// 3. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ + core enrichment logic â€” delegated to the
     // shared processor so the replay job (see jobs/replayPendingEnrichments.js)
     // can never drift out of sync with this route's behavior.
     const { processEnrichment } = require('../lib/enrichmentProcessor');
@@ -3531,7 +3531,7 @@ router.post('/tenants/register', async (req, res) => {
   } catch (rateLimitErr) {
     logger.error(
       { module: 'risk', endpoint: 'register', error: rateLimitErr.message },
-      'Rate limiter DB error ? failing open'
+      'Rate limiter DB error ï¿½ failing open'
     );
   }
   // ?? End Rate Limiting ?????????????????????????????????????????????????????
@@ -3567,12 +3567,12 @@ router.post('/tenants/register', async (req, res) => {
   // ?? Honeypot check ????????????????????????????????????????????????????
   // A hidden field (name="website") that only bots reliably fill in. Real
   // users never see or complete it (CSS-hidden in index.html). Any
-  // non-empty value here is treated as a bot signal — respond with a
+  // non-empty value here is treated as a bot signal â€” respond with a
   // generic success-shaped message (not an error) to avoid teaching a bot
   // it tripped a filter, and skip tenant creation entirely.
   const honeypotValue = req.body.website || '';
   if (honeypotValue.trim() !== '') {
-    logger.warn({ module: 'risk', endpoint: 'register' }, 'Honeypot field filled — likely bot submission, rejecting silently');
+    logger.warn({ module: 'risk', endpoint: 'register' }, 'Honeypot field filled â€” likely bot submission, rejecting silently');
     return res.status(200).json({
       email: req.body.email || null,
       plan: 'early_access',
@@ -3599,7 +3599,7 @@ router.post('/tenants/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
-    // Generate a unique API key (256-bit CSPRNG — NIST SP 800-63B §5.1.1.2 entropy requirement)
+    // Generate a unique API key (256-bit CSPRNG â€” NIST SP 800-63B Â§5.1.1.2 entropy requirement)
     const apiKey = crypto.randomBytes(32).toString('base64');
     const apiKeyHash = hashApiKey(apiKey);
 
@@ -3607,7 +3607,7 @@ router.post('/tenants/register', async (req, res) => {
     const emailVerifyToken = crypto.randomBytes(32).toString('hex');
     const emailVerifyExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
 
-    // Normalize storeUrl domain — this becomes the tenant's only authorized
+    // Normalize storeUrl domain â€” this becomes the tenant's only authorized
     // origin for API key use (CWE-636 fix: domain binding must be populated
     // at creation time so domainAuthMiddleware has real data to enforce
     // against rather than failing open on a missing/empty array).
@@ -3622,18 +3622,18 @@ router.post('/tenants/register', async (req, res) => {
     // In development mode, skip email verification
     const skipVerification = process.env.EMAIL_VERIFICATION_DISABLED === 'true';
 
-    // Webhook signing secret — required by verifyHmacSignature on every mutating
+    // Webhook signing secret â€” required by verifyHmacSignature on every mutating
     // route. Must be generated here at tenant-creation time (not deferred to a
     // later recovery flow), otherwise req.tenant.webhookSecret stays null forever
     // and /evaluate, /enrich, /blacklist, /whitelist, /blocked-attempt all 401.
     // Same pattern as /connect/confirm in src/routes/auth.js.
     const webhookSecret = crypto.randomBytes(32).toString('hex');
 
-    // Early Access Pro Grant — evaluated once, at the moment of tenant
+    // Early Access Pro Grant â€” evaluated once, at the moment of tenant
     // creation. If EARLY_ACCESS_END_DATE is unset or still in the future,
     // this registration is eligible for "3 months of Shield Pro at no
     // cost." Ineligible registrations (after the cutoff) fall back to the
-    // pre-existing free early_access behavior — unchanged from today.
+    // pre-existing free early_access behavior â€” unchanged from today.
     const earlyAccessGrant = {
       plan:                'starter',
       subscriptionStatus:  'free',
@@ -3645,14 +3645,14 @@ router.post('/tenants/register', async (req, res) => {
       data: {
         email,
         storeUrl: storeUrl || null,
-        allowedDomains, // Domain-binding allowlist (CWE-636 fix) — enforced by domainAuthMiddleware
-        webhookSecret, // HMAC request-signing secret — provisioned at tenant creation, not deferred
+        allowedDomains, // Domain-binding allowlist (CWE-636 fix) â€” enforced by domainAuthMiddleware
+        webhookSecret, // HMAC request-signing secret â€” provisioned at tenant creation, not deferred
         apiKeyHash, // Source of truth for authentication (OWASP ASVS V6.2.1)
         // Production path only: apiKey plaintext is held transiently so the post-verification
         // welcome email (sent from /verify-email, only after inbox ownership is proven) can
         // include it. It is purged in the same DB write that sets emailVerified = true (see
         // routes/auth.js), bounding the exposure window to "time until the merchant clicks the
-        // confirmation link" — the same transient-then-deleted pattern already used for
+        // confirmation link" â€” the same transient-then-deleted pattern already used for
         // emailVerifyToken (CWE-532 minimization; NIST SP 800-63B authenticator lifecycle).
         // The skipVerification (dev mode) path below never writes apiKey at all, since the key
         // is sent directly from this request's closure before this row is committed.
@@ -3668,7 +3668,7 @@ router.post('/tenants/register', async (req, res) => {
     logger.info({ module: 'risk', newTenant: tenant.email }, 'New tenant registered');
 
     if (skipVerification) {
-      // Dev mode — send API key immediately as before
+      // Dev mode â€” send API key immediately as before
       const { sendApiKeyEmail } = require('../lib/email');
       sendApiKeyEmail(tenant.email, apiKey).catch(err => {
         logger.error({ module: 'email', error: err.message }, 'Failed to send API key email (dev mode)');
@@ -3682,7 +3682,7 @@ router.post('/tenants/register', async (req, res) => {
       });
     }
 
-    // Production — send confirmation email, withhold API key
+    // Production â€” send confirmation email, withhold API key
     const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
     const confirmUrl = `${baseUrl}/api/auth/verify-email?token=${emailVerifyToken}`;
 
@@ -3706,8 +3706,8 @@ router.post('/tenants/register', async (req, res) => {
 
 
 // ========== GET /risk/verify-key ==========
-// ??????? ?????? ?? "???? ?? ???????" ?? ????? WooCommerce
-// ?? ?????? domainAuthMiddleware ????? ? ?????? ?? ????? ??? ????? ??????
+// ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ "ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½" ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ WooCommerce
+// ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ domainAuthMiddleware ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
 /**
  * @swagger
  * /risk/verify-key:
@@ -3735,7 +3735,7 @@ router.post('/tenants/register', async (req, res) => {
  *         description: Internal server error
  */
 // SANCTIONED EXCEPTION to the centralized requireAuth() pattern (CWE-1059
-// drift-prevention documentation — same rationale as the /connect/confirm
+// drift-prevention documentation â€” same rationale as the /connect/confirm
 // no-grace-period note in routes/auth.js). Do NOT "fix" this to use
 // requireAuth() without re-reading this comment in full.
 //
@@ -3747,32 +3747,32 @@ router.post('/tenants/register', async (req, res) => {
 //   a) No requireAuth() AUTH_FAIL_DELAY_MS (200ms) on failure. That delay
 //      exists to blunt key-enumeration timing attacks against mutating,
 //      capability-granting endpoints (CWE-208). A pure validity probe is a
-//      much lower-value timing oracle — knowing a key is "valid" grants no
+//      much lower-value timing oracle â€” knowing a key is "valid" grants no
 //      capability an attacker couldn't get more directly by trying the key
-//      against a real endpoint — and this route is polled frequently, so
+//      against a real endpoint â€” and this route is polled frequently, so
 //      artificial latency here has a real operational cost with no
 //      proportionate security benefit (cf. Kubernetes liveness/readiness
 //      probes, which are intentionally excluded from the full
 //      auth/authz chain the live application enforces, for the same
 //      cost/benefit reason).
 //   b) No domainAuthMiddleware. The plugin calls this from the merchant's
-//      own server process, not a browser subject to origin enforcement —
+//      own server process, not a browser subject to origin enforcement â€”
 //      there is no "origin" to bind in the way there is for browser-facing
 //      mutating calls.
 //   c) No verifyHmacSignature. The plugin may not have fetched
-//      webhookSecret yet — requiring an HMAC signature here would be
+//      webhookSecret yet â€” requiring an HMAC signature here would be
 //      circular (the secret needed to sign isn't available until after a
 //      successful authenticated call).
 //
 // What is NOT relaxed: this handler still manually enforces tenant.isActive
 // and tenant.emailVerified (mirroring requireAuth's policy exactly), and
-// returns no sensitive data — only plan/subscription metadata, never a
+// returns no sensitive data â€” only plan/subscription metadata, never a
 // secret. If those manual checks and requireAuth's checks ever diverge,
 // that is the one thing to fix; the missing delay/domain/HMAC layers above
 // are by design and should stay missing.
 router.get('/verify-key', async (req, res) => {
   try {
-    // 1. ?????? ?? ???? ??? header
+    // 1. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ header
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
       return res.status(400).json({
@@ -3781,7 +3781,7 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 2. Find tenant by API key (hash-first with deprecated-plaintext fallback — zero-downtime migration)
+    // 2. Find tenant by API key (hash-first with deprecated-plaintext fallback â€” zero-downtime migration)
     const { tenant } = await resolveTenantByApiKey(apiKey, {
       id: true,
       isActive: true,
@@ -3804,12 +3804,12 @@ router.get('/verify-key', async (req, res) => {
       });
     }
 
-    // 4. ?????? ????????? ?? ???????
-    //    ??????? ??? ??? ??? ?????? ???? allowedDomains ?????
-    //    (?????? ??? ??????? ?? ?????? ??????? ????? ??? ????? ????? ????)
-    // TODO: ????? ?????? ?? ??????? ??? ???? ??? allowedDomains
+    // 4. ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    //    ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ allowedDomains ï¿½ï¿½ï¿½ï¿½ï¿½
+    //    (ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½)
+    // TODO: ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ï¿½ ï¿½ï¿½ï¿½ allowedDomains
 
-    // 5. ÅÑÌÇÚ ÍÇáÉ ÇáÇÔÊÑÇß ãÚ ÇáÜ validation
+    // 5. Ø¥Ø±Ø¬Ø§Ø¹ Ø­Ø§Ù„Ø© Ø§Ù„Ø§Ø´ØªØ±Ø§Ùƒ Ù…Ø¹ Ø§Ù„Ù€ validation
     const tenantFull = await db.tenant.findUnique({
       where:  { id: tenant.id },
       select: {
@@ -3848,7 +3848,7 @@ router.get('/verify-key', async (req, res) => {
 // Stores them in BlockedAttempt table for the user dashboard.
 //
 // Auth:     X-Api-Key header (same apiKeyAuth middleware)
-// Privacy:  Only ipHash (SHA-256) is accepted — real IP is never stored
+// Privacy:  Only ipHash (SHA-256) is accepted â€” real IP is never stored
 // Reliability: Fire-and-forget from plugin side; failures are silent
 
 const BLOCKED_ATTEMPT_RATE = new Map(); // keyed on apiKey, not IP
@@ -3856,7 +3856,7 @@ const BA_MAX_REQ   = 60;
 const BA_WINDOW_MS = 60 * 1000;
 
 // L3 fix: independent periodic sweep, mirroring the CONNECT_STATUS_RATE
-// fix in routes/auth.js — a key polled exactly once (or never re-polled)
+// fix in routes/auth.js â€” a key polled exactly once (or never re-polled)
 // was previously never pruned, since pruning only happened on a re-poll
 // of the SAME key after its window expired. This closes that regardless
 // of whether the map is ever populated pre-auth or not; see the
@@ -3873,7 +3873,7 @@ setInterval(() => {
 const blockedAttemptRateLimit = (req, res, next) => {
   // L3 fix: this middleware now runs AFTER apiKeyAuth in the route
   // definition below (see that change), so req.tenant is guaranteed to
-  // exist here — key on the authenticated tenant's id, not the raw
+  // exist here â€” key on the authenticated tenant's id, not the raw
   // x-api-key header value. Previously this ran before authentication,
   // meaning an unauthenticated caller could populate this map with
   // arbitrary/garbage x-api-key values (or fall back to req.ip) without
@@ -3900,7 +3900,7 @@ const VALID_REASONS    = new Set(['card_testing', 'velocity', 'blacklist', 'patt
 
 // L3 fix: blockedAttemptRateLimit now runs after apiKeyAuth rather than
 // before it. Only a request that has already presented a real, valid
-// API key reaches the rate limiter and can grow BLOCKED_ATTEMPT_RATE —
+// API key reaches the rate limiter and can grow BLOCKED_ATTEMPT_RATE â€”
 // an unauthenticated caller is rejected by apiKeyAuth first and never
 // touches the map at all. This also means the rate-limit key (req.tenant.id,
 // set inside the middleware above) is now trustworthy tenant identity
@@ -3954,14 +3954,14 @@ router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthM
     // is now driven solely by the /evaluate block-decision path (see the
     // $transaction there), which is the authoritative enforcement point.
     // Incrementing it here too would double-count every attack that goes
-    // through /evaluate ? block ? plugin calls /blocked-attempt. This
-    // endpoint still creates BlockedAttempt rows for dashboard/reporting —
-    // e.g. plugin-local firewall blocks that never reach /evaluate — just
+    // through /evaluate â†’ block â†’ plugin calls /blocked-attempt. This
+    // endpoint still creates BlockedAttempt rows for dashboard/reporting â€”
+    // e.g. plugin-local firewall blocks that never reach /evaluate â€” just
     // without touching the counter.
     await db.blockedAttempt.create({
       data: {
         tenantId:        req.tenant.id,
-        // Agency multi-store attribution — req.storeId is set by
+        // Agency multi-store attribution â€” req.storeId is set by
         // domainAuthMiddleware only for store-managed tenants; null for
         // Starter/Pro (no Store rows exist for them), which is the correct
         // "no store to attribute to" value, not an error.
@@ -3986,14 +3986,14 @@ router.post('/blocked-attempt', apiKeyAuth, blockedAttemptRateLimit, domainAuthM
   }
 });
 // ========== POST /risk/dispute-evidence ==========
-// äŞØÉ ÊÓÌíá ãæÍøÏÉ áÃí Ïáíá post-purchase íÊÌãøÚ Úáì ãÏÇÑ ÚãÑ ÇáÜ
-// dispute. áÇ ÊõÛíøÑ ŞÑÇÑ ÇáÃæÑÏÑ (ÎáÇÕ ÇÊäİĞ) — ÇáÛÑÖ ÇáæÍíÏ åæ ÊÌãíÚ
-// ÅÔÇÑÇÊ åÊõŞÑÃ áÇÍŞğÇ İí processFeedbackSimplified() (feedbackLoop.js)
-// æŞÊ ÅÛáÇŞ ÇáÜ dispute (won/lost)¡ İÊÛĞøí SignalStat ÈÏŞÉ ÃÚáì ãä
-// signalsSnapshot æÍÏåÇ.
+// Ù†Ù‚Ø·Ø© ØªØ³Ø¬ÙŠÙ„ Ù…ÙˆØ­Ù‘Ø¯Ø© Ù„Ø£ÙŠ Ø¯Ù„ÙŠÙ„ post-purchase ÙŠØªØ¬Ù…Ù‘Ø¹ Ø¹Ù„Ù‰ Ù…Ø¯Ø§Ø± Ø¹Ù…Ø± Ø§Ù„Ù€
+// dispute. Ù„Ø§ ØªÙØºÙŠÙ‘Ø± Ù‚Ø±Ø§Ø± Ø§Ù„Ø£ÙˆØ±Ø¯Ø± (Ø®Ù„Ø§Øµ Ø§ØªÙ†ÙØ°) â€” Ø§Ù„ØºØ±Ø¶ Ø§Ù„ÙˆØ­ÙŠØ¯ Ù‡Ùˆ ØªØ¬Ù…ÙŠØ¹
+// Ø¥Ø´Ø§Ø±Ø§Øª Ù‡ØªÙÙ‚Ø±Ø£ Ù„Ø§Ø­Ù‚Ù‹Ø§ ÙÙŠ processFeedbackSimplified() (feedbackLoop.js)
+// ÙˆÙ‚Øª Ø¥ØºÙ„Ø§Ù‚ Ø§Ù„Ù€ dispute (won/lost)ØŒ ÙØªØºØ°Ù‘ÙŠ SignalStat Ø¨Ø¯Ù‚Ø© Ø£Ø¹Ù„Ù‰ Ù…Ù†
+// signalsSnapshot ÙˆØ­Ø¯Ù‡Ø§.
 //
-// Idempotent by design: @@unique([orderId, evidenceType]) — ÇÓÊÏÚÇÁ
-// ãÊßÑÑ áäİÓ ÇáäæÚ ÈíÍÏøË ÇáŞíãÉ (upsert)¡ ãÔ íßÑÑ ÇáÕİ.
+// Idempotent by design: @@unique([orderId, evidenceType]) â€” Ø§Ø³ØªØ¯Ø¹Ø§Ø¡
+// Ù…ØªÙƒØ±Ø± Ù„Ù†ÙØ³ Ø§Ù„Ù†ÙˆØ¹ Ø¨ÙŠØ­Ø¯Ù‘Ø« Ø§Ù„Ù‚ÙŠÙ…Ø© (upsert)ØŒ Ù…Ø´ ÙŠÙƒØ±Ø± Ø§Ù„ØµÙ.
 const VALID_EVIDENCE_TYPES = new Set([
   'TRACKING', 'DELIVERY_PROOF', 'LOGIN', 'CTA', 'PRE_CHARGE',
   'USAGE_LOGS', 'NO_CANCEL_REQUEST', 'CE30', 'REFUND',
@@ -4016,9 +4016,9 @@ router.post('/dispute-evidence', apiKeyAuth, domainAuthMiddleware, verifyHmacSig
     }
     const safeSource = VALID_EVIDENCE_SOURCES.has(source) ? source : 'manual';
 
-    // Scoped lookup — äİÓ äãØ C3/C4 ÇáãÓÊÎÏã İí ÈÇŞí Çáãáİ: compound key
-    // íÖãä Åä ÇáÃæÑÏÑ íäÊãí áäİÓ ÇáÊÇÌÑ ÇáãõÕÇÏóŞ Úáíå¡ ãÓÊÍíá íÑÌÚ Õİ
-    // ÊÇÌÑ ÊÇäí.
+    // Scoped lookup â€” Ù†ÙØ³ Ù†Ù…Ø· C3/C4 Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… ÙÙŠ Ø¨Ø§Ù‚ÙŠ Ø§Ù„Ù…Ù„Ù: compound key
+    // ÙŠØ¶Ù…Ù† Ø¥Ù† Ø§Ù„Ø£ÙˆØ±Ø¯Ø± ÙŠÙ†ØªÙ…ÙŠ Ù„Ù†ÙØ³ Ø§Ù„ØªØ§Ø¬Ø± Ø§Ù„Ù…ÙØµØ§Ø¯ÙÙ‚ Ø¹Ù„ÙŠÙ‡ØŒ Ù…Ø³ØªØ­ÙŠÙ„ ÙŠØ±Ø¬Ø¹ ØµÙ
+    // ØªØ§Ø¬Ø± ØªØ§Ù†ÙŠ.
     const order = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
     if (!order) {
       logger.warn({ module: 'risk', endpoint: 'dispute-evidence', merchantId, orderId }, 'Order not found for this merchant');
