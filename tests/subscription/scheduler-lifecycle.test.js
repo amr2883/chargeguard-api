@@ -65,6 +65,10 @@ function makeMockDb() {
       findMany: jest.fn(),
       update: jest.fn().mockResolvedValue({}),
     },
+    store: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+    },
+    $transaction: jest.fn(async (ops) => Promise.all(ops)),
     checkoutSession: {
       deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
@@ -363,6 +367,11 @@ describe('Scheduler — Phase 3 (grace→expired)', () => {
         subscriptionEndDate: null,
         billingCycle: null,
       },
+    });
+
+    expect(db.store.updateMany).toHaveBeenCalledWith({
+      where: { tenantId: 'tenant_grace', isActive: true },
+      data: { isActive: false, deactivatedAt: expect.any(Date) },
     });
   });
 

@@ -101,7 +101,7 @@ function makeOrder({ decision = 'approve', enrichmentSource = 'paypal', cardIssu
 function makePrisma() {
   return {
     tenant: { findMany: jest.fn() },
-    order:  { findMany: jest.fn() },
+    order:  { findMany: jest.fn(), count: jest.fn() },
     alertLog: {
       findFirst: jest.fn(),
       create:    jest.fn(),
@@ -113,6 +113,7 @@ function makePrisma() {
 function applyPersistentDefaults(prisma) {
   prisma.tenant.findMany.mockResolvedValue([]);
   prisma.order.findMany.mockResolvedValue([]);
+  prisma.order.count.mockResolvedValue(0);
   prisma.alertLog.findFirst.mockResolvedValue(null);
   prisma.alertLog.create.mockResolvedValue({});
   prisma.alertLog.aggregate.mockResolvedValue({ _sum: { attackCount: 0 } });
@@ -122,6 +123,12 @@ function applyPersistentDefaults(prisma) {
 // merchantId. `current` = this-week orders, `prev` = last-week orders.
 // throwOnCurrent/throwOnPrev let tests simulate a rejected fetch.
 function configureOrders(prisma, configByMerchantId) {
+  prisma.order.count.mockImplementation(async ({ where }) => {
+    const cfg = configByMerchantId[where.merchantId];
+    if (!cfg) return 0;
+    if (cfg.throwOnPrev) throw cfg.throwOnPrev;
+    return (cfg.prev || []).filter(o => o.decision === 'block' || o.decision === 'review').length;
+  });
   prisma.order.findMany.mockImplementation(async ({ where }) => {
     const cfg = configByMerchantId[where.merchantId];
     if (!cfg) return [];
@@ -221,7 +228,7 @@ describe('paypalWeeklyReportScheduler', () => {
 
   // ── signalsSnapshot filtering ────────────────────────────────────────────
   describe('signalsSnapshot filtering', () => {
-    test('4. malformed signalsSnapshot JSON filtered out silently', async () => {
+    test('4. malformed signalsSnapshot JSON is still counted and does not break the report', async () => {
       jest.setSystemTime(SEED_FOR_0930);
       const tenant = makeTenant();
       const prisma = makePrisma();
@@ -231,7 +238,7 @@ describe('paypalWeeklyReportScheduler', () => {
       configureOrders(prisma, {
         [tenant.id]: {
           current: [
-            makeOrder({ snapshotOverride: '{not valid json' }), // malformed → excluded
+            makeOrder({ snapshotOverride: '{not valid json' }), // malformed -> still counted (DB filters on enrichmentSource, not JSON)
             makeOrder({ decision: 'approve', enrichmentSource: 'paypal' }), // valid → counted
           ],
         },
@@ -240,7 +247,7 @@ describe('paypalWeeklyReportScheduler', () => {
       await triggerInitialRun(prisma);
 
       expect(sendPaypalWeeklyReportEmail).toHaveBeenCalledWith(
-        expect.objectContaining({ paypalTxnCount: 1 })
+        expect.objectContaining({ paypalTxnCount: 2 })
       );
     });
 
@@ -254,7 +261,6 @@ describe('paypalWeeklyReportScheduler', () => {
       configureOrders(prisma, {
         [tenant.id]: {
           current: [
-            makeOrder({ decision: 'approve', enrichmentSource: 'stripe' }), // excluded
             makeOrder({ decision: 'approve', enrichmentSource: 'paypal' }), // counted
           ],
         },
@@ -264,6 +270,12 @@ describe('paypalWeeklyReportScheduler', () => {
 
       expect(sendPaypalWeeklyReportEmail).toHaveBeenCalledWith(
         expect.objectContaining({ paypalTxnCount: 1 })
+      );
+
+      expect(prisma.order.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({ enrichmentSource: 'paypal', merchantId: tenant.id }),
+        })
       );
     });
   });
@@ -378,6 +390,43 @@ describe('paypalWeeklyReportScheduler', () => {
 
       expect(sendPaypalWeeklyReportEmail).toHaveBeenCalledWith(
         expect.objectContaining({ weekOverWeekPct: null })
+      );
+    });
+
+    test('14. weekOverWeekPct is a number and prev count query is filtered by merchant/paypal/decision', async () => {
+      jest.setSystemTime(SEED_FOR_0930);
+      const tenant = makeTenant();
+      const prisma = makePrisma();
+      applyPersistentDefaults(prisma);
+      prisma.tenant.findMany.mockResolvedValue([tenant]);
+
+      configureOrders(prisma, {
+        [tenant.id]: {
+          current: [makeOrder({ decision: 'block' })],
+          prev: [
+            makeOrder({ decision: 'block' }),
+            makeOrder({ decision: 'block' }),
+            makeOrder({ decision: 'review' }),
+            makeOrder({ decision: 'approve' }),
+          ],
+        },
+      });
+
+      await triggerInitialRun(prisma);
+
+      expect(sendPaypalWeeklyReportEmail).toHaveBeenCalledWith(
+        expect.objectContaining({ weekOverWeekPct: -67 })
+      );
+
+      expect(prisma.order.count).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: expect.objectContaining({
+            merchantId: tenant.id,
+            enrichmentSource: 'paypal',
+            decision: { in: ['block', 'review'] },
+            createdAt: expect.objectContaining({ gte: expect.any(Date), lt: expect.any(Date) }),
+          }),
+        })
       );
     });
   });
