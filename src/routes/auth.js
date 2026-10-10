@@ -4,7 +4,6 @@ const crypto = require('crypto');
 const db = require('../lib/db');
 const logger = require('../lib/logger');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
-const { hashApiKey } = require('../lib/apiKeyHash');
 const verifyHmacSignature = require('../middleware/verifyHmac');
 const { requireAuth } = require('../middleware/authenticate');
 
@@ -43,11 +42,10 @@ const hashIp = (ip) => {
   return crypto.createHmac('sha256', salt).update(ip).digest('hex');
 };
 
-// ── Rate limit + Turnstile middleware for /connect (OWASP API4:2023) ───────
+// ── Rate limit middleware for /connect-with-key (OWASP API4:2023) ───────
 // 3 attempts / 15 minutes per IP — tighter than /tenants/register's 5/hour
-// because /connect issues a live credential on confirmation. IP-only (not
-// email-keyed) to avoid creating an enumeration oracle, consistent with this
-// endpoint's existing generic-200 design.
+// because this route is a credential-bearing "connect" action. IP-only (not
+// email-keyed) to avoid creating an enumeration oracle.
 const connectRateLimit = async (req, res, next) => {
   const ip = req.ip || req.connection.remoteAddress;
   const ipHash = hashIp(ip);
@@ -93,409 +91,20 @@ const connectRateLimit = async (req, res, next) => {
   next();
 };
 
-// ── Turnstile verification for /connect ─────────────────────────────────────
-const connectTurnstile = async (req, res, next) => {
-  const turnstileToken = req.body.turnstileToken || '';
-  if (!turnstileToken) {
-    return res.status(400).json({ error: 'Security check token missing.' });
-  }
-  try {
-    const turnstileRes = await fetch(
-      'https://challenges.cloudflare.com/turnstile/v0/siteverify',
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({
-          secret:   process.env.TURNSTILE_SECRET_KEY,
-          response: turnstileToken,
-          remoteip: req.ip || req.connection.remoteAddress
-        })
-      }
-    );
-    const turnstileData = await turnstileRes.json();
-    if (!turnstileData.success) {
-      return res.status(403).json({ error: 'Security check failed. Please try again.' });
-    }
-  } catch (turnstileErr) {
-    logger.error({ module: 'auth', endpoint: 'connect', error: turnstileErr.message }, 'Turnstile verification error');
-    return res.status(503).json({ error: 'Security check unavailable. Please try again.' });
-  }
-  next();
-};
-
-/**
- * POST /api/auth/connect
- * التاجر يبعت الـ email بتاعه بس
- * الـ backend يرجعله كل حاجة تلقائياً
- */
-router.post('/connect', connectRateLimit, connectTurnstile, async (req, res) => {
-  // Generated unconditionally, before any validation branch, so every
-  // response path — unknown email, inactive tenant, unverified tenant,
-  // success, and the catch block — returns the identical shape
-  // { message, connectRequestId }. This is what lets /connect/status
-  // return the same generic 'pending' for a decoy request as for a real,
-  // still-unconfirmed one, without ever needing to tell them apart
-  // (anti-enumeration, OWASP API4:2023 — extends the same principle the
-  // original GENERIC_RESPONSE design already applied to the message text).
-  const connectRequestId = crypto.randomBytes(32).toString('hex');
-  const buildResponse = () => ({
-    message: 'If this email is registered and verified, a secure connect link has been sent. The link expires in 15 minutes.',
-    connectRequestId,
-  });
-
-  try {
-    const { email, siteUrl } = req.body;
-
-    if (!email || typeof email !== 'string') {
-      return res.status(400).json({ error: 'Email is required' });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-
-    const tenant = await db.tenant.findUnique({
-      where: { email: normalizedEmail },
-      select: {
-        id: true,
-        email: true,
-        isActive: true,
-        emailVerified: true,
-        storeUrl: true,
-      }
-    });
-
-    if (!tenant || !tenant.isActive) {
-      return res.status(200).json(buildResponse());
-    }
-
-    if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
-      return res.status(200).json(buildResponse());
-    }
-
-  // SECURITY FIX (H1): storeUrl/allowedDomains are no longer written
-    // here. Previously this ran unconditionally on any /connect POST with
-    // a matching, active, verified email — before any proof the caller
-    // controls that inbox — letting anyone who knew a merchant's email
-    // silently rebind their domain to an attacker-controlled origin. The
-    // proposed value is staged now and applied only in /connect/confirm,
-    // after the merchant has clicked the emailed link and proven inbox
-    // ownership — the same trust boundary that already gates issuing a
-    // new API key.
-    let pendingStoreUrl = null;
-    let pendingNormalizedDomain = null;
-    if (siteUrl && siteUrl !== tenant.storeUrl) {
-      const { normalizeDomain } = require('../lib/domainAuth');
-      pendingStoreUrl = siteUrl;
-      pendingNormalizedDomain = normalizeDomain(siteUrl) || null;
-    }
-
-    const connectToken = crypto.randomBytes(32).toString('hex');
-    const connectTokenExpiresAt = new Date(Date.now() + 15 * 60 * 1000);
-
-    await db.tenant.update({
-      where: { id: tenant.id },
-      data: {
-        connectToken,
-        connectTokenExpiresAt,
-        connectRequestId,
-        pendingStoreUrl,
-        pendingNormalizedDomain,
-      }
-    });
-
-    const baseUrl = process.env.RENDER_EXTERNAL_URL || 'https://chargeguard-api.onrender.com';
-    const confirmUrl = `${baseUrl}/api/auth/connect/confirm?token=${connectToken}`;
-
-    const { sendConfirmationEmail } = require('../lib/email');
-    sendConfirmationEmail(tenant.email, confirmUrl).catch(err => {
-      logger.error({ module: 'email', error: err.message }, 'Failed to send connect confirmation email');
-    });
-
-    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token issued');
-
-    return res.status(200).json(buildResponse());
-
-  } catch (err) {
-    logger.error({ module: 'auth', error: err.message }, 'Auth connect error');
-    return res.status(200).json(buildResponse());
-  }
-});
-
-router.get('/connect/confirm', async (req, res) => {
-  const { token } = req.query;
-
-  const renderResultPage = (title, headline, body) => `
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8"/>
-      <meta name="viewport" content="width=device-width,initial-scale=1"/>
-      <title>${title} — ChargeGuard</title>
-      <style>
-        body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b1121;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;margin:0}
-        .card{background:#fff;border-radius:16px;max-width:440px;width:100%;padding:36px 32px;text-align:center;box-shadow:0 25px 50px rgba(0,0,0,0.4)}
-        h1{font-size:20px;color:#0f172a;margin:0 0 12px}
-        p{font-size:14px;color:#475569;line-height:1.6;margin:0}
-      </style>
-    </head>
-    <body><div class="card"><h1>${headline}</h1><p>${body}</p></div></body>
-    </html>
-  `;
-
-  if (!token || typeof token !== 'string') {
-    return res.status(400).send(renderResultPage(
-      'Invalid Link', 'Invalid confirmation link',
-      'This link is missing a verification token. Please return to your WordPress admin and try connecting again.'
-    ));
-  }
-
-  try {
-    const tenant = await db.tenant.findUnique({
-      where: { connectToken: token },
-      select: {
-        id: true,
-        email: true,
-        webhookSecret: true,
-        isActive: true,
-        connectTokenExpiresAt: true,
-      }
-    });
-
-    if (!tenant || !tenant.isActive) {
-      return res.status(401).send(renderResultPage(
-        'Invalid Link', 'Invalid or expired connect link',
-        'Please return to your WordPress admin and request a new connect link.'
-      ));
-    }
-
-    if (!tenant.connectTokenExpiresAt || new Date() > new Date(tenant.connectTokenExpiresAt)) {
-      return res.status(410).send(renderResultPage(
-        'Link Expired', 'This connect link has expired',
-        'Please return to your WordPress admin and request a new one.'
-      ));
-    }
-
-    // SECURITY FIX (H1): re-fetch the pending domain-binding fields staged
-    // by /connect. These are applied here — and only here — because
-    // reaching this point already required presenting the exact token
-    // emailed to this tenant's registered address, proving inbox control.
-    // Applying storeUrl/allowedDomains earlier (previously done directly
-    // in /connect, with no such proof) was the vulnerability this closes.
-    const pendingFields = await db.tenant.findUnique({
-      where: { id: tenant.id },
-      select: { pendingStoreUrl: true, pendingNormalizedDomain: true },
-    });
-    const storeUrlUpdate = pendingFields?.pendingStoreUrl
-      ? {
-          storeUrl: pendingFields.pendingStoreUrl,
-          ...(pendingFields.pendingNormalizedDomain
-            ? { allowedDomains: [pendingFields.pendingNormalizedDomain] }
-            : {}),
-        }
-      : {};
-
-      let webhookSecret = tenant.webhookSecret;
-    if (!webhookSecret) {
-      webhookSecret = crypto.randomBytes(32).toString('hex');
-    }
-
-    // Plaintext API keys are never persisted after their one-time delivery — only apiKeyHash is
-    // stored (OWASP ASVS V6.2.1; NIST SP 800-63B §5.1.3 look-up secret storage), which makes
-    // "recovering" a previously-issued key impossible by design, for any tenant. Since /connect
-    // already proves inbox ownership (the only signal we'd otherwise use to gate a rotation),
-    // the correct behavior — matching how GitHub, Stripe, and Twilio handle "I lost my API
-    // key" — is to issue a brand-new credential here rather than attempt to return one that
-    // structurally cannot exist in the database.
-    //
-    // NOTE — no grace period here, by design (do not "fix" this to match /rotate-key):
-    // /connect/confirm is a RECOVERY flow, not a planned rotation. A merchant only reaches
-    // this endpoint because their key is lost or suspected compromised. We deliberately do
-    // NOT set previousApiKeyHash / previousApiKeyExpiresAt here, so the old key is killed
-    // the instant the new one is issued, with no overlap window.
-    //
-    // Contrast with /dashboard/rotate-key: that endpoint IS a planned rotation initiated by
-    // a merchant with full account access and no indication of compromise, so it sets
-    // previousApiKeyHash with a 24h grace window to avoid a protection outage while the
-    // WooCommerce plugin config is updated.
-    //
-    // Giving /connect/confirm the same grace period would mean a potentially-leaked key
-    // stays valid for 24h after the owner explicitly signaled it might be compromised —
-    // defeating the purpose of the recovery flow (NIST SP 800-63B §6.1: compromised/lost
-    // authenticators must be invalidated immediately, not given a renewal overlap).
-    const newApiKey = crypto.randomBytes(32).toString('base64');
-    const newApiKeyHash = hashApiKey(newApiKey);
-
-    await db.tenant.update({
-      where: { id: tenant.id },
-      data: {
-        connectToken: null,
-        connectTokenExpiresAt: null,
-        lastConnectVerifiedAt: new Date(),
-        webhookSecret,
-        apiKeyHash: newApiKeyHash,
-        // Applying the staged domain-binding change (if any) and clearing
-        // the staging fields in the same write as credential issuance —
-        // see the pendingFields lookup above.
-        ...storeUrlUpdate,
-        pendingStoreUrl: null,
-        pendingNormalizedDomain: null,
-        // Transiently stored plaintext — NOT the permanent record (only
-        // apiKeyHash is that). It exists only until the WooCommerce plugin
-        // retrieves it via GET /auth/connect/status (polled from
-        // wp-admin), which delivers it once and immediately nulls this
-        // field in the same call. Mirrors the identical
-        // transient-then-purged pattern /tenants/register already uses
-        // for its welcome-email apiKey delivery.
-        apiKey: newApiKey,
-        keyRotatedAt: new Date(),
-      }
-    });
-
-    logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect token verified — new API key issued, awaiting plugin pickup');
-
-    // Credentials are deliberately absent from this browser-facing
-    // response — see rationale above renderResultPage. The plugin
-    // retrieves them server-to-server via /connect/status instead.
-    return res.status(200).send(renderResultPage(
-      'Email Verified', 'Store connected!',
-      'Return to your WordPress admin — ChargeGuard will finish connecting automatically within a few seconds. You can close this tab.'
-    ));
-
-  } catch (err) {
-    logger.error({ module: 'auth', error: err.message }, 'Connect confirm error');
-    return res.status(500).send(renderResultPage(
-      'Server Error', 'Something went wrong',
-      'Please return to your WordPress admin and try connecting again. If the problem persists, contact support.'
-    ));
-  }
-});
-
-// Lightweight in-memory rate limiter — requestId is a 256-bit random
-// token, so brute-force enumeration isn't practical; this only bounds a
-// misbehaving/abusive polling loop, matching the in-memory pattern
-// already used for /risk/blocked-attempt.
-//
-// M2 fix: a requestId polled exactly once was previously never removed
-// — pruning only happened on a re-poll of the SAME key after its window
-// expired. Many distinct requestId values (real or guessed) could grow
-// this map without bound. Two independent bounds close that: (1) a
-// periodic sweep that drops any expired entry regardless of whether
-// it's ever polled again, and (2) a hard cap on total map size with
-// oldest-first eviction as a last-resort backstop within one window.
-const CONNECT_STATUS_RATE = new Map();
-const CS_MAX_REQ = 60;
-const CS_WINDOW_MS = 60 * 1000;
-const CS_MAX_ENTRIES = 5000;
-
-setInterval(() => {
-  const now = Date.now();
-  for (const [key, rec] of CONNECT_STATUS_RATE.entries()) {
-    if (now - rec.firstAt > CS_WINDOW_MS) {
-      CONNECT_STATUS_RATE.delete(key);
-    }
-  }
-}, CS_WINDOW_MS).unref();
-
-const connectStatusRateLimit = (req, res, next) => {
-  const key = String(req.query.requestId || 'unknown');
-  const now = Date.now();
-  const rec = CONNECT_STATUS_RATE.get(key);
-  if (rec) {
-    if (now - rec.firstAt > CS_WINDOW_MS) {
-      CONNECT_STATUS_RATE.delete(key);
-    } else if (rec.count >= CS_MAX_REQ) {
-      return res.status(429).json({ status: 'pending' }); // generic even under rate limit
-    } else {
-      rec.count++;
-    }
-  } else {
-    if (CONNECT_STATUS_RATE.size >= CS_MAX_ENTRIES) {
-      const oldestKey = CONNECT_STATUS_RATE.keys().next().value;
-      CONNECT_STATUS_RATE.delete(oldestKey);
-    }
-    CONNECT_STATUS_RATE.set(key, { count: 1, firstAt: now });
-  }
-  next();
-};
-
-/**
- * GET /api/auth/connect/status?requestId=xxx
- *
- * Polled by the WooCommerce plugin after POST /connect, while the
- * merchant confirms via the emailed link (possibly on a different
- * device/browser). Mirrors OAuth 2.0 Device Authorization Grant
- * (RFC 8628) polling semantics. Always returns one of a small fixed set
- * of generic shapes — including for an unknown/decoy requestId — so this
- * cannot be used to enumerate registered emails.
- */
-router.get('/connect/status', connectStatusRateLimit, async (req, res) => {
-  const { requestId } = req.query;
-
-  if (!requestId || typeof requestId !== 'string') {
-    return res.status(400).json({ status: 'invalid', error: 'requestId is required' });
-  }
-
-  try {
-    const tenant = await db.tenant.findUnique({
-      where: { connectRequestId: requestId },
-      select: {
-        id: true,
-        email: true,
-        apiKey: true,
-        webhookSecret: true,
-        connectTokenExpiresAt: true,
-      }
-    });
-
-    if (!tenant) {
-      return res.status(200).json({ status: 'pending' });
-    }
-
-    if (tenant.apiKey) {
-      const apiKeyToDeliver = tenant.apiKey;
-      await db.tenant.update({
-        where: { id: tenant.id },
-        data: { apiKey: null, connectRequestId: null },
-      });
-
-      logger.info({ module: 'auth', tenantId: tenant.id }, 'Connect credentials delivered to plugin via status poll');
-
-      return res.status(200).json({
-        status:        'active',
-        merchantId:    tenant.id,
-        apiKey:        apiKeyToDeliver,
-        webhookSecret: tenant.webhookSecret,
-        email:         tenant.email,
-      });
-    }
-
-    if (tenant.connectTokenExpiresAt && new Date() > new Date(tenant.connectTokenExpiresAt)) {
-      return res.status(200).json({ status: 'expired' });
-    }
-
-    return res.status(200).json({ status: 'pending' });
-
-  } catch (err) {
-    logger.error({ module: 'auth', error: err.message }, 'Connect status poll error');
-    return res.status(200).json({ status: 'pending' });
-  }
-});
-
 /**
  * POST /api/auth/connect-with-key
  *
- * Primary connect path for the WooCommerce plugin's settings page,
- * replacing the emailed-confirmation-link UI for that specific screen.
+ * Primary connect path for the WooCommerce plugin's settings page.
+ * The earlier emailed-confirmation-link flow was removed (#52).
  * The merchant already holds a live API key — delivered by email only
  * after verifying their address on the Landing Page (see /verify-email
  * below) — and enters it directly here alongside their account email.
  *
  * Trust model: possession of the 256-bit API key is itself the proof of
- * ownership. It is at least as strong a credential as clicking the
- * emailed link /connect/confirm relies on, so no separate email round
+ * ownership, so no separate email round
  * trip is required — connectKeyAuth (requireAuth) is the exact same
  * centralized authentication check every other authenticated endpoint in
- * this codebase already relies on (OWASP ASVS V4.1.1). This mirrors the
- * H1 fix's underlying principle in /connect/confirm: domain binding
+ * this codebase already relies on (OWASP ASVS V4.1.1). Domain binding
  * (storeUrl/allowedDomains) is only ever written once real proof of
  * possession has been established — here, that proof is authenticating
  * successfully via connectKeyAuth below.
@@ -505,10 +114,8 @@ router.get('/connect/status', connectStatusRateLimit, async (req, res) => {
  * signature before this call succeeds — it does not have webhookSecret
  * yet. Same chicken-and-egg constraint already documented above /verify.
  *
- * connectRateLimit is reused unchanged, sharing its per-IP attempt
- * budget with the email-based /connect endpoint above — both are
- * "connect family" actions, and one shared budget prevents an attacker
- * from doubling their attempt allowance by switching endpoints.
+ * connectRateLimit runs per IP before authentication. It was previously
+ * shared with the removed email-based /connect endpoint (#52).
  *
  * The email the merchant typed is NOT used for authentication and is
  * never compared against tenant.email — a second, lower-entropy check
@@ -529,8 +136,7 @@ router.post('/connect-with-key', connectRateLimit, connectKeyAuth, async (req, r
       webhookSecret = crypto.randomBytes(32).toString('hex');
     }
 
-    // Same conditional-update shape as /connect's pendingStoreUrl staging
-    // above (see the H1 fix comment in /connect/confirm) — only touch
+    // Conditional update (H1 principle) - only touch
     // storeUrl/allowedDomains if the merchant's current site actually
     // differs from what's on file (first connect, or a site migration).
     const domainUpdate = {};
@@ -586,8 +192,7 @@ router.post('/self-test', apiKeyAuth, verifyHmacSignature, async (req, res) => {
  * Plugin يتحقق إن الـ API Key لا يزال صالحاً
  */
 // SANCTIONED EXCEPTION to the centralized requireAuth() pattern (CWE-1059
-// drift-prevention documentation — same rationale as the /connect/confirm
-// no-grace-period note further down this file). Do NOT "fix" this to use
+// drift-prevention documentation). Do NOT "fix" this to use
 // requireAuth() without re-reading this comment in full.
 //
 // This is a lightweight HEALTH-CHECK endpoint: the WooCommerce plugin calls
