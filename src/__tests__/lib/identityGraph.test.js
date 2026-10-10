@@ -1,5 +1,13 @@
 process.env.IDENTITY_GRAPH_SECRET = 'test-secret-key';
 
+// Observe logging: the errors identityGraph swallows are asserted through logger.error.
+jest.mock('../../lib/logger', () => ({
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+}));
+
 // Mock the db module correctly (since db.js exports prisma directly, not as default)
 jest.mock('../../lib/db', () => {
   const mockFn = () => jest.fn();
@@ -20,6 +28,10 @@ jest.mock('../../lib/db', () => {
     identityEvent: {
       create: mockFn(),
       findMany: mockFn(),
+    },
+    identityNodeMerchant: {
+      create: mockFn(),
+      update: mockFn(),
     },
     computedIdentityRisk: {
       upsert: mockFn(),
@@ -48,6 +60,7 @@ const {
   markOrderAsClean,
 } = require('../../lib/identityGraph');
 const prisma = require('../../lib/db');
+const logger = require('../../lib/logger');
 
 describe('identityGraph.js (public functions)', () => {
   beforeEach(() => {
@@ -67,17 +80,116 @@ describe('identityGraph.js (public functions)', () => {
       prisma.identityNode.findFirst.mockResolvedValue(null);
       prisma.identityEdge.count.mockResolvedValue(0);
 
-      // Mock upsertNode (DEVICE + 4 connections) = 5 calls
+      // upsertNode runs for DEVICE, EMAIL, IP and ADDRESS = 4 calls (the FINGERPRINT connection equals the device id and is filtered out)
       prisma.identityNode.upsert
         .mockResolvedValueOnce({ id: 'deviceNodeId', fraudEvents: 0 })
         .mockResolvedValue({ id: 'connNodeId' });
       prisma.identityEdge.upsert.mockResolvedValue({});
 
       await buildGraphFromOrder(order, merchantId);
-      // Total upsert calls: 5 from upsertNode + 3 from upsertGlobalNode = 8
+      // Total upsert calls: 4 from upsertNode + 3 from upsertGlobalNode = 7
       expect(prisma.identityNode.upsert).toHaveBeenCalledTimes(7);
-      // Note: SHIPPED_TO edge may be skipped if address parsing fails, so we expect at least 3 edges (EMAIL, IP, FINGERPRINT)
+      // Edges: EMAIL, IP and ADDRESS = 3 (FINGERPRINT is filtered out like above)
 expect(prisma.identityEdge.upsert).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('buildGraphFromOrder - cross-merchant junction (upsertGlobalNode)', () => {
+    // Global nodes are built for DEVICE, IP and FINGERPRINT, so each test
+    // expects three junction operations.
+    const order = {
+      deviceFingerprint: 'device123',
+      email: 'test@example.com',
+      ipAddress: '1.2.3.4',
+    };
+    const merchantId = 'merchant1';
+
+    const incrementCalls = () =>
+      prisma.identityNode.update.mock.calls.filter(([arg]) => arg && arg.data && arg.data.merchantsSeen);
+    const globalNodeErrors = () =>
+      logger.error.mock.calls.filter(([, msg]) => msg === 'upsertGlobalNode error');
+
+    beforeEach(() => {
+      prisma.identityNode.findFirst.mockReset();
+      prisma.identityNode.upsert.mockReset();
+      prisma.identityNode.update.mockReset();
+      prisma.identityEdge.count.mockReset();
+      prisma.identityEdge.upsert.mockReset();
+      prisma.identityNodeMerchant.create.mockReset();
+      prisma.identityNodeMerchant.update.mockReset();
+
+      prisma.identityNode.findFirst.mockResolvedValue(null);
+      prisma.identityEdge.count.mockResolvedValue(0);
+      prisma.identityNode.upsert
+        .mockResolvedValueOnce({ id: 'deviceNodeId', fraudEvents: 0 })
+        .mockResolvedValue({ id: 'connNodeId' });
+      prisma.identityNode.update.mockResolvedValue({});
+      prisma.identityEdge.upsert.mockResolvedValue({});
+      prisma.identityNodeMerchant.create.mockResolvedValue({});
+      prisma.identityNodeMerchant.update.mockResolvedValue({});
+    });
+
+    // Put the three mocks only this block configures back to their original state.
+    afterAll(() => {
+      prisma.identityNode.update.mockReset();
+      prisma.identityNodeMerchant.create.mockReset();
+      prisma.identityNodeMerchant.update.mockReset();
+    });
+
+    test('links each global node to the merchant and increments both counters once', async () => {
+      await buildGraphFromOrder(order, merchantId);
+
+      expect(prisma.identityNodeMerchant.create).toHaveBeenCalledTimes(3);
+      expect(prisma.identityNodeMerchant.create).toHaveBeenCalledWith({
+        data: { nodeId: 'connNodeId', merchantId },
+      });
+      expect(incrementCalls()).toHaveLength(3);
+      for (const [arg] of incrementCalls()) {
+        expect(arg).toEqual({
+          where: { id: 'connNodeId' },
+          data: {
+            merchantsSeen: { increment: 1 },
+            recentMerchants: { increment: 1 },
+          },
+        });
+      }
+      expect(prisma.identityNodeMerchant.update).not.toHaveBeenCalled();
+      expect(globalNodeErrors()).toHaveLength(0);
+    });
+
+    test('on P2002 refreshes lastSeenAt on the existing link and does not increment', async () => {
+      prisma.identityNodeMerchant.create.mockRejectedValue(
+        Object.assign(new Error('Unique constraint failed'), { code: 'P2002' })
+      );
+
+      await buildGraphFromOrder(order, merchantId);
+
+      expect(prisma.identityNodeMerchant.update).toHaveBeenCalledTimes(3);
+      expect(prisma.identityNodeMerchant.update).toHaveBeenCalledWith({
+        where: { nodeId_merchantId: { nodeId: 'connNodeId', merchantId } },
+        data: { lastSeenAt: expect.any(Date) },
+      });
+      expect(incrementCalls()).toHaveLength(0);
+      expect(globalNodeErrors()).toHaveLength(0);
+    });
+
+    test('on any other create error logs upsertGlobalNode error and does not increment', async () => {
+      prisma.identityNodeMerchant.create.mockRejectedValue(new Error('boom'));
+
+      await buildGraphFromOrder(order, merchantId);
+
+      expect(globalNodeErrors()).toHaveLength(3);
+      expect(prisma.identityNodeMerchant.update).not.toHaveBeenCalled();
+      expect(incrementCalls()).toHaveLength(0);
+    });
+
+    test('without a merchantId no junction row is created and nothing is incremented', async () => {
+      await buildGraphFromOrder(order, undefined);
+
+      expect(prisma.identityNodeMerchant.create).not.toHaveBeenCalled();
+      expect(prisma.identityNodeMerchant.update).not.toHaveBeenCalled();
+      expect(incrementCalls()).toHaveLength(0);
+      expect(globalNodeErrors()).toHaveLength(0);
     });
   });
 
