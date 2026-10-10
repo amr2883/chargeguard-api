@@ -15,13 +15,12 @@ describe('Happy path — registration through email verification (production mod
   let confirmUrl;
   let emailVerifyToken;
 
-  // Warm-up: the first /register in a fresh Jest process pays several cold
-  // costs (Prisma connections for lib/db and this file's own client, and the
-  // first Turnstile round-trip). Measured here: Step 1 went from ~11.6 s to
-  // ~2.5-5.3 s as reported by jest; that figure still includes ~3 s of
-  // beforeEach hook time, and the test body itself measured 0.4-2.1 s.
-  // One full round-trip in beforeAll, under its own generous timeout, keeps
-  // the cold cost out of Step 1's 15 s budget.
+  // Warm-up: the first /register in a fresh Jest process pays cold costs
+  // (module loading, Prisma engine start, first request). Measured on
+  // 127.0.0.1 with the Turnstile mock: Step 1 takes ~0.2 s with this warm-up
+  // and ~0.8-1.6 s without it. Both are far below the 15 s test timeout on
+  // this machine; the warm-up keeps Step 1 stable on slower or colder runners.
+  // Not measured on CI.
   beforeAll(async () => {
     try {
       email.sendConfirmationEmail.mockResolvedValue(undefined);
