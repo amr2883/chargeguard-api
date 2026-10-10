@@ -64,6 +64,27 @@ jest.mock('../../src/lib/db', () => ({
   tenant: {
     update: jest.fn(),
   },
+  // [Test-infra fix] verifyHmac.js's replay-guard integration
+  // (src/lib/replayGuard.js, added under P0-01) calls db.processedRequest.*
+  // on every HMAC-signed request — including every request this suite
+  // sends through the real, NOT-mocked verifyHmacSignature middleware
+  // (see file header: "middleware/verifyHmac.js is NOT mocked"). This
+  // suite predates that integration and never mocked processedRequest, so
+  // db.processedRequest was undefined, claimRequestOnce() threw a
+  // TypeError, and verifyHmac.js's catch-all (line 218) returned 503 for
+  // every signed request regardless of the route's own logic — masking
+  // the actual route behavior under test. These mocks are NOT testing
+  // replay-guard semantics themselves (that is covered directly in
+  // replayGuard's own test suite) — they only need claimRequestOnce to
+  // succeed once per request so the middleware chain reaches the actual
+  // route handler.
+  processedRequest: {
+    create: jest.fn().mockResolvedValue({ id: 'mock-claim-id' }),
+    findUnique: jest.fn().mockResolvedValue(null),
+    delete: jest.fn().mockResolvedValue({}),
+    updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: jest.fn().mockResolvedValue({ count: 0 }),
+  },
 }));
 
 jest.mock('../../src/lib/logger', () => ({
@@ -155,6 +176,22 @@ function makeRes() {
     return res;
   });
   res.set = jest.fn(() => res);
+  // [Test-infra fix] verifyHmac.js's replay-guard integration (P0-01)
+  // wraps res.json/res.send on every successful claim (not just the
+  // cached-replay path) so any final response gets recorded under the
+  // same replayKey — see verifyHmac.js's own comment: "res.json في
+  // Express بينادي res.send داخليًا". res.send/res.end are also called
+  // directly on the cached-replay branch (claim.cached). Neither existed
+  // on this mock (predates P0-01), so any signed request reaching that
+  // wrapping code threw "Cannot read properties of undefined (reading
+  // 'bind')/'send'/'end'". Mirrors res.json's shape (records body,
+  // returns res) since verifyHmac.js's wrapping code treats res.send the
+  // same way Express does.
+  res.send = jest.fn((body) => {
+    res.body = body;
+    return res;
+  });
+  res.end = jest.fn(() => res);
   return res;
 }
 
@@ -192,6 +229,22 @@ function signRequest(secret, bodyObj, timestamp = Math.floor(Date.now() / 1000).
 function applyPersistentDefaults() {
   validateWebhookUrl.mockReturnValue({ valid: true });
   sendWebhookAlert.mockResolvedValue(undefined);
+  // [Test-infra fix] verifyHmac.js's replay-guard integration (P0-01,
+  // src/lib/replayGuard.js) calls db.processedRequest.* on every request
+  // that goes through the real, NOT-mocked verifyHmacSignature middleware
+  // this suite uses. jest.resetAllMocks() in beforeEach wipes any
+  // mockResolvedValue set on these — including ones set once in the db
+  // mock factory at module load — so they must be re-applied here, same
+  // as validateWebhookUrl/sendWebhookAlert above, to keep claimRequestOnce
+  // taking its happy-path branch (fresh claim succeeds) by default in
+  // every test. This is not testing replay-guard semantics itself (that
+  // lives in replayGuard's own test suite) — it only needs the claim step
+  // to succeed so the middleware chain reaches the actual route handler.
+  db.processedRequest.create.mockResolvedValue({ id: 'mock-claim-id' });
+  db.processedRequest.findUnique.mockResolvedValue(null);
+  db.processedRequest.delete.mockResolvedValue({});
+  db.processedRequest.updateMany.mockResolvedValue({ count: 1 });
+  db.processedRequest.deleteMany.mockResolvedValue({ count: 0 });
 }
 
 beforeAll(() => {
@@ -313,7 +366,7 @@ describe('POST /webhook', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ error: 'webhookUrl is required.' });
+    expect(res.body).toEqual({ error: 'webhookUrl is required.' });
     expect(db.tenant.update).not.toHaveBeenCalled();
   });
 
@@ -327,7 +380,7 @@ describe('POST /webhook', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ error: 'webhookUrl is required.' });
+    expect(res.body).toEqual({ error: 'webhookUrl is required.' });
   });
 
   test('invalid webhookType → 400', async () => {
@@ -340,7 +393,7 @@ describe('POST /webhook', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({
+    expect(res.body).toEqual({
       error: 'webhookType must be slack, discord, or custom.',
     });
     expect(validateWebhookUrl).not.toHaveBeenCalled();
@@ -357,7 +410,7 @@ describe('POST /webhook', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ error: 'Internal or private IPs are not allowed' });
+    expect(res.body).toEqual({ error: 'Internal or private IPs are not allowed' });
     expect(db.tenant.update).not.toHaveBeenCalled();
   });
 
@@ -371,7 +424,7 @@ describe('POST /webhook', () => {
 
     await dispatch(handlers(), req, res);
 
-    expect(res.json).toHaveBeenCalledWith({ error: 'Invalid webhook URL.' });
+    expect(res.body).toEqual({ error: 'Invalid webhook URL.' });
   });
 
   test('valid input → saves webhook settings and resets status fields', async () => {
@@ -395,7 +448,7 @@ describe('POST /webhook', () => {
         webhookFailureCount: 0,
       },
     });
-    expect(res.json).toHaveBeenCalledWith({ success: true });
+    expect(res.body).toEqual({ success: true });
     expect(logger.info).toHaveBeenCalled();
   });
 
@@ -486,7 +539,7 @@ describe('POST /webhook/test', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(400);
-    expect(res.json).toHaveBeenCalledWith({ error: 'No webhook URL configured. Save one first.' });
+    expect(res.body).toEqual({ error: 'No webhook URL configured. Save one first.' });
     expect(sendWebhookAlert).not.toHaveBeenCalled();
   });
 
@@ -526,7 +579,7 @@ describe('POST /webhook/test', () => {
       where: { id: 'tenant_1' },
       data: { webhookLastStatus: 'success', webhookLastSentAt: new Date('2026-07-08T00:00:00.000Z') },
     });
-    expect(res.json).toHaveBeenCalledWith({ success: true });
+    expect(res.body).toEqual({ success: true });
 
     jest.useRealTimers();
   });
@@ -566,7 +619,7 @@ describe('POST /webhook/test', () => {
       data: { webhookLastStatus: 'failed', webhookFailureCount: { increment: 1 } },
     });
     expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith({ error: 'ECONNREFUSED' });
+    expect(res.body).toEqual({ error: 'ECONNREFUSED' });
   });
 
   test('sendWebhookAlert rejects with no .message → falls back to generic text', async () => {
@@ -581,7 +634,7 @@ describe('POST /webhook/test', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith({ error: 'Test failed. Check your webhook URL.' });
+    expect(res.body).toEqual({ error: 'Test failed. Check your webhook URL.' });
   });
 
   test('missing HMAC headers → 401, sendWebhookAlert never called', async () => {
