@@ -879,17 +879,17 @@ describe('recordPattern — patternMerchant registration error handling', () => 
 // ─────────────────────────────────────────────────────────────────────────
 
 describe('markPatternAsFraud', () => {
-  test('delegates to recordPattern with isFraud forced to true and merchantId forced to null — a low-weightedScore order that would be blocked as legit proceeds anyway, and no merchant is ever registered', async () => {
+  test('delegates to recordPattern with isFraud forced to true and merchantId passed through (null here) — a low-weightedScore order that would be blocked as legit proceeds anyway, and no merchant is ever registered', async () => {
     db.fraudPattern.findUnique.mockResolvedValue(null); // new pattern
     db.fraudPattern.upsert.mockResolvedValue({ id: 'pattern-mark-fraud' });
 
     const order = nightOrder({ isNewCustomer: true }); // weightedScore=1.8, would fail the legit gate
-    const result = await markPatternAsFraud(order, {}, {}, {});
+    const result = await markPatternAsFraud(order, {}, {}, null);
 
     expect(db.$transaction).toHaveBeenCalled(); // proves the legit-only weight gate was bypassed
-    // markPatternAsFraud's signature has no merchantId parameter at all —
-    // confirming merchantId is unconditionally null, patternMerchant.create
-    // must never be invoked regardless of any db state.
+    // markPatternAsFraud(order, emailIntel, ipIntel, merchantId, patternContext)
+    // takes merchantId as its 4th parameter; null is passed explicitly here,
+    // so patternMerchant.create must not be invoked.
     expect(db.patternMerchant.create).not.toHaveBeenCalled();
     expect(result).not.toBeNull();
   });
