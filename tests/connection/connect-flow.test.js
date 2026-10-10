@@ -9,9 +9,6 @@ const email = require('../../src/lib/email');
 
 const prisma = new PrismaClient();
 
-const TURNSTILE_ALWAYS_PASS = 'dummy-token-for-always-pass-testing-secret';
-const TURNSTILE_ALWAYS_FAIL_SECRET = '2x0000000000000000000000000000000AA';
-
 // Builds the same signed-string HMAC the PHP plugin's ChargeGuard_API_Client
 // and Node's verifyHmac.js both construct: `${timestamp}.${rawBody}`,
 // signed as 'v1=' + HMAC-SHA256(secret, signedStr) hex.
@@ -47,7 +44,7 @@ async function seedConnectableTenant(label) {
   return { tenant, domain, originalKey };
 }
 
-describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
+describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)', () => {
   const createdTenantIds = [];
 
   afterAll(async () => {
@@ -57,182 +54,37 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
     await prisma.$disconnect();
   });
 
-  // Warm-up: the first /connect in a fresh process pays one-time costs (two
-  // Prisma connections, cold query paths). Measured ~13s on this machine for
-  // the first test, against the 15s per-test limit. This runs the same
-  // operations once, under an explicit hook timeout, so the per-test limit
-  // only catches steady-state slowness. Its rate-limit row is cleared by the
-  // global beforeEach reset before the first test.
+  // Warm-up: the first authenticated request in a fresh process pays one-time
+  // costs (Prisma connections, cold query paths). Earlier runs measured ~13s for
+  // the first test (when it went through /connect), against the 15s per-test
+  // limit. This performs the same kind of request once, under an explicit hook
+  // timeout. Its rate-limit row is cleared by the global beforeEach reset
+  // before the first test.
   beforeAll(async () => {
-    email.sendConfirmationEmail.mockResolvedValue(undefined);
-    const { tenant, domain } = await seedConnectableTenant('warmup');
+    const { tenant, originalKey } = await seedConnectableTenant('warmup');
     createdTenantIds.push(tenant.id);
     await request(app)
-      .post('/api/auth/connect')
-      .send({ email: tenant.email, siteUrl: `https://${domain}`, turnstileToken: TURNSTILE_ALWAYS_PASS });
+      .post('/api/auth/connect-with-key')
+      .set('X-Api-Key', originalKey)
+      .send({});
   }, 60000);
   beforeEach(() => {
     jest.clearAllMocks();
     email.sendConfirmationEmail.mockResolvedValue(undefined);
   });
 
-  // ── Positive path ─────────────────────────────────────────────────────
-  describe('positive path', () => {
-    test('POST /connect for a registered, verified tenant issues a connect token and sends the email', async () => {
-      const { tenant, domain } = await seedConnectableTenant('happy');
-      createdTenantIds.push(tenant.id);
-
-      const res = await request(app)
-        .post('/api/auth/connect')
-        .send({ email: tenant.email, siteUrl: `https://${domain}`, turnstileToken: TURNSTILE_ALWAYS_PASS });
-
-      expect(res.status).toBe(200);
-      expect(res.body.message).toMatch(/connect link has been sent/i);
-
-      const updated = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(updated.connectToken).toMatch(/^[0-9a-f]{64}$/);
-      const expiresAt = new Date(updated.connectTokenExpiresAt).getTime();
-      expect(Math.abs(expiresAt - (Date.now() + 15 * 60 * 1000))).toBeLessThan(60 * 1000);
-
-      expect(email.sendConfirmationEmail).toHaveBeenCalledTimes(1);
-      const [sentTo, confirmUrl] = email.sendConfirmationEmail.mock.calls[0];
-      expect(sentTo).toBe(tenant.email);
-      expect(confirmUrl).toContain('/api/auth/connect/confirm?token=');
-      expect(confirmUrl).toContain(updated.connectToken);
-    });
-
-    test('GET /connect/confirm issues a new apiKey (browser gets HTML only); the plugin collects it once via GET /connect/status', async () => {
-      const { tenant } = await seedConnectableTenant('confirm');
-      createdTenantIds.push(tenant.id);
-      const oldApiKeyHash = tenant.apiKeyHash;
-      const oldWebhookSecret = tenant.webhookSecret;
-
-      const connectRes = await request(app)
-        .post('/api/auth/connect')
-        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-      const requestId = connectRes.body.connectRequestId;
-      expect(typeof requestId).toBe('string');
-      expect(requestId.length).toBeGreaterThan(0);
-
-      const withToken = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-
-      // Step 1: browser click on the emailed link. HTML only, no credentials.
-      const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
-      expect(confirmRes.status).toBe(200);
-      expect(confirmRes.headers['content-type']).toMatch(/text\/html/);
-
-      const afterConfirm = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(afterConfirm.connectToken).toBeNull();
-      expect(afterConfirm.connectTokenExpiresAt).toBeNull();
-      expect(afterConfirm.apiKeyHash).not.toBe(oldApiKeyHash); // rotated
-      expect(afterConfirm.keyRotatedAt).not.toBeNull();
-      // Plaintext is staged (not permanent) until the plugin collects it.
-      expect(typeof afterConfirm.apiKey).toBe('string');
-      expect(afterConfirm.apiKey.length).toBeGreaterThan(0);
-      expect(hashApiKey(afterConfirm.apiKey)).toBe(afterConfirm.apiKeyHash);
-      // The browser-facing page must never contain the key.
-      expect(confirmRes.text).not.toContain(afterConfirm.apiKey);
-
-      // Step 2: plugin polls /status and receives the credentials once.
-      const statusUrl = `/api/auth/connect/status?requestId=${encodeURIComponent(requestId)}`;
-      const statusRes = await request(app).get(statusUrl);
-      expect(statusRes.status).toBe(200);
-      expect(statusRes.body.status).toBe('active');
-      expect(statusRes.body.merchantId).toBe(tenant.id);
-      expect(statusRes.body.email).toBe(tenant.email);
-      expect(statusRes.body.webhookSecret).toBe(oldWebhookSecret); // preserved, not rotated
-      expect(statusRes.body.apiKey).toBe(afterConfirm.apiKey);
-      expect(hashApiKey(statusRes.body.apiKey)).toBe(afterConfirm.apiKeyHash);
-
-      // After delivery: plaintext and requestId are purged, hash unchanged.
-      const afterStatus = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(afterStatus.apiKey).toBeNull();
-      expect(afterStatus.connectRequestId).toBeNull();
-      expect(afterStatus.apiKeyHash).toBe(afterConfirm.apiKeyHash);
-
-      // Step 3: delivery is one-time. Same requestId now yields pending, no key.
-      const again = await request(app).get(statusUrl);
-      expect(again.status).toBe(200);
-      expect(again.body.status).toBe('pending');
-      expect(again.body.apiKey).toBeUndefined();
-    });
-  });
-
-  // ── Negative paths ────────────────────────────────────────────────────
-  describe('negative paths', () => {
-    test('POST /connect for an unregistered email returns the same generic response (no enumeration signal)', async () => {
-      const res = await request(app)
-        .post('/api/auth/connect')
-        .send({ email: `nonexistent-${Date.now()}@example.com`, turnstileToken: TURNSTILE_ALWAYS_PASS });
-
-      expect(res.status).toBe(200);
-      expect(res.body.message).toMatch(/if this email is registered/i);
-      expect(email.sendConfirmationEmail).not.toHaveBeenCalled();
-    });
-
-    test('GET /connect/confirm with an invalid token returns 401', async () => {
-      const res = await request(app).get('/api/auth/connect/confirm?token=' + 'f'.repeat(64));
-      expect(res.status).toBe(401);
-    });
-
-    test('GET /connect/confirm with an expired token returns 410 and does not rotate the key', async () => {
-      const { tenant } = await seedConnectableTenant('expired');
-      createdTenantIds.push(tenant.id);
-      const oldApiKeyHash = tenant.apiKeyHash;
-
-      await request(app)
-        .post('/api/auth/connect')
-        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-
-      const withToken = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      await prisma.tenant.update({
-        where: { id: tenant.id },
-        data: { connectTokenExpiresAt: new Date(Date.now() - 1000) },
-      });
-
-      const res = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
-      expect(res.status).toBe(410);
-
-      const final = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(final.apiKeyHash).toBe(oldApiKeyHash); // untouched
-    });
-
-    test('POST /connect without a Turnstile token is rejected before any token is issued', async () => {
-      const { tenant } = await seedConnectableTenant('noturnstile');
-      createdTenantIds.push(tenant.id);
-
-      const res = await request(app).post('/api/auth/connect').send({ email: tenant.email });
-      expect(res.status).toBe(400);
-
-      const unchanged = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(unchanged.connectToken).toBeNull();
-    });
-
-    test('POST /connect with an invalid Turnstile token is rejected (403)', async () => {
-      const originalSecret = process.env.TURNSTILE_SECRET_KEY;
-      process.env.TURNSTILE_SECRET_KEY = TURNSTILE_ALWAYS_FAIL_SECRET;
-      try {
-        const { tenant } = await seedConnectableTenant('badturnstile');
-        createdTenantIds.push(tenant.id);
-
-        const res = await request(app)
-          .post('/api/auth/connect')
-          .send({ email: tenant.email, turnstileToken: 'any-non-empty-value' });
-        expect(res.status).toBe(403);
-      } finally {
-        process.env.TURNSTILE_SECRET_KEY = originalSecret;
-      }
-    });
-
-    test('4th /connect attempt within 15 minutes is rate-limited; first 3 succeed', async () => {
-      const { tenant } = await seedConnectableTenant('ratelimit');
+  // -- Rate limiting shared by the connect family (connectRateLimit) --
+  describe('connect-with-key rate limiting', () => {
+    test('4th /connect-with-key attempt within 15 minutes is rate-limited; first 3 succeed', async () => {
+      const { tenant, originalKey } = await seedConnectableTenant('ratelimit');
       createdTenantIds.push(tenant.id);
 
       const results = [];
       for (let i = 0; i < 4; i++) {
         const res = await request(app)
-          .post('/api/auth/connect')
-          .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
+          .post('/api/auth/connect-with-key')
+          .set('X-Api-Key', originalKey)
+          .send({});
         results.push(res.status);
       }
       expect(results.slice(0, 3)).toEqual([200, 200, 200]);
@@ -245,24 +97,13 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
     let liveTenant, liveApiKey, liveDomain;
 
     beforeAll(async () => {
-      // Clear rate-limit table explicitly — beforeAll runs before
-      // beforeEach, so the global reset hasn't fired yet.
-      await prisma.connectAttempt.deleteMany({});
-
-      const { tenant, domain } = await seedConnectableTenant('domaincheck');
+      // The seeded tenant already has a live hashed API key and a webhookSecret,
+      // so no connect flow is needed to obtain credentials.
+      const { tenant, domain, originalKey } = await seedConnectableTenant('domaincheck');
       createdTenantIds.push(tenant.id);
-
-      await request(app).post('/api/auth/connect').send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-      const withToken = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
-
       liveTenant = tenant;
-      liveApiKey = (await request(app).get(`/api/auth/connect/status?requestId=${withToken.connectRequestId}`)).body.apiKey;
+      liveApiKey = originalKey;
       liveDomain = domain;
-
-      if (!liveApiKey) {
-        throw new Error('Fixture setup failed: /connect or /connect/confirm did not return an apiKey — check for rate-limiting or token issues before this describe block runs.');
-      }
     });
 
     test('request with the correct X-Store-Domain and a valid HMAC signature is accepted', async () => {
@@ -307,24 +148,13 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
     let liveTenant, liveApiKey, liveDomain;
 
     beforeAll(async () => {
-      // beforeAll runs before this block's first beforeEach, so the global
-      // rate-limit reset in tests/setup/resetRateLimits.js hasn't fired yet.
-      await prisma.connectAttempt.deleteMany({});
-
-      const { tenant, domain } = await seedConnectableTenant('hmaccheck');
+      // The seeded tenant already has a live hashed API key and a webhookSecret,
+      // so no connect flow is needed to obtain credentials.
+      const { tenant, domain, originalKey } = await seedConnectableTenant('hmaccheck');
       createdTenantIds.push(tenant.id);
-
-      await request(app).post('/api/auth/connect').send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-      const withToken = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      const confirmRes = await request(app).get(`/api/auth/connect/confirm?token=${withToken.connectToken}`);
-
       liveTenant = tenant;
-      liveApiKey = (await request(app).get(`/api/auth/connect/status?requestId=${withToken.connectRequestId}`)).body.apiKey;
+      liveApiKey = originalKey;
       liveDomain = domain;
-
-      if (!liveApiKey) {
-        throw new Error('Fixture setup failed: /connect or /connect/confirm did not return an apiKey — check for rate-limiting or token issues before this describe block runs.');
-      }
     });
 
     test('missing signature headers are rejected (401)', async () => {
@@ -408,73 +238,23 @@ describe('Plugin Connection — /connect + /connect/confirm (T2)', () => {
     });
   });
   
-  // ── /connect/status edge cases ────────────────────────────────────────
-  describe('GET /connect/status edge cases', () => {
-    const randomRequestId = () => crypto.randomBytes(32).toString('hex');
-    const INVALID_BODY = { status: 'invalid', error: 'requestId is required' };
-
-    test('a missing requestId is rejected with 400', async () => {
-      const res = await request(app).get('/api/auth/connect/status');
-
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual(INVALID_BODY);
-    });
-
-    test('a non-string requestId (repeated query parameter) is rejected with 400', async () => {
-      const res = await request(app).get('/api/auth/connect/status?requestId=a&requestId=b');
-
-      expect(res.status).toBe(400);
-      expect(res.body).toEqual(INVALID_BODY);
-    });
-
-    test('an unknown requestId returns exactly {status: "pending"}', async () => {
-      const res = await request(app).get(`/api/auth/connect/status?requestId=${randomRequestId()}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ status: 'pending' });
-    });
-
-    test('a known requestId before confirmation is indistinguishable from an unknown one', async () => {
-      const { tenant } = await seedConnectableTenant('statuspending');
-      createdTenantIds.push(tenant.id);
-
-      const connectRes = await request(app)
+  // -- Legacy email-based connect flow was removed (#52) --
+  describe('legacy email-based connect flow is removed (#52)', () => {
+    test('POST /api/auth/connect is not routed (404)', async () => {
+      const res = await request(app)
         .post('/api/auth/connect')
-        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-      const requestId = connectRes.body.connectRequestId;
-      expect(typeof requestId).toBe('string');
-
-      // Guard: the id really is a known one (stored on the tenant).
-      const stored = await prisma.tenant.findUnique({ where: { id: tenant.id } });
-      expect(stored.connectRequestId).toBe(requestId);
-
-      const known = await request(app).get(`/api/auth/connect/status?requestId=${requestId}`);
-      const unknown = await request(app).get(`/api/auth/connect/status?requestId=${randomRequestId()}`);
-
-      expect(known.status).toBe(unknown.status);
-      expect(known.body).toEqual(unknown.body);
-      expect(known.body).toEqual({ status: 'pending' });
+        .send({ email: `legacy-${Date.now()}@example.com`, siteUrl: 'https://legacy.example.com', turnstileToken: 'any-non-empty-value' });
+      expect(res.status).toBe(404);
     });
 
-    test('a known requestId whose connect token has expired returns {status: "expired"}', async () => {
-      const { tenant } = await seedConnectableTenant('statusexpired');
-      createdTenantIds.push(tenant.id);
+    test('GET /api/auth/connect/confirm is not routed (404)', async () => {
+      const res = await request(app).get('/api/auth/connect/confirm?token=' + 'f'.repeat(64));
+      expect(res.status).toBe(404);
+    });
 
-      const connectRes = await request(app)
-        .post('/api/auth/connect')
-        .send({ email: tenant.email, turnstileToken: TURNSTILE_ALWAYS_PASS });
-      const requestId = connectRes.body.connectRequestId;
-      expect(typeof requestId).toBe('string');
-
-      await prisma.tenant.update({
-        where: { id: tenant.id },
-        data: { connectTokenExpiresAt: new Date(Date.now() - 1000) },
-      });
-
-      const res = await request(app).get(`/api/auth/connect/status?requestId=${requestId}`);
-
-      expect(res.status).toBe(200);
-      expect(res.body).toEqual({ status: 'expired' });
+    test('GET /api/auth/connect/status is not routed (404)', async () => {
+      const res = await request(app).get('/api/auth/connect/status?requestId=' + 'f'.repeat(64));
+      expect(res.status).toBe(404);
     });
   });
 });
