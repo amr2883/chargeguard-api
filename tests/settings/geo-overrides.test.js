@@ -62,6 +62,24 @@ jest.mock('../../src/lib/db', () => ({
     update: jest.fn(),
     upsert: jest.fn(),
   },
+  // [P0-01 test-infra fix] verifyHmacSignature's replay guard (replayGuard.js)
+  // calls db.processedRequest.create() on every HMAC-signed request that
+  // reaches it — and PUT /country-overrides does go through
+  // verifyHmacSignature (unlike its GET sibling, which never touches this
+  // mock key at all). Without this, every PUT test throws "Cannot read
+  // properties of undefined (reading 'create')" inside the guard's try
+  // block, which verifyHmac.js catches and converts to a 503 — masking the
+  // real test outcome entirely. Default resolved values are re-applied in
+  // applyPersistentDefaults() below (not just here), because this file's
+  // beforeEach calls jest.resetAllMocks() — which wipes mockResolvedValue
+  // set here after the very first test runs.
+  processedRequest: {
+    create: jest.fn(),
+    findUnique: jest.fn(),
+    delete: jest.fn(),
+    updateMany: jest.fn(),
+    deleteMany: jest.fn(),
+  },
 }));
 
 jest.mock('../../src/lib/metrics', () => ({
@@ -156,6 +174,19 @@ function makeRes() {
     return res;
   });
   res.set = jest.fn(() => res);
+  // [P0-01 test-infra fix] verifyHmac.js's replay-guard integration wraps
+  // res.json/res.send on every successful claim (not just the cached-replay
+  // path) so any final response gets recorded under the same replayKey —
+  // see verifyHmac.js's own comment. res.send/res.end are also called
+  // directly on the cached-replay branch (claim.cached). Neither existed on
+  // this mock (predates the P0-01 replay guard), so any signed PUT request
+  // reaching that wrapping code threw "Cannot read properties of undefined
+  // (reading 'bind')". Mirrors res.json's shape (records body, returns res).
+  res.send = jest.fn((body) => {
+    res.body = body;
+    return res;
+  });
+  res.end = jest.fn(() => res);
   return res;
 }
 
@@ -185,6 +216,15 @@ function signRequest(secret, bodyObj, timestamp = Math.floor(Date.now() / 1000).
 
 function applyPersistentDefaults() {
   db.tenant.update.mockResolvedValue({});
+  // [P0-01 test-infra fix] see the jest.mock('../../src/lib/db', ...) factory
+  // comment above for the full rationale — must be re-applied here every
+  // beforeEach since jest.resetAllMocks() wipes mockResolvedValue set inside
+  // the factory after the first test.
+  db.processedRequest.create.mockResolvedValue({ id: 'mock-claim-id' });
+  db.processedRequest.findUnique.mockResolvedValue(null);
+  db.processedRequest.delete.mockResolvedValue({});
+  db.processedRequest.updateMany.mockResolvedValue({ count: 1 });
+  db.processedRequest.deleteMany.mockResolvedValue({ count: 0 });
 }
 
 beforeAll(() => {
@@ -207,7 +247,7 @@ describe('GET /country-overrides', () => {
 
     await dispatch(handlers(), req, res);
 
-    const payload = res.json.mock.calls[0][0];
+    const payload = res.body;
     expect(payload.success).toBe(true);
     expect(payload.availableCountries).toHaveLength(10);
     expect(payload.availableCountries.every((c) => c.currentOverride === 'smart')).toBe(true);
@@ -230,7 +270,7 @@ describe('GET /country-overrides', () => {
 
     await dispatch(handlers(), req, res);
 
-    const payload = res.json.mock.calls[0][0];
+    const payload = res.body;
     expect(payload.countryOverrides).toEqual({});
     expect(payload.summary.modifiedCount).toBe(0);
   });
@@ -242,7 +282,7 @@ describe('GET /country-overrides', () => {
 
     await dispatch(handlers(), req, res);
 
-    const payload = res.json.mock.calls[0][0];
+    const payload = res.body;
     const ng = payload.availableCountries.find((c) => c.code === 'NG');
     const ph = payload.availableCountries.find((c) => c.code === 'PH');
     const ro = payload.availableCountries.find((c) => c.code === 'RO');
@@ -276,7 +316,7 @@ describe('GET /country-overrides', () => {
 
     await dispatch(handlers(), req, res);
 
-    const payload = res.json.mock.calls[0][0];
+    const payload = res.body;
     const ro = payload.availableCountries.find((c) => c.code === 'RO');
     // RO base 3 → 3*2 = 6, well under the cap of 20
     expect(ro.effectivePenalty).toBe(6);
@@ -289,7 +329,7 @@ describe('GET /country-overrides', () => {
 
     await dispatch(handlers(), req, res);
 
-    const payload = res.json.mock.calls[0][0];
+    const payload = res.body;
     expect(payload.countryOverrides).toEqual({ XX: 'escalate', NG: 'allow' });
     expect(payload.availableCountries.some((c) => c.code === 'XX')).toBe(false);
     // summary counts are derived from availableCountries (the known list), so
@@ -313,7 +353,7 @@ describe('GET /country-overrides', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(500);
-    expect(res.json).toHaveBeenCalledWith({ error: 'Internal Server Error' });
+    expect(res.body).toEqual({ error: 'Internal Server Error' });
     expect(logger.error).toHaveBeenCalled();
   });
 
@@ -335,7 +375,7 @@ describe('GET /country-overrides', () => {
     await dispatch(handlers(), req, res);
 
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'EMAIL_NOT_VERIFIED' }));
+    expect(res.body).toEqual(expect.objectContaining({ code: 'EMAIL_NOT_VERIFIED' }));
   });
 });
 
@@ -359,7 +399,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ error: 'updates must be a non-empty array' });
+      expect(res.body).toEqual({ error: 'updates must be a non-empty array' });
     });
 
     test('empty updates array → 400', async () => {
@@ -371,7 +411,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ error: 'updates must be a non-empty array' });
+      expect(res.body).toEqual({ error: 'updates must be a non-empty array' });
     });
 
     test('updates not an array → 400', async () => {
@@ -384,7 +424,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({ error: 'updates must be a non-empty array' });
+      expect(res.body).toEqual({ error: 'updates must be a non-empty array' });
     });
 
     test('update missing countryCode or override → 400 with details', async () => {
@@ -396,7 +436,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      const payload = res.json.mock.calls[0][0];
+      const payload = res.body;
       expect(payload.error).toBe('Validation failed');
       expect(payload.details).toEqual([
         'Each update must have countryCode and override',
@@ -413,7 +453,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
+      expect(res.body).toEqual({
         error: 'Validation failed',
         details: ['Unsupported country code: ZZ'],
       });
@@ -428,7 +468,7 @@ describe('PUT /country-overrides', () => {
       await dispatch(handlers(), req, res);
 
       expect(res.status).toHaveBeenCalledWith(400);
-      expect(res.json).toHaveBeenCalledWith({
+      expect(res.body).toEqual({
         error: 'Validation failed',
         details: ['Invalid override value for NG: must be allow, escalate, or smart'],
       });
@@ -446,7 +486,7 @@ describe('PUT /country-overrides', () => {
 
       await dispatch(handlers(), req, res);
 
-      const payload = res.json.mock.calls[0][0];
+      const payload = res.body;
       expect(payload.details).toEqual([
         'Unsupported country code: ZZ',
         'Invalid override value for NG: must be allow, escalate, or smart',
@@ -486,7 +526,7 @@ describe('PUT /country-overrides', () => {
           countryOverridesUpdatedAt: expect.any(Date),
         },
       });
-      const payload = res.json.mock.calls[0][0];
+      const payload = res.body;
       expect(payload.success).toBe(true);
       expect(payload.countryOverrides).toEqual({ VN: 'escalate' });
       expect(payload.warnings).toEqual([]);
@@ -501,7 +541,7 @@ describe('PUT /country-overrides', () => {
 
       await dispatch(handlers(), req, res);
 
-      const payload = res.json.mock.calls[0][0];
+      const payload = res.body;
       expect(payload.warnings).toEqual([
         {
           countryCode: 'NG',
@@ -519,7 +559,7 @@ describe('PUT /country-overrides', () => {
 
       await dispatch(handlers(), req, res);
 
-      const payload = res.json.mock.calls[0][0];
+      const payload = res.body;
       expect(payload.warnings).toEqual([]);
     });
 
