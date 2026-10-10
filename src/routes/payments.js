@@ -315,6 +315,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
   const captureId    = capture?.id;
   const amountPaid   = parseFloat(capture?.amount?.value || '0');
   const currency     = capture?.amount?.currency_code || 'USD';
+  const EXPECTED_CURRENCY = 'USD'; // ASSUMPTION: all plans are priced in USD. Confirm where the PayPal order is created.
   const customId     = capture?.custom_id;
   // custom_id هو sessionId الذي سنُمرره عند إنشاء PayPal Order
 
@@ -355,9 +356,29 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     }
 
     if (session.status !== 'pending') {
-      logger.warn(
-        { module: 'payments', customId, status: session.status },
-        'PayPal webhook: session already processed or expired'
+      // #101: a capture arrived for a session that is not pending. completed = the session was
+      // already activated by another capture (possible double charge); failed = we rejected an
+      // earlier capture (amount/currency). In both cases the customer has paid and nothing is
+      // activated or refunded here, so this must be loud. Behaviour is unchanged (return, no writes).
+      const loud = session.status === 'completed' || session.status === 'failed';
+      const logFn = loud ? logger.error : logger.warn;
+      logFn.call(
+        logger,
+        {
+          module: 'payments',
+          customId,
+          captureId,
+          status: session.status,
+          currency,
+          rawAmount: capture?.amount?.value,
+          tenantId: session.tenantId,
+          reason: session.status === 'completed'
+            ? 'session_completed_possible_double_charge'
+            : session.status === 'failed'
+              ? 'session_failed_paid_not_activated'
+              : 'session_not_pending',
+        },
+        'PayPal webhook: capture on a non-pending checkout session. Verify manually in PayPal'
       );
       return;
     }
@@ -366,7 +387,24 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     const expectedAmount = session.amount;
     const tolerance      = 0.01; // فارق مقبول بسبب تقريبات الفاوصل العشرية
 
-    if (Math.abs(amountPaid - expectedAmount) > tolerance) {
+    const amountInvalid    = !Number.isFinite(amountPaid);
+    const currencyMismatch = currency !== EXPECTED_CURRENCY;
+
+    if (amountInvalid || currencyMismatch || Math.abs(amountPaid - expectedAmount) > tolerance) {
+      if (amountInvalid || currencyMismatch) {
+        logger.error(
+          {
+            module:           'payments',
+            captureId,
+            reason:           amountInvalid ? 'invalid_amount' : 'currency_mismatch',
+            rawAmount:        capture?.amount?.value,
+            currency,
+            expectedCurrency: EXPECTED_CURRENCY,
+            tenantId:         session.tenantId,
+          },
+          'PayPal webhook rejected: invalid amount or unexpected currency. Verify manually in PayPal'
+        );
+      }
       logger.error(
         {
           module:   'payments',
@@ -461,10 +499,36 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     }, 2000);
 
   } catch (err) {
-    logger.error(
-      { module: 'payments', error: err.message, stack: err.stack },
-      'PayPal webhook processing failed'
-    );
+    // [P0-07 fix] A P2002 unique-constraint violation here means two
+    // concurrent deliveries of the same webhook both passed the
+    // findUnique(captureId) check above — a genuine TOCTOU race, since
+    // PayPal does redeliver a webhook if it doesn't see our 200 fast
+    // enough — and one of them lost the race for the captureId (or
+    // checkoutSessionId) unique constraint inside this transaction. This
+    // is NOT a processing failure: the constraint did exactly what it's
+    // for, and the whole transaction rolling back means this particular
+    // request produced zero side effects (no double subscription
+    // activation, no duplicate Payment row) — the other concurrent
+    // request is the one that actually completed the work. Logging this
+    // as an error would be a false alarm, and could mask a real failure
+    // happening at the same time under the noise.
+    let dupOfKnownCapture = false;
+    if (err.code === 'P2002') {
+      // #89: P2002 may come from captureId (innocent redelivery) OR from checkoutSessionId
+      // (a different capture on the same session). Only the first is an innocent duplicate.
+      dupOfKnownCapture = Boolean(await Promise.resolve(db.payment.findUnique({ where: { captureId } })).catch(() => null));
+    }
+    if (dupOfKnownCapture) {
+      logger.info(
+        { module: 'payments', captureId, target: err.meta?.target },
+        'PayPal webhook: concurrent duplicate suppressed by unique constraint — no action needed'
+      );
+    } else {
+      logger.error(
+        { module: 'payments', error: err.message, stack: err.stack },
+        'PayPal webhook processing failed' + (err.code === 'P2002' ? ' (P2002 but no Payment row for this captureId: possible second payment on the same checkout session)' : '')
+      );
+    }
     // لا نُعيد خطأ هنا لأننا أرسلنا 200 مسبقاً
   }
 });

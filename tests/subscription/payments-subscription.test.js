@@ -680,7 +680,7 @@ describe('POST /paypal-webhook', () => {
     });
 
     test('happy path (annual) → endDate = +365d', async () => {
-      jest.useFakeTimers();
+      jest.useFakeTimers({ doNotFake: ['setTimeout'] });
       jest.setSystemTime(new Date('2026-01-01T00:00:00.000Z'));
 
       db.payment.findUnique.mockResolvedValue(null);
@@ -741,6 +741,137 @@ describe('POST /paypal-webhook', () => {
 
       expect(res.status).toHaveBeenCalledWith(200);
       expect(logger.error).toHaveBeenCalled();
+    });
+  });
+
+  // Block C hardening: #86 currency, #88 non-finite amount, #89 P2002 classification.
+  // Every mock is reset explicitly: clearAllMocks in the global beforeEach does not
+  // remove implementations, and earlier tests leave $transaction implementations behind.
+  describe('hardening (currency / non-finite amount / P2002)', () => {
+    const pendingSession = () => makeSession({
+      id: 'sess_123', tenantId: 'tenant_1', planId: 'pro_monthly', amount: 19,
+      billingCycle: 'monthly', status: 'pending', tenant: { email: 'a@b.com' },
+    });
+
+    beforeEach(() => {
+      db.$transaction.mockReset();
+      db.payment.findUnique.mockReset();
+      db.checkoutSession.findUnique.mockReset();
+      db.checkoutSession.update.mockReset();
+      mockSuccessfulVerification();
+      jest.spyOn(global, 'setTimeout').mockImplementation(() => 0);
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    test('currency other than USD (EGP, right number) is rejected: session failed, no writes, loud log', async () => {
+      db.payment.findUnique.mockResolvedValue(null);
+      db.checkoutSession.findUnique.mockResolvedValue(pendingSession());
+      const req = makeWebhookReq(makeCaptureEvent({ resource: { amount: { value: '19.00', currency_code: 'EGP' } } }));
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(db.checkoutSession.update).toHaveBeenCalledWith({ where: { id: 'sess_123' }, data: { status: 'failed' } });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'currency_mismatch', currency: 'EGP', captureId: 'capture_1' }),
+        expect.any(String)
+      );
+    });
+
+    test('non-numeric amount ("abc" -> NaN) is rejected: session failed, no writes', async () => {
+      db.payment.findUnique.mockResolvedValue(null);
+      db.checkoutSession.findUnique.mockResolvedValue(pendingSession());
+      const req = makeWebhookReq(makeCaptureEvent({ resource: { amount: { value: 'abc', currency_code: 'USD' } } }));
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(db.checkoutSession.update).toHaveBeenCalledWith({ where: { id: 'sess_123' }, data: { status: 'failed' } });
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'invalid_amount', rawAmount: 'abc' }),
+        expect.any(String)
+      );
+    });
+
+    test('missing amount value is rejected (regression: parseFloat("0") fails the amount check)', async () => {
+      db.payment.findUnique.mockResolvedValue(null);
+      db.checkoutSession.findUnique.mockResolvedValue(pendingSession());
+      const req = makeWebhookReq(makeCaptureEvent({ resource: { amount: { currency_code: 'USD' } } }));
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(db.checkoutSession.update).toHaveBeenCalledWith({ where: { id: 'sess_123' }, data: { status: 'failed' } });
+    });
+
+    test('P2002 where the captureId already has a Payment row = innocent duplicate: info, no error', async () => {
+      db.payment.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ id: 'pay_1', captureId: 'capture_1' });
+      db.checkoutSession.findUnique.mockResolvedValue(pendingSession());
+      db.$transaction.mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: ['captureId'] } }));
+      const req = makeWebhookReq(makeCaptureEvent());
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.payment.findUnique).toHaveBeenCalledTimes(2);
+      expect(db.payment.findUnique).toHaveBeenLastCalledWith({ where: { captureId: 'capture_1' } });
+      expect(logger.error).not.toHaveBeenCalled();
+      expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ captureId: 'capture_1' }), expect.any(String));
+    });
+
+    test('capture on a COMPLETED session (different captureId) = possible double charge: error, no writes', async () => {
+      db.payment.findUnique.mockResolvedValue(null);
+      db.checkoutSession.findUnique.mockResolvedValue(makeSession({ id: 'sess_123', status: 'completed', tenant: { email: 'a@b.com' } }));
+      const req = makeWebhookReq(makeCaptureEvent());
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(db.checkoutSession.update).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'session_completed_possible_double_charge', captureId: 'capture_1', customId: 'sess_123' }),
+        expect.any(String)
+      );
+    });
+
+    test('capture on a FAILED session = paid but not activated: error, no writes', async () => {
+      db.payment.findUnique.mockResolvedValue(null);
+      db.checkoutSession.findUnique.mockResolvedValue(makeSession({ id: 'sess_123', status: 'failed', tenant: { email: 'a@b.com' } }));
+      const req = makeWebhookReq(makeCaptureEvent());
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(db.checkoutSession.update).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: 'session_failed_paid_not_activated', captureId: 'capture_1', customId: 'sess_123' }),
+        expect.any(String)
+      );
+    });
+
+    test('P2002 with NO Payment row for this captureId = possible second payment on the session: error', async () => {
+      db.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+      db.checkoutSession.findUnique.mockResolvedValue(pendingSession());
+      db.$transaction.mockRejectedValue(Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { target: ['checkoutSessionId'] } }));
+      const req = makeWebhookReq(makeCaptureEvent());
+      const res = makeRes();
+
+      await handler()(req, res);
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ module: 'payments' }),
+        expect.stringContaining('possible second payment')
+      );
     });
   });
 });
