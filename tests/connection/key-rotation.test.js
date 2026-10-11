@@ -107,18 +107,24 @@ describe('API key rotation - integration (connect-with-key -> rotate-key)', () =
     expect(res.headers['x-chargeguard-key-deprecated']).toBeUndefined();
   });
 
-  test('T3 CURRENT BEHAVIOR: previous key is still accepted during grace, with deprecation header', async () => {
-    const { originalKey } = await seed('t3');
+  test('T3 (N51) previous key is rejected on connect-with-key during the grace period; current key still works', async () => {
+    const { originalKey: k0 } = await seed('t3');
 
-    expect((await connect(originalKey)).status).toBe(200);
-    expect((await rotate(originalKey)).status).toBe(200);
+    expect((await connect(k0)).status).toBe(200);
+    const r = await rotate(k0);
+    expect(r.status).toBe(200);
+    const k1 = r.body.newApiKey;
 
-    const res = await connect(originalKey);
-    expect(res.status).toBe(200);
-    expect(res.headers['x-chargeguard-key-deprecated']).toBe('true');
+    const old = await connect(k0);
+    expect(old.status).toBe(401);
+    expect(old.body.webhookSecret).toBeUndefined();
+
+    const cur = await connect(k1);
+    expect(cur.status).toBe(200);
+    expect(cur.headers['x-chargeguard-key-deprecated']).toBeUndefined();
   });
 
-  test('T4 CURRENT BEHAVIOR (N51): previous key can connect and rotate again; displaced key becomes the previous one', async () => {
+  test('T4 (N51) previous key cannot rotate; DB state and email are untouched', async () => {
     const { tenant, originalKey: k0 } = await seed('t4');
 
     expect((await connect(k0)).status).toBe(200);
@@ -126,24 +132,21 @@ describe('API key rotation - integration (connect-with-key -> rotate-key)', () =
     expect(r1.status).toBe(200);
     const k1 = r1.body.newApiKey;
 
-    // Skip the 5-minute cooldown between rotations.
+    // Skip the 5-minute cooldown so a 401 can only come from the key check.
     await prisma.tenant.update({ where: { id: tenant.id }, data: { keyRotatedAt: ago(10 * MIN) } });
+    const before = await loadRow(tenant.id);
+    email.sendRotatedKeyEmail.mockClear();
 
-    const c2 = await connect(k0);
-    expect(c2.status).toBe(200);
-    expect(c2.headers['x-chargeguard-key-deprecated']).toBe('true');
     const r2 = await rotate(k0);
-    expect(r2.status).toBe(200);
-    const k2 = r2.body.newApiKey;
+    expect(r2.status).toBe(401);
+    expect(r2.body.newApiKey).toBeUndefined();
 
     const row = await loadRow(tenant.id);
-    expect(row.apiKeyHash).toBe(hashApiKey(k2));
-    expect(row.previousApiKeyHash).toBe(hashApiKey(k1));
-
-    // k0 was dropped entirely by the second rotation.
-    expect((await connect(k0)).status).toBe(401);
+    expect(row.apiKeyHash).toBe(hashApiKey(k1));
+    expect(row.previousApiKeyHash).toBe(hashApiKey(k0));
+    expect(new Date(row.keyRotatedAt).getTime()).toBe(new Date(before.keyRotatedAt).getTime());
+    expect(email.sendRotatedKeyEmail).not.toHaveBeenCalled();
   });
-
   test('T5 rotate without a recent connect is rejected (never connected, then connected 20 minutes ago)', async () => {
     const { tenant, originalKey } = await seed('t5');
     const before = (await loadRow(tenant.id)).apiKeyHash;

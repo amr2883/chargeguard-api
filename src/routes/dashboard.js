@@ -151,6 +151,17 @@ const authByApiKey = requireAuth({
   monthlyBlockedCount: true, quotaResetDate: true,
 });
 
+// N51: /rotate-key must not accept the grace-period (previous) key. Same select as authByApiKey.
+const rotateKeyAuth = requireAuth({
+  id: true, email: true, plan: true, isActive: true, emailVerified: true,
+  createdAt: true, keyRotatedAt: true,
+  // Added for getProtectionStatus()'s read-only quota mirror — see
+  // protectionStatus.js's getQuotaStatusReadOnly(). Never used to write
+  // or reset quota from this file; that remains checkQuotaGate()'s job
+  // exclusively, on the real traffic path.
+  monthlyBlockedCount: true, quotaResetDate: true,
+}, { allowPreviousKey: false });
+
 // ── Connection status ─────────────────────────────────────────
 const getConnectionStatus = (lastActivityAt) => {
   if (!lastActivityAt) return { label: 'No activity recorded yet', color: 'gray', minutes: null };
@@ -3012,7 +3023,7 @@ router.get('/monthly-report-preview', rateLimit, authByApiKey, async (req, res) 
   }
 });
 
-router.post('/rotate-key', rateLimit, authByApiKey, async (req, res) => {
+router.post('/rotate-key', rateLimit, rotateKeyAuth, async (req, res) => {
   try {
     const tenant = req.tenant;
 
