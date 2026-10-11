@@ -162,7 +162,7 @@ describe('feedbackLoop.js', () => {
       await processFeedbackSimplified(orderId, true, merchantId);
 
       expect(db.order.updateMany).toHaveBeenCalledWith({
-        where: { merchantId, orderId, feedbackProcessedAt: null },
+        where: { id: rowId, merchantId, feedbackProcessedAt: null },
         data: { feedbackProcessedAt: expect.any(Date) },
       });
       expect(logger.info).toHaveBeenCalledWith(
