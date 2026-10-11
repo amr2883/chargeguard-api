@@ -120,5 +120,79 @@ describe('autoRegisterStoreMiddleware', () => {
     const { res, next } = await run(makeReq({ hmacSignatureVersion: 'v3' }));
     expectRejected(res, next, 403, 'DOMAIN_MISMATCH');
   });
+  describe('Store resolution after a domain-bound signature (#58)', () => {
+    const lookup = { where: { tenantId_normalizedDomain: { tenantId: 'tenant_1', normalizedDomain: DOMAIN } } };
+
+    test('existing soft-deleted Store: rejected with STORE_DEACTIVATED, never reactivated, no cap check', async () => {
+      db.store.findUnique.mockResolvedValue({ id: 'store_old', isActive: false });
+      const { res, next } = await run(makeReq());
+      expectRejected(res, next, 403, 'STORE_DEACTIVATED');
+      expect(db.store.count).not.toHaveBeenCalled();
+    });
+
+    test('existing active Store: attributed idempotently, nothing created', async () => {
+      db.store.findUnique.mockResolvedValue({ id: 'store_old', isActive: true });
+      const req = makeReq();
+      const { res, next } = await run(req);
+      expect(res.status).not.toHaveBeenCalled();
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(db.store.findUnique).toHaveBeenCalledWith(lookup);
+      expect(db.store.count).not.toHaveBeenCalled();
+      expect(db.store.create).not.toHaveBeenCalled();
+      expect(req.storeId).toBe('store_old');
+      expect(req.storeDomain).toBe(DOMAIN);
+    });
+
+    test('cap reached (5 active Stores): rejected with STORE_LIMIT_REACHED', async () => {
+      db.store.count.mockResolvedValue(5);
+      const { res, next } = await run(makeReq());
+      expectRejected(res, next, 403, 'STORE_LIMIT_REACHED');
+      expect(db.store.count).toHaveBeenCalledWith({ where: { tenantId: 'tenant_1', isActive: true } });
+    });
+
+    test('one below the cap (4 active Stores): still registers', async () => {
+      db.store.count.mockResolvedValue(4);
+      const { res, next } = await run(makeReq());
+      expect(res.status).not.toHaveBeenCalled();
+      expect(db.store.create).toHaveBeenCalledTimes(1);
+      expect(next).toHaveBeenCalledTimes(1);
+    });
+
+    test('concurrent create race (P2002), winner is active: attributes to it, creates once', async () => {
+      db.store.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'store_race', isActive: true });
+      db.store.create.mockRejectedValue({ code: 'P2002' });
+      const req = makeReq();
+      const { res, next } = await run(req);
+      expect(res.status).not.toHaveBeenCalled();
+      expect(db.store.create).toHaveBeenCalledTimes(1);
+      expect(db.store.findUnique).toHaveBeenCalledTimes(2);
+      expect(next).toHaveBeenCalledTimes(1);
+      expect(req.storeId).toBe('store_race');
+    });
+
+    test('concurrent create race (P2002), winner is inactive: rejected with DOMAIN_MISMATCH', async () => {
+      db.store.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({ id: 'store_race', isActive: false });
+      db.store.create.mockRejectedValue({ code: 'P2002' });
+      const { res, next } = await run(makeReq());
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DOMAIN_MISMATCH' }));
+      expect(next).not.toHaveBeenCalled();
+    });
+
+    test('unexpected DB error on lookup: fails closed with 503', async () => {
+      db.store.findUnique.mockRejectedValue(new Error('db down'));
+      const { res, next } = await run(makeReq());
+      expectRejected(res, next, 503, 'DOMAIN_CHECK_UNAVAILABLE');
+    });
+
+    test('non-P2002 error on create: fails closed with 503', async () => {
+      db.store.create.mockRejectedValue(new Error('boom'));
+      const { res, next } = await run(makeReq());
+      expect(res.status).toHaveBeenCalledWith(503);
+      expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'DOMAIN_CHECK_UNAVAILABLE' }));
+      expect(next).not.toHaveBeenCalled();
+    });
+  });
+
 });
 // END-OF-FILE-58
