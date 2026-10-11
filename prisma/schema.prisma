@@ -149,9 +149,9 @@ model SignalStat {
 // ========== Order (جديد) ==========
 model Order {
   id                 String  @id @default(cuid())
-  orderId            String  // معرف الطلب من WooCommerce — NOT globally unique: WooCommerce order IDs are per-store auto-increment integers, so two different merchants can legitimately have the same orderId. Uniqueness is scoped per tenant via the compound @@unique below (C3 fix).
+  orderId            String  // معرف الطلب من WooCommerce — NOT globally unique: WooCommerce order IDs are per-store auto-increment integers, so two different merchants can legitimately have the same orderId. Uniqueness is enforced per tenant, and per store when storeId is set, by partial unique indexes (see the Order model comment below; C3/C4 fix).
   merchantId         String
-  storeId            String? // Agency isolation (opt-in) — null for pooled/legacy rows and for Starter/Pro tenants. Never part of the (merchantId, orderId) uniqueness key.
+  storeId            String? // Agency isolation (opt-in) — null for pooled/legacy rows and for Starter/Pro tenants. When set, part of the uniqueness key (see the partial unique indexes below).
   amount             Float
   currency           String  @default("USD")
   email              String?
@@ -259,9 +259,23 @@ model Order {
   // `merchantId_orderId` compound-unique input, so findUnique()/upsert()
   // against it are NOT available here. All reads/writes MUST go through
   // lib/orderIdentity.js's findOrderByBusinessKey()/upsertOrderByBusinessKey()
-  // instead, which encode the same storeId-aware lookup and treat a
-  // P2002 on write as "a concurrent request already won this exact key",
-  // not as a real failure — see that file for the full rationale.
+  // instead, which encode the same storeId-aware lookup. Writes there use
+  // createMany + skipDuplicates (INSERT ... ON CONFLICT DO NOTHING) and then
+  // re-read the row, instead of catching P2002: inside a transaction a unique
+  // violation aborts it (Postgres 25P02). See that file for the full rationale.
+  //
+  // Rollout order (measured on Prisma 5.22 and Postgres 16): (1) apply this
+  // migration; the old tenant-wide unique index Order_merchantId_orderId_key is
+  // kept on purpose. (2) Deploy the code that uses lib/orderIdentity.js and make
+  // sure no old instance is still serving. (3) Only then drop the old index with
+  // docs/migrations-pending/contract_drop_order_unique.sql. The previous code
+  // upserts with ON CONFLICT (merchantId, orderId); once the old index is gone
+  // every such write fails with Postgres 42P10, even for a brand-new order.
+  // Until step 3 the database still has that index even though this model
+  // declares no @@unique, and two stores of one tenant that share an orderId
+  // are rejected by the new code with an explicit error (nothing is written).
+  // Step 3 cannot be undone once such stores exist: the old unique index cannot
+  // be recreated while those duplicate rows are present.
   @@index([merchantId, orderId])
 }
 

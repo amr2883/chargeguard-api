@@ -1,0 +1,24 @@
+-- [C4 fix, part 2 of 2: CONTRACT] NOT in prisma/migrations on purpose.
+--
+-- Apply only AFTER all of these hold on the target database:
+--   1. part 1 (migration 20260926131147_order_store_scoped_uniqueness) is applied;
+--   2. the application version that uses src/lib/orderIdentity.js is the only
+--      version serving traffic (no instance of the previous code is still running);
+--   3. you verified the exact index name on that database (it must be a plain
+--      unique INDEX, not a constraint).
+--
+-- Why: previously deployed code upserts by (merchantId, orderId) via ON CONFLICT,
+-- which needs this index. Measured (Prisma 5.22, Postgres 16, client generated
+-- from origin/master): once it is dropped, EVERY such upsert fails with 42P10,
+-- even for a brand-new order, and the surrounding transaction rolls back.
+--
+-- One-way step: after two stores of one tenant have used the same orderId, this
+-- index cannot be recreated until those duplicate rows are cleaned up, so going
+-- back to the previous application version is no longer possible without a data fix.
+--
+-- To roll it out through Prisma: move this file to
+-- prisma/migrations/<new timestamp>_drop_order_merchant_order_unique/migration.sql
+-- (timestamp later than part 1), commit it separately, then run migrate deploy.
+-- Deliberately no IF EXISTS: a name mismatch on production must fail loudly.
+
+DROP INDEX "Order_merchantId_orderId_key";
