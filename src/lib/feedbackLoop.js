@@ -538,7 +538,9 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
     try {
       await db.disputeOutcome.create({
         data: {
-          disputeId: orderId,
+          // N18b: scope disputeId by store so two stores sharing an orderId each
+          // get their own row. Pooled rows (storeId null) keep disputeId === orderId.
+          disputeId: order.storeId ? `${order.storeId}:${orderId}` : orderId,
           merchantId,
           orderId: order.id,
           result: isWin ? 'won' : 'lost',
