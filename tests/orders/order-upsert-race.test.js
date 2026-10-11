@@ -1,7 +1,10 @@
 // tests/orders/order-upsert-race.test.js
 // Guards N15(a)/N11: concurrent upsertOrderByBusinessKey calls for the same
 // business key must end with exactly one row and no thrown error. The partial
-// unique indexes are the real guard; the P2002 catch turns the loss into an update.
+// unique indexes are the real guard. NOTE: this test calls the helper with the
+// shared client (no transaction) and without a barrier, and it was shown to pass
+// on both the old (P2002 catch) and the fixed helper, so it does NOT guard the
+// transaction case. That protection lives in order-upsert-tx-race.test.js.
 
 const crypto = require('crypto');
 const db = require('../../src/lib/db');
