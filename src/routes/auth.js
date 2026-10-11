@@ -20,7 +20,7 @@ const connectKeyAuth = requireAuth({
   storeUrl: true,
   allowedDomains: true,
   webhookSecret: true,
-});
+}, { allowPreviousKey: false });
 
 // Used only by POST /connect-with-key below — needs storeUrl/allowedDomains
 // in addition to apiKeyAuth's fields, to support that route's domain-binding

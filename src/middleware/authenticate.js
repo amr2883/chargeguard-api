@@ -34,7 +34,7 @@ const delayedJson = (res, status, body) =>
  *   resolveTenantByApiKey so each router only fetches the Tenant fields it
  *   actually needs (principle of least privilege at the query layer).
  */
-function requireAuth(select) {
+function requireAuth(select, opts = {}) {
   return async function authenticate(req, res, next) {
     const apiKey = req.headers['x-api-key'];
     if (!apiKey) {
@@ -53,6 +53,13 @@ function requireAuth(select) {
           error: 'Email not verified. Please check your inbox and click the confirmation link.',
           code: 'EMAIL_NOT_VERIFIED',
         });
+      }
+
+      if (usedPreviousKey && opts.allowPreviousKey === false) {
+        // N51: this route does not accept the grace-period (previous) key. The response is
+        // identical to an invalid key, so it does not reveal that the key was once valid.
+        logger.warn({ module: 'authenticate', tenantId: tenant.id }, 'Previous (grace-period) API key rejected on a route that does not accept it');
+        return delayedJson(res, 401, { error: 'Invalid or inactive API key' });
       }
 
       if (usedPreviousKey) {
