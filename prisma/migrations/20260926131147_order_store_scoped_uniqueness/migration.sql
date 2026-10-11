@@ -1,9 +1,15 @@
--- [C4 fix] Drop the tenant-wide-only unique index (C3). It is being
--- replaced below by two partial unique indexes that additionally scope
--- by storeId when present, closing a same-tenant/different-store
--- collision that C3 did not address (see schema.prisma's Order model
--- comment for the full rationale).
-DROP INDEX "Order_merchantId_orderId_key";
+-- [C4 fix, part 1 of 2: EXPAND] Add store-scoped uniqueness for Order: one
+-- plain index plus two partial unique indexes (below). The old tenant-wide
+-- unique index "Order_merchantId_orderId_key" (C3) is kept on purpose in this
+-- step: code deployed before this change upserts by (merchantId, orderId) via
+-- ON CONFLICT, and dropping that index while such code is running fails with
+-- Postgres error 42P10. The DROP is part 2 of 2 (CONTRACT) and lives outside
+-- this folder in docs/migrations-pending/contract_drop_order_unique.sql until
+-- the new code is live (measured on Prisma 5.22 and Postgres 16: once it is
+-- dropped, every upsert from the previous code fails, even for a new order).
+-- Deploy order: this file, then the new code (no old instance left), then part
+-- 2 of 2. The pooled partial index below keeps uniqueness only for rows with
+-- storeId IS NULL. See the Order model comment in schema.prisma for the rationale.
 
 -- CreateIndex (plain, non-unique — matches the new @@index([merchantId, orderId])
 -- declared in schema.prisma; query-performance only, carries no uniqueness guarantee)
@@ -16,8 +22,8 @@ CREATE UNIQUE INDEX "Order_merchantId_storeId_orderId_key"
   ON "Order" ("merchantId", "storeId", "orderId")
   WHERE "storeId" IS NOT NULL;
 
--- [C4 fix] Pooled orders (storeId IS NULL): preserves the EXACT prior C3
--- guarantee unchanged for every existing row and for Starter/Pro tenants,
+-- [C4 fix] Pooled orders (storeId IS NULL): keeps the prior C3 guarantee for
+-- every row whose storeId IS NULL, including the rows of Starter/Pro tenants,
 -- who never populate storeId at all.
 CREATE UNIQUE INDEX "Order_merchantId_orderId_pooled_key"
   ON "Order" ("merchantId", "orderId")
