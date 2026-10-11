@@ -1,0 +1,5 @@
+# Ensure migration SQL files are always stored with LF in the repo.
+# Prevents checksum drift: Prisma records the raw bytes it reads from disk,
+# so CRLF vs LF changes the hash stored in _prisma_migrations.
+prisma/migrations/**   text eol=lf
+docs/migrations-pending/**   text eol=lf
