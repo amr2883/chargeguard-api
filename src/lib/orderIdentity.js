@@ -46,13 +46,16 @@ async function findOrderByBusinessKey(db, { merchantId, storeId, orderId }) {
  * row found on the first read, or (on a lost race) to the row the
  * concurrent request created.
  *
- * Race handling: findFirst-then-create has a TOCTOU window between two
- * concurrent requests for the exact same key. This is intentional and
- * safe — the partial unique index is the real guard (same defense-in-
- * depth philosophy as payments.js's P0-07 fix). A P2002 here means a
- * concurrent request already won this exact key; we re-read and apply
- * `update` to that row instead of treating it as a failure. Any other
- * error is rethrown unchanged.
+ * Race handling: findFirst-then-insert has a TOCTOU window between two
+ * concurrent requests for the exact same key. The partial unique index is the
+ * real guard (same defense-in-depth philosophy as payments.js's P0-07 fix).
+ * The insert is createMany + skipDuplicates (INSERT ... ON CONFLICT DO NOTHING),
+ * so losing the race is a no-op, not an error: we re-read the row the winner
+ * created and apply `update` to it. We deliberately do NOT rely on catching
+ * P2002: inside an interactive transaction (the webhook path in risk.js passes
+ * `tx`) a unique violation aborts the whole transaction (Postgres 25P02) and
+ * the re-read would fail. Guarded by tests/orders/order-upsert-tx-race.test.js.
+ * Any other error is rethrown unchanged.
  */
 async function upsertOrderByBusinessKey(db, { merchantId, storeId, orderId }, { create, update }) {
   const key = businessKeyWhere({ merchantId, storeId, orderId });
@@ -62,17 +65,16 @@ async function upsertOrderByBusinessKey(db, { merchantId, storeId, orderId }, { 
     return db.order.update({ where: { id: existing.id }, data: update });
   }
 
-  try {
-    return await db.order.create({ data: { ...create, ...key } });
-  } catch (err) {
-    if (err.code === 'P2002') {
-      const raced = await db.order.findFirst({ where: key });
-      if (raced) {
-        return db.order.update({ where: { id: raced.id }, data: update });
-      }
-    }
-    throw err;
+  // createMany + skipDuplicates is INSERT ... ON CONFLICT DO NOTHING: losing a
+  // race is a no-op instead of an error. A P2002 raised inside an interactive
+  // transaction aborts it (Postgres 25P02) and the re-read would then fail.
+  const inserted = await db.order.createMany({ data: [{ ...create, ...key }], skipDuplicates: true });
+  const row = await db.order.findFirst({ where: key });
+  if (!row) {
+    throw new Error('orderIdentity: order missing after insert');
   }
+  if (inserted.count === 1) return row;
+  return db.order.update({ where: { id: row.id }, data: update });
 }
 
 /**
