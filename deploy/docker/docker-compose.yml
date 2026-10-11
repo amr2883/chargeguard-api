@@ -27,7 +27,6 @@ services:
     environment:
       - NODE_ENV=production
       - DATABASE_URL=postgresql://${DB_USER:-chargeguard}:${DB_PASSWORD:-change_me}@db:5432/${DB_NAME:-chargeguard_db}?schema=public
-      - API_KEY=${API_KEY}
       - IDENTITY_GRAPH_SECRET=${IDENTITY_GRAPH_SECRET}
       - IPQS_API_KEY=${IPQS_API_KEY}
       - MOCK_IP_INTEL=false
