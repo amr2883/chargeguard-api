@@ -315,7 +315,7 @@ function calculateContributions(signals, dispute, order, weightsMap = null) {
 // Called from webhooks.disputes.jsx when dispute is resolved
 // ─── Main Feedback Loop ────────────────────────────────────────────────────
 // Called from webhooks.disputes.jsx when dispute is resolved
-async function processFeedback(disputeId, result, callerMerchantId) {
+async function processFeedback(disputeId, result, callerMerchantId, storeId = null) {
   // CRITICAL FIX (C4): callerMerchantId is now a required parameter,
   // threaded straight through to processFeedbackSimplified(), which uses
   // it to scope the order lookup to the calling tenant. Deliberately made
@@ -327,12 +327,12 @@ async function processFeedback(disputeId, result, callerMerchantId) {
   }
   // ===== مسار مبسط لبيئة WooCommerce (الجداول غير موجودة بعد) =====
   logger.warn({ module: 'feedbackLoop' }, 'Dispute tables not yet available — using simplified path');
-  return processFeedbackSimplified(disputeId, result, callerMerchantId);
+  return processFeedbackSimplified(disputeId, result, callerMerchantId, storeId);
 }
 
 // ─── مسار مبسط للتعلم من نتائج الحظر (بدون جداول dispute) ─────────────
 // ─── مسار مبسط للتعلم من نتائج الحظر (يستخدم بيانات Order الحقيقية) ─────────────
-async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, callerMerchantId) {
+async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, callerMerchantId, storeId = null) {
   const isFraud = typeof resultOrIsFraud === 'boolean' 
     ? resultOrIsFraud 
     : (resultOrIsFraud === 'lost');
@@ -356,20 +356,20 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
     // and the Prisma client regenerated. If that migration has not yet
     // been run, this compound-key lookup will fail at runtime — do not
     // deploy this change ahead of the C3 migration.
-    // [C4 fix] storeId: null here is a deliberate, documented limitation —
-    // not an oversight. processFeedbackSimplified() is invoked from
-    // Stripe/PayPal dispute webhooks and manual merchant feedback, neither
-    // of which currently carries per-store attribution (unlike risk.js's
-    // /evaluate and /woocommerce-webhook, which resolve req.storeId from
-    // the authenticated request). This means feedback for a store-scoped
-    // Agency tenant with duplicate orderIds across stores can only match
-    // the POOLED partial-unique-index partition (storeId IS NULL) — if
-    // that tenant's orders are NOT pooled (storeId populated), this
-    // lookup will not find them via this path. Tracked as a known gap:
-    // extending feedback ingestion to carry storeId is future work, not
-    // part of C4's scope (which fixes storage-identity collisions, not
-    // this pre-existing feedback/detection-scope limitation).
-    const order = await findOrderByBusinessKey(db, { merchantId: callerMerchantId, storeId: null, orderId });
+    // [N15b fix] The caller may pass storeId (POST /risk/feedback resolves
+    // req.storeId from the authenticated request via domainAuth, scoped to
+    // the calling tenant). Look in that store partition first, then fall
+    // back to the pooled partition (storeId IS NULL) so orders saved before
+    // the store was registered are still found. Both lookups are scoped by
+    // callerMerchantId, so this can never return another tenant order.
+    // Callers with no store context (storeId omitted) behave as before:
+    let order = null;
+    if (storeId) {
+      order = await findOrderByBusinessKey(db, { merchantId: callerMerchantId, storeId, orderId });
+    }
+    if (!order) {
+      order = await findOrderByBusinessKey(db, { merchantId: callerMerchantId, storeId: null, orderId });
+    }
 
     if (!order) {
       // Deliberately generic: this branch is reached both when the order
@@ -406,7 +406,9 @@ async function processFeedbackSimplified(orderIdOrDisputeId, resultOrIsFraud, ca
     // locking, and the loser observes count === 0 and returns without
     // touching any counter below.
     const idempotencyClaim = await db.order.updateMany({
-      where: { merchantId, orderId, feedbackProcessedAt: null },
+      // N18a: claim exactly the row that was looked up (unique id), never
+      // another row sharing (merchantId, orderId) in a different store partition.
+      where: { id: order.id, merchantId, feedbackProcessedAt: null },
       data:  { feedbackProcessedAt: new Date() },
     });
 

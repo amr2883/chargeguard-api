@@ -1692,7 +1692,7 @@ router.post('/feedback', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, 
 
     // ������� ���� ������
     // ���� isFraud ������ (true = lost, false = won)
-    await processFeedback(orderId, isFraud ? 'lost' : 'won', merchantId);
+    await processFeedback(orderId, isFraud ? 'lost' : 'won', merchantId, req.storeId ?? null);
 
     res.json({ success: true, message: 'Feedback recorded successfully' });
   } catch (error) {
