@@ -3,21 +3,13 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 
 jest.mock('../../src/lib/email');
 const { sendChallengeOtpEmail } = require('../../src/lib/email');
 const logger = require('../../src/lib/logger');
 
 const prisma = new PrismaClient();
-
-// v3 format (مطابق لـ generate_hmac() في class-api-client.php و signedStr في verifyHmac.js):
-// HMAC-SHA256(secret, `${timestamp}.${domain}.${requestId}.${rawBody}`), prefixed "v3=".
-function signV3(secret, domain, requestId, bodyString, tsOverride) {
-  const timestamp = tsOverride ?? String(Math.floor(Date.now() / 1000));
-  const signedStr = `${timestamp}.${domain}.${requestId}.${bodyString}`;
-  const signature = 'v3=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
 
 // Same v2 format verifyHmac.js expects and the PHP plugin sends:
 // HMAC-SHA256(secret, `${timestamp}.${storeDomain}.${rawBody}`), prefixed "v2=".
@@ -132,17 +124,16 @@ describe('POST /api/risk/challenge/request — v3 (الصيغة اللي الـ 
   // requestId: القيمة اللي اتوقّع بيها. headerRequestId: القيمة اللي تتبعت فعلاً
   // في الـ header (undefined = نفس requestId، null = ماتبعتش الـ header خالص).
   const postV3 = ({ body, signBody, requestId, headerRequestId, ts }) => {
-    const { timestamp, signature } = signV3(tenant.webhookSecret, domain, requestId, signBody ?? body, ts);
-    let req = request(app)
+    const headers = signV3({ secret: tenant.webhookSecret, domain, requestId, method: 'POST', target: '/api/risk/challenge/request', body: signBody ?? body, timestamp: ts });
+    const sent = headerRequestId === undefined ? requestId : headerRequestId;
+    if (sent === null) delete headers['x-chargeguard-request-id'];
+    else headers['x-chargeguard-request-id'] = sent;
+    return request(app)
       .post('/api/risk/challenge/request')
       .set('Content-Type', 'application/json')
       .set('X-API-Key', apiKey)
-      .set('X-Store-Domain', domain)
-      .set('X-ChargeGuard-Signature', signature)
-      .set('X-ChargeGuard-Timestamp', timestamp);
-    const sent = headerRequestId === undefined ? requestId : headerRequestId;
-    if (sent !== null) req = req.set('X-ChargeGuard-Request-Id', sent);
-    return req.send(body);
+      .set(headers)
+      .send(body);
   };
 
   test('control: v3 صحيح → 200 والـ email اتنادى بيه', async () => {
