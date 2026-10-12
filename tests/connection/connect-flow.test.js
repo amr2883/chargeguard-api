@@ -3,21 +3,12 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 
 jest.mock('../../src/lib/email');
 const email = require('../../src/lib/email');
 
 const prisma = new PrismaClient();
-
-// Builds the same signed-string HMAC the PHP plugin's ChargeGuard_API_Client
-// and Node's verifyHmac.js both construct: `${timestamp}.${rawBody}`,
-// signed as 'v1=' + HMAC-SHA256(secret, signedStr) hex.
-function signRequest(secret, bodyString) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signedStr = `${timestamp}.${bodyString}`;
-  const signature = 'v1=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
 
 // Directly seeds a verified, already-onboarded tenant — bypassing the T1
 // registration flow entirely, since T2 is testing key recovery for a
@@ -109,15 +100,13 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
     test('request with the correct X-Store-Domain and a valid HMAC signature is accepted', async () => {
       const bodyObj = { type: 'EMAIL', value: `whitelist-test-${Date.now()}@example.com` };
       const bodyString = JSON.stringify(bodyObj);
-      const { timestamp, signature } = signRequest(liveTenant.webhookSecret, bodyString);
+      const headers = signV3({ secret: liveTenant.webhookSecret, domain: liveDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', liveDomain)
-        .set('X-ChargeGuard-Signature', signature)
-        .set('X-ChargeGuard-Timestamp', timestamp)
+        .set(headers)
         .send(bodyString);
 
       expect(res.status).toBe(200);
@@ -127,15 +116,14 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
     test('request with a mismatched X-Store-Domain is rejected by domainAuthMiddleware (403), before HMAC is even checked', async () => {
       const bodyObj = { type: 'EMAIL', value: `domain-mismatch-${Date.now()}@example.com` };
       const bodyString = JSON.stringify(bodyObj);
-      const { timestamp, signature } = signRequest(liveTenant.webhookSecret, bodyString);
+      const wrongDomain = 'totally-different-domain.com';
+      const headers = signV3({ secret: liveTenant.webhookSecret, domain: wrongDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', 'totally-different-domain.com')
-        .set('X-ChargeGuard-Signature', signature)
-        .set('X-ChargeGuard-Timestamp', timestamp)
+        .set(headers)
         .send(bodyString);
 
       expect(res.status).toBe(403);
@@ -173,16 +161,14 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
     test('a tampered signature is rejected (401)', async () => {
       const bodyObj = { type: 'EMAIL', value: `tampered-${Date.now()}@example.com` };
       const bodyString = JSON.stringify(bodyObj);
-      const { timestamp, signature } = signRequest(liveTenant.webhookSecret, bodyString);
-      const tamperedSignature = signature.slice(0, -4) + 'dead'; // flip the last 4 hex chars
+      const headers = signV3({ secret: liveTenant.webhookSecret, domain: liveDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
+      const tamperedSignature = headers['x-chargeguard-signature'].slice(0, -4) + 'dead'; // flip the last 4 hex chars
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', liveDomain)
-        .set('X-ChargeGuard-Signature', tamperedSignature)
-        .set('X-ChargeGuard-Timestamp', timestamp)
+        .set({ ...headers, 'x-chargeguard-signature': tamperedSignature })
         .send(bodyString);
 
       expect(res.status).toBe(401);
@@ -191,17 +177,14 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
     test('a stale timestamp (older than the 300s tolerance) is rejected (401)', async () => {
       const bodyObj = { type: 'EMAIL', value: `stale-${Date.now()}@example.com` };
       const bodyString = JSON.stringify(bodyObj);
-      const staleTimestamp = String(Math.floor(Date.now() / 1000) - 400); // 400s old, beyond the 300s window
-      const signedStr = `${staleTimestamp}.${bodyString}`;
-      const signature = 'v1=' + crypto.createHmac('sha256', liveTenant.webhookSecret).update(signedStr).digest('hex');
+      // 400s old, beyond the 300s window
+      const headers = signV3({ secret: liveTenant.webhookSecret, domain: liveDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString, ageSec: 400 });
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', liveDomain)
-        .set('X-ChargeGuard-Signature', signature)
-        .set('X-ChargeGuard-Timestamp', staleTimestamp)
+        .set(headers)
         .send(bodyString);
 
       expect(res.status).toBe(401);
@@ -209,14 +192,13 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
 
     test('a missing signature with a valid timestamp is rejected (401)', async () => {
       const bodyString = JSON.stringify({ type: 'EMAIL', value: `nosig-${Date.now()}@example.com` });
-      const { timestamp } = signRequest(liveTenant.webhookSecret, bodyString);
+      const { 'x-chargeguard-signature': _omitted, ...withoutSignature } = signV3({ secret: liveTenant.webhookSecret, domain: liveDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', liveDomain)
-        .set('X-ChargeGuard-Timestamp', timestamp)
+        .set(withoutSignature)
         .send(bodyString);
 
       expect(res.status).toBe(401);
@@ -224,14 +206,13 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
 
     test('a missing timestamp with a signature present is rejected (401)', async () => {
       const bodyString = JSON.stringify({ type: 'EMAIL', value: `nots-${Date.now()}@example.com` });
-      const { signature } = signRequest(liveTenant.webhookSecret, bodyString);
+      const { 'x-chargeguard-timestamp': _omitted, ...withoutTimestamp } = signV3({ secret: liveTenant.webhookSecret, domain: liveDomain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
 
       const res = await request(app)
         .post('/api/risk/blacklist')
         .set('Content-Type', 'application/json')
         .set('X-Api-Key', liveApiKey)
-        .set('X-Store-Domain', liveDomain)
-        .set('X-ChargeGuard-Signature', signature)
+        .set(withoutTimestamp)
         .send(bodyString);
 
       expect(res.status).toBe(401);

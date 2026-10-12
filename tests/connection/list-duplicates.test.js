@@ -3,15 +3,9 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 
 const prisma = new PrismaClient();
-
-// Same signing scheme as connect-flow.test.js / verifyHmac.js: v1 = HMAC(secret, `${ts}.${rawBody}`)
-function signRequest(secret, domain, requestId, bodyString) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signature = 'v3=' + crypto.createHmac('sha256', secret).update(`${timestamp}.${domain}.${requestId}.${bodyString}`).digest('hex');
-  return { timestamp, signature };
-}
 
 // Every row written through POST /risk/blacklist|whitelist has storeId NULL, and Postgres treats
 // NULLs as distinct in the composite unique, so duplicates were silently accepted before the
@@ -50,16 +44,13 @@ describe('blacklist/whitelist: duplicate adds', () => {
 
   function add(list, body) {
     const bodyString = JSON.stringify(body);
-    const requestId = crypto.randomUUID();
-    const { timestamp, signature } = signRequest(tenant.webhookSecret, domain, requestId, bodyString);
+    const path = `/api/risk/${list}`;
+    const headers = signV3({ secret: tenant.webhookSecret, domain, method: 'POST', target: path, body: bodyString });
     return request(app)
-      .post(`/api/risk/${list}`)
+      .post(path)
       .set('Content-Type', 'application/json')
       .set('X-Api-Key', apiKey)
-      .set('X-Store-Domain', domain)
-      .set('X-ChargeGuard-Signature', signature)
-      .set('X-ChargeGuard-Timestamp', timestamp)
-      .set('X-ChargeGuard-Request-Id', requestId)
+      .set(headers)
       .send(bodyString);
   }
 

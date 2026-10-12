@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 
 // Black-box calculateRiskScore entirely — T3a tests risk.js's own
 // orchestration (quota, idempotency, whitelist/blacklist, BlockedAttempt
@@ -77,16 +78,10 @@ async function seedTenant(overrides = {}) {
   return { tenant, domain, plaintextKey };
 }
 
-function signBody(secret, bodyString) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signedStr = `${timestamp}.${bodyString}`;
-  const signature = 'v1=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
-
 function evaluateRequest(tenant, domain, bodyObj, headerOverrides = {}) {
   const bodyString = JSON.stringify(bodyObj);
-  const { timestamp, signature } = signBody(tenant.webhookSecret, bodyString);
+  const signed = signV3({ secret: tenant.webhookSecret, domain, method: 'POST', target: '/api/risk/evaluate', body: bodyString });
+  const { 'x-chargeguard-timestamp': timestamp, 'x-chargeguard-signature': signature } = signed;
 
   const req = request(app)
     .post('/api/risk/evaluate')
@@ -96,6 +91,7 @@ function evaluateRequest(tenant, domain, bodyObj, headerOverrides = {}) {
   if (headerOverrides.domain !== null) req.set('X-Store-Domain', headerOverrides.domain ?? domain);
   if (headerOverrides.signature !== null) req.set('X-ChargeGuard-Signature', headerOverrides.signature ?? signature);
   if (headerOverrides.timestamp !== null) req.set('X-ChargeGuard-Timestamp', headerOverrides.timestamp ?? timestamp);
+  req.set('X-ChargeGuard-Request-Id', signed['x-chargeguard-request-id']);
 
   return req.send(headerOverrides.bodyString ?? bodyString);
 }

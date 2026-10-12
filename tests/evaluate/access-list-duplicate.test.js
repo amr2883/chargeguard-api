@@ -15,17 +15,11 @@ const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 
 jest.mock('../../src/lib/email');
 
 const prisma = new PrismaClient();
-
-function signRequest(secret, bodyString, ageSec = 0) {
-  const timestamp = String(Math.floor(Date.now() / 1000) - ageSec);
-  const signedStr = `${timestamp}.${bodyString}`;
-  const signature = 'v1=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
 
 describe('POST /api/risk/blacklist and /whitelist - duplicate entry returns 409', () => {
   let tenant;
@@ -34,14 +28,12 @@ describe('POST /api/risk/blacklist and /whitelist - duplicate entry returns 409'
 
   const post = (path, body, ageSec = 0) => {
     const bodyString = JSON.stringify(body);
-    const { timestamp, signature } = signRequest(tenant.webhookSecret, bodyString, ageSec);
+    const headers = signV3({ secret: tenant.webhookSecret, domain, method: 'POST', target: path, body: bodyString, ageSec });
     return request(app)
       .post(path)
       .set('Content-Type', 'application/json')
       .set('X-Api-Key', apiKey)
-      .set('X-Store-Domain', domain)
-      .set('X-ChargeGuard-Signature', signature)
-      .set('X-ChargeGuard-Timestamp', timestamp)
+      .set(headers)
       .send(bodyString);
   };
 
