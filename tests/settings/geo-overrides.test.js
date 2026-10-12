@@ -107,7 +107,6 @@ jest.mock('../../src/lib/domainAuth', () => ({
   domainAuthMiddleware: jest.fn((req, res, next) => next()),
 }));
 
-const crypto = require('crypto');
 const db = require('../../src/lib/db');
 const logger = require('../../src/lib/logger');
 const { resolveTenantByApiKey } = require('../../src/lib/apiKeyAuth');
