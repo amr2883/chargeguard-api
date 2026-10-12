@@ -19,6 +19,7 @@ jest.mock('../../src/lib/email');
 const app = require('../../src/app');
 const db = require('../../src/lib/db');
 const { hashApiKey } = require('../../src/lib/apiKeyHash');
+const { signV3 } = require('../helpers/signV3');
 const { calculateRiskScore } = require('../../src/lib/riskScoring');
 const email = require('../../src/lib/email');
 
@@ -82,25 +83,15 @@ async function seedOrder(merchantId) {
   return orderId;
 }
 
-function signV3(secret, domain, requestId, bodyString) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signedStr = `${timestamp}.${domain}.${requestId}.${bodyString}`;
-  const signature = 'v3=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
-
 async function postEnrich(tenant, payload) {
   const body = JSON.stringify(payload);
   const requestId = hex(16);
-  const { timestamp, signature } = signV3(tenant.webhookSecret, tenant.domain, requestId, body);
+  const headers = signV3({ secret: tenant.webhookSecret, domain: tenant.domain, requestId, method: 'POST', target: API_PATH, body });
   const res = await request(app)
     .post(API_PATH)
     .set('Content-Type', 'application/json')
     .set('X-API-Key', tenant.apiKey)
-    .set('X-Store-Domain', tenant.domain)
-    .set('X-ChargeGuard-Signature', signature)
-    .set('X-ChargeGuard-Timestamp', timestamp)
-    .set('X-ChargeGuard-Request-Id', requestId)
+    .set(headers)
     .send(body);
   if (DEBUG) console.log(`[enrich] status=${res.status} body=${JSON.stringify(res.body)}`);
   return res;
