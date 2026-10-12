@@ -113,6 +113,7 @@ const logger = require('../../src/lib/logger');
 const { resolveTenantByApiKey } = require('../../src/lib/apiKeyAuth');
 const { validateWebhookUrl, sendWebhookAlert } = require('../../src/lib/webhook');
 const settingsRouter = require('../../src/routes/settings');
+const { signV3 } = require('../helpers/signV3');
 
 // ── Route-stack extraction helpers (T6/T7 convention) ───────────────────────
 function getRouteHandlers(method, path) {
@@ -217,13 +218,11 @@ function mockAuthenticatedTenant(tenant) {
   resolveTenantByApiKey.mockResolvedValue({ tenant, usedPreviousKey: false });
 }
 
-// Real HMAC signer — mirrors middleware/verifyHmac.js exactly:
-// signedStr = `${timestamp}.${JSON.stringify(body)}`, sig = 'v1=' + HMAC-SHA256 hex.
-function signRequest(secret, bodyObj, timestamp = Math.floor(Date.now() / 1000).toString()) {
-  const rawBody = Buffer.from(JSON.stringify(bodyObj));
-  const signedStr = `${timestamp}.${rawBody.toString('utf8')}`;
-  const sig = 'v1=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { 'x-chargeguard-signature': sig, 'x-chargeguard-timestamp': timestamp };
+// Signs with the shared v3 helper (tests/helpers/signV3.js). The domain only enters
+// the signed string here, because domainAuth is mocked in this file.
+const TEST_DOMAIN = 'example-notification-store.com';
+function signRequest(secret, bodyObj, timestamp) {
+  return signV3({ secret, domain: TEST_DOMAIN, body: JSON.stringify(bodyObj), timestamp });
 }
 
 function applyPersistentDefaults() {
