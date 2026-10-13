@@ -145,6 +145,14 @@ suite('plugin (PHP) <-> verifyHmac parity (v3)', () => {
     expect(warnCodes()).toContain('HMAC_SIGNATURE_MISMATCH');
   });
 
+  test('a lowercase method is normalized to uppercase before signing (defense in depth, #107)', async () => {
+    const headers = signWithPlugin(BODY_ESCAPED, RID, 'post', BL);
+    const { out, req } = await runVerify(headers, BODY_ESCAPED, 'POST', BL);
+    expect(out.next).toBe(true);
+    expect(out.code).toBeNull();
+    expect(req.hmacSignatureVersion).toBe('v3');
+  });
+
   test('the query string is not part of the signed path (documented decision, #101)', async () => {
     const headers = signWithPlugin(BODY_ESCAPED, RID, 'POST', BL);
     const { out } = await runVerify(headers, BODY_ESCAPED, 'POST', BL + '?type=EMAIL');
