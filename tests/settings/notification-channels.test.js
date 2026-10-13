@@ -690,7 +690,17 @@ describe('real webhook.js implementation (unmocked)', () => {
 
   describe('validateWebhookUrl — SSRF & format checks', () => {
     test('valid https URL → valid', async () => {
-      await expect(realWebhook.validateWebhookUrl('https://hooks.slack.com/services/x')).resolves.toEqual({ valid: true });
+      const dnsp = require('dns').promises;
+      const s4 = jest.spyOn(dnsp, 'resolve4').mockResolvedValue(['93.184.216.34']);
+      const s6 = jest.spyOn(dnsp, 'resolve6').mockRejectedValue(Object.assign(new Error('queryAAAA ENODATA'), { code: 'ENODATA' }));
+      try {
+        await expect(realWebhook.validateWebhookUrl('https://hooks.slack.com/services/x')).resolves.toEqual({ valid: true });
+        expect(s4).toHaveBeenCalledWith('hooks.slack.com');
+        expect(s6).toHaveBeenCalledWith('hooks.slack.com');
+      } finally {
+        s4.mockRestore();
+        s6.mockRestore();
+      }
     });
 
     test('missing url → invalid', async () => {
