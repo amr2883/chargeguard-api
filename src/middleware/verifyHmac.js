@@ -131,7 +131,19 @@ if (!signature || !timestamp) {
       );
       return res.status(401).json({ error: 'Unauthorized' });
     }
-    signedStr = `${timestamp}.${storeDomain}.${requestId}.${rawBody.toString('utf8')}`;
+    // v3 also binds the HTTP method and the request path (no query), so a signature
+    // captured for one route cannot be replayed on another (#78). The newline
+    // separates path from body unambiguously: a path cannot contain a raw newline.
+    const signedMethod = typeof req.method === 'string' ? req.method : '';
+    const signedPath = typeof req.originalUrl === 'string' ? req.originalUrl.split('?')[0] : '';
+    if (!/^[A-Z]+$/.test(signedMethod) || signedPath.charAt(0) !== '/') {
+      logger.warn(
+        { tenantId: req.tenant?.id, path: req.path },
+        'HMAC_V3_MISSING_ROUTE'
+      );
+      return res.status(401).json({ error: 'Unauthorized' });
+    }
+    signedStr = `${timestamp}.${storeDomain}.${requestId}.${signedMethod}.${signedPath}\n${rawBody.toString('utf8')}`;
   } else if (sigVersion === 'v2') {
     // v2 = domain-bound signature. The domain is not just informational —
     // it is verified as part of the signed string itself, so a signature

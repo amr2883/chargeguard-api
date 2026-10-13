@@ -155,7 +155,7 @@ class ChargeGuard_API_Client {
         $request_id = wp_generate_uuid4();
 
         $attempt = function () use ($url, $method, $raw_body, $timeout, $request_id) {
-            $headers = $this->build_signed_headers($raw_body, $request_id);
+            $headers = $this->build_signed_headers($raw_body, $request_id, $method, $url);
             return wp_remote_request($url, [
                 'method'  => $method,
                 'headers' => $headers,
@@ -285,7 +285,7 @@ class ChargeGuard_API_Client {
         $endpoint = '/risk/blocked-attempt';
         $url      = $this->base_url . $endpoint;
         $body     = json_encode($data);
-        $headers  = $this->build_signed_headers($body, wp_generate_uuid4());
+        $headers  = $this->build_signed_headers($body, wp_generate_uuid4(), 'POST', $url);
 
         wp_remote_post($url, [
             'method'   => 'POST',
@@ -918,7 +918,7 @@ class ChargeGuard_API_Client {
      * @param string $raw_body الجسم الخام للطلب.
      * @return string التوقيع بصيغة base64.
      */
-    private function generate_hmac($raw_body, $timestamp, $domain, $request_id) {
+    private function generate_hmac($raw_body, $timestamp, $domain, $request_id, $method, $path) {
         // v3: يضيف request_id صريح جوه الرسالة الموقّعة، فوق domain-binding
         // بتاع v2. الـ request_id ده هو نفسه مفتاح الـ idempotency اللي
         // الـ backend بيستخدمه يعرف إن ده retry لنفس العملية المنطقية —
@@ -928,7 +928,7 @@ class ChargeGuard_API_Client {
         // وبما إن request_id جوه السلسلة الموقّعة، مهاجم ملقطش السر
         // مايقدرش يغيّر request_id لتوقيع ملتقط من غيره — أي تغيير فيه
         // بيكسر التوقيع.
-        $signed_string = $timestamp . '.' . $domain . '.' . $request_id . '.' . $raw_body;
+        $signed_string = $timestamp . '.' . $domain . '.' . $request_id . '.' . strtoupper($method) . '.' . $path . "\n" . $raw_body;
         return 'v3=' . hash_hmac('sha256', $signed_string, $this->webhook_secret);
     }
 
@@ -944,10 +944,13 @@ class ChargeGuard_API_Client {
      * @param string $request_id
      * @return array Header map جاهزة لـ wp_remote_request()'s 'headers'.
      */
-    private function build_signed_headers($raw_body, $request_id) {
+    private function build_signed_headers($raw_body, $request_id, $method, $url) {
         $domain    = wp_parse_url( home_url(), PHP_URL_HOST );
         $timestamp = (string) time();
-        $signature = $this->generate_hmac($raw_body, $timestamp, $domain, $request_id);
+        // Method + path exactly as sent (no query). An unparsable URL gives '' and the server rejects it.
+        $path      = wp_parse_url($url, PHP_URL_PATH);
+        $path      = is_string($path) ? $path : '';
+        $signature = $this->generate_hmac($raw_body, $timestamp, $domain, $request_id, $method, $path);
 
         return [
             'Content-Type'             => 'application/json',
@@ -1018,7 +1021,7 @@ class ChargeGuard_API_Client {
         $endpoint = '/auth/self-test';
         $url      = $this->base_url . $endpoint;
         $body     = json_encode(['check' => 'signing_secret']);
-        $headers  = $this->build_signed_headers($body, wp_generate_uuid4());
+        $headers  = $this->build_signed_headers($body, wp_generate_uuid4(), 'POST', $url);
 
         $response = wp_remote_post($url, [
             'method'  => 'POST',
@@ -1070,7 +1073,7 @@ class ChargeGuard_API_Client {
             'preOrderId' => $pre_order_id,
             'orderId'    => (string) $real_order_id,
         ]);
-        $headers  = $this->build_signed_headers($body, wp_generate_uuid4());
+        $headers  = $this->build_signed_headers($body, wp_generate_uuid4(), 'POST', $url);
 
         $response = wp_remote_post($url, [
             'method'   => 'POST',
