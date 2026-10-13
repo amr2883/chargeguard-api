@@ -2,13 +2,19 @@
 
 // Shared v3 request signer for tests. Mirrors src/middleware/verifyHmac.js.
 // buildSignedString is the ONLY place that knows the signed-string format.
-// `method` and `target` are accepted now but deliberately unused: the current
-// v3 format does not bind them (#78). The binding commit changes one line below.
+// Signed string (#78): timestamp.domain.requestId.METHOD.path, then a newline, then the body.
+// `target` is the path as the server sees it (req.originalUrl before any '?').
 
 const crypto = require('crypto');
 
 function buildSignedString({ timestamp, domain, requestId, method, target, body }) {
-  return `${timestamp}.${domain}.${requestId}.${body}`;
+  if (typeof method !== 'string' || !/^[A-Z]+$/.test(method)) {
+    throw new Error('signV3: method must be an uppercase HTTP method, got ' + String(method));
+  }
+  if (typeof target !== 'string' || target.charAt(0) !== '/' || target.indexOf('?') !== -1) {
+    throw new Error('signV3: target must be a path starting with / and without a query, got ' + String(target));
+  }
+  return `${timestamp}.${domain}.${requestId}.${method}.${target}\n${body}`;
 }
 
 function signV3({ secret, domain, requestId, method, target, body = '', timestamp, ageSec = 0 }) {

@@ -44,12 +44,13 @@ function drive(scenario, method, timeout, body) {
   return data;
 }
 
-async function runVerify(headers, body) {
+async function runVerify(headers, body, method, url) {
   const req = {
     headers,
     body: Buffer.from(body, 'utf8'),
     tenant: { id: 't1', webhookSecret: SECRET },
-    method: 'POST',
+    method,
+    originalUrl: new URL(url).pathname + new URL(url).search,
     path: '/x',
   };
   const out = { code: null, next: false };
@@ -83,7 +84,7 @@ suite('plugin request_with_breaker: retry behavior (real PHP -> real verifyHmac)
         expect(c.method).toBe('POST');
         expect(c.body).toBe(BODY);
         expect(c.timeout).toBe(5);
-        const out = await runVerify(c.headers, c.body);
+        const out = await runVerify(c.headers, c.body, c.method, c.url);
         expect(out.next).toBe(true);
         expect(out.code).toBeNull();
       }
@@ -100,7 +101,7 @@ suite('plugin request_with_breaker: retry behavior (real PHP -> real verifyHmac)
     expect(d.calls[0].method).toBe('GET');
     expect(d.calls[0].body).toBe('');
     expect(d.calls[0].timeout).toBe(10);
-    const out = await runVerify(d.calls[0].headers, d.calls[0].body);
+    const out = await runVerify(d.calls[0].headers, d.calls[0].body, d.calls[0].method, d.calls[0].url);
     expect(out.next).toBe(true);
     expect(d.code).toBe(200);
   }, 20000);

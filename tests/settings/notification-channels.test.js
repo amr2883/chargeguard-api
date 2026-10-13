@@ -156,11 +156,13 @@ function uniqueApiKey() {
   return `test-api-key-${apiKeyCounter}`;
 }
 
-function makeReq({ headers = {}, body = {}, params = {} } = {}) {
+function makeReq({ headers = {}, body = {}, params = {}, method, originalUrl } = {}) {
   return {
     headers: { 'x-api-key': uniqueApiKey(), ...headers },
     body,
     params,
+    method,
+    originalUrl,
   };
 }
 
@@ -220,8 +222,10 @@ function mockAuthenticatedTenant(tenant) {
 // Signs with the shared v3 helper (tests/helpers/signV3.js). The domain only enters
 // the signed string here, because domainAuth is mocked in this file.
 const TEST_DOMAIN = 'example-notification-store.com';
-function signRequest(secret, bodyObj, timestamp) {
-  return signV3({ secret, domain: TEST_DOMAIN, body: JSON.stringify(bodyObj), timestamp });
+const ROUTE_WEBHOOK = { method: 'POST', originalUrl: '/api/settings/webhook' };
+const ROUTE_TEST = { method: 'POST', originalUrl: '/api/settings/webhook/test' };
+function signRequest(secret, bodyObj, timestamp, route = ROUTE_WEBHOOK) {
+  return signV3({ secret, domain: TEST_DOMAIN, method: route.method, target: route.originalUrl, body: JSON.stringify(bodyObj), timestamp });
 }
 
 function applyPersistentDefaults() {
@@ -358,7 +362,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookType: 'slack' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -372,7 +376,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 12345, webhookType: 'slack' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -385,7 +389,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'teams' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -402,7 +406,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 'https://169.254.169.254/hook', webhookType: 'custom' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -417,7 +421,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 'https://bad.example.com/hook', webhookType: 'custom' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -430,7 +434,7 @@ describe('POST /webhook', () => {
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockResolvedValue({});
     const body = { webhookUrl: 'https://hooks.slack.com/services/x', webhookType: 'slack' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -471,7 +475,7 @@ describe('POST /webhook', () => {
     const tenant = makeTenant();
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
-    const req = makeReq({ body, headers: signRequest('wrong-secret', body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest('wrong-secret', body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -485,7 +489,7 @@ describe('POST /webhook', () => {
     mockAuthenticatedTenant(tenant);
     const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
     const staleTs = String(Math.floor(Date.now() / 1000) - 400);
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body, staleTs) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body, staleTs) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -513,7 +517,7 @@ describe('POST /webhook', () => {
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockRejectedValue(new Error('db down'));
     const body = { webhookUrl: 'https://1.1.1.1/x', webhookType: 'slack' };
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_WEBHOOK, body, headers: signRequest(tenant.webhookSecret, body) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -531,7 +535,7 @@ describe('POST /webhook/test', () => {
     const tenant = makeTenant({ webhookUrl: null });
     mockAuthenticatedTenant(tenant);
     const body = {};
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_TEST, body, headers: signRequest(tenant.webhookSecret, body, undefined, ROUTE_TEST) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -553,7 +557,7 @@ describe('POST /webhook/test', () => {
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockResolvedValue({});
     const body = {};
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_TEST, body, headers: signRequest(tenant.webhookSecret, body, undefined, ROUTE_TEST) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -587,7 +591,7 @@ describe('POST /webhook/test', () => {
     mockAuthenticatedTenant(tenant);
     db.tenant.update.mockResolvedValue({});
     const body = {};
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_TEST, body, headers: signRequest(tenant.webhookSecret, body, undefined, ROUTE_TEST) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -607,7 +611,7 @@ describe('POST /webhook/test', () => {
     sendWebhookAlert.mockRejectedValue(new Error('ECONNREFUSED'));
     db.tenant.update.mockResolvedValue({});
     const body = {};
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_TEST, body, headers: signRequest(tenant.webhookSecret, body, undefined, ROUTE_TEST) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);
@@ -626,7 +630,7 @@ describe('POST /webhook/test', () => {
     sendWebhookAlert.mockRejectedValue({});
     db.tenant.update.mockResolvedValue({});
     const body = {};
-    const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    const req = makeReq({ ...ROUTE_TEST, body, headers: signRequest(tenant.webhookSecret, body, undefined, ROUTE_TEST) });
     const res = makeRes();
 
     await dispatch(handlers(), req, res);

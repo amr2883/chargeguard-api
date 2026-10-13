@@ -154,11 +154,13 @@ function uniqueApiKey() {
   return `test-api-key-geo-${apiKeyCounter}`;
 }
 
-function makeReq({ headers = {}, body = {}, params = {} } = {}) {
+function makeReq({ headers = {}, body = {}, params = {}, method, originalUrl } = {}) {
   return {
     headers: { 'x-api-key': uniqueApiKey(), ...headers },
     body,
     params,
+    method,
+    originalUrl,
   };
 }
 
@@ -210,8 +212,9 @@ function mockAuthenticatedTenant(tenant) {
 // Signs with the shared v3 helper (tests/helpers/signV3.js). The domain only enters
 // the signed string here, because domainAuth is mocked in this file.
 const TEST_DOMAIN = 'example-geo-store.com';
+const ROUTE = { method: 'PUT', originalUrl: '/api/settings/country-overrides' };
 function signRequest(secret, bodyObj, timestamp) {
-  return signV3({ secret, domain: TEST_DOMAIN, body: JSON.stringify(bodyObj), timestamp });
+  return signV3({ secret, domain: TEST_DOMAIN, method: ROUTE.method, target: ROUTE.originalUrl, body: JSON.stringify(bodyObj), timestamp });
 }
 
 function applyPersistentDefaults() {
@@ -385,7 +388,7 @@ describe('PUT /country-overrides', () => {
 
   function putReq(tenant, updates) {
     const body = { updates };
-    return makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+    return makeReq({ ...ROUTE, body, headers: signRequest(tenant.webhookSecret, body) });
   }
 
   describe('validation', () => {
@@ -393,7 +396,7 @@ describe('PUT /country-overrides', () => {
       const tenant = makeTenant();
       mockAuthenticatedTenant(tenant);
       const body = {};
-      const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+      const req = makeReq({ ...ROUTE, body, headers: signRequest(tenant.webhookSecret, body) });
       const res = makeRes();
 
       await dispatch(handlers(), req, res);
@@ -418,7 +421,7 @@ describe('PUT /country-overrides', () => {
       const tenant = makeTenant();
       mockAuthenticatedTenant(tenant);
       const body = { updates: 'NG:escalate' };
-      const req = makeReq({ body, headers: signRequest(tenant.webhookSecret, body) });
+      const req = makeReq({ ...ROUTE, body, headers: signRequest(tenant.webhookSecret, body) });
       const res = makeRes();
 
       await dispatch(handlers(), req, res);
@@ -665,7 +668,7 @@ describe('PUT /country-overrides', () => {
       const tenant = makeTenant();
       mockAuthenticatedTenant(tenant);
       const body = { updates: [{ countryCode: 'NG', override: 'escalate' }] };
-      const req = makeReq({ body, headers: signRequest('wrong-secret', body) });
+      const req = makeReq({ ...ROUTE, body, headers: signRequest('wrong-secret', body) });
       const res = makeRes();
 
       await dispatch(handlers(), req, res);
