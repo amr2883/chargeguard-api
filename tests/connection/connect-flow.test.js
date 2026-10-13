@@ -131,6 +131,82 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
     });
   });
 
+  // ── Security: Store-aware domain resolution (Agency multi-store) ─────
+  describe('store-aware domain resolution (domainAuthMiddleware)', () => {
+    // Tenant with NO legacy allowedDomains, so only the Store table can authorize a domain.
+    async function seedStoreManagedTenant(label) {
+      const key = crypto.randomBytes(32).toString('base64');
+      const tenant = await prisma.tenant.create({
+        data: {
+          email: `store-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com`,
+          storeUrl: `https://example-${label}-owner.com`,
+          allowedDomains: [],
+          webhookSecret: crypto.randomBytes(32).toString('hex'),
+          apiKeyHash: hashApiKey(key),
+          apiKey: null,
+          isActive: true,
+          emailVerified: true,
+          plan: 'early_access',
+        },
+      });
+      return { tenant, apiKey: key };
+    }
+
+    async function addStore(tenantId, domain, isActive = true) {
+      return prisma.store.create({
+        data: { tenantId, storeUrl: `https://${domain}`, normalizedDomain: domain, isActive },
+      });
+    }
+
+    async function callBlacklist({ tenant, apiKey, domain }) {
+      const bodyString = JSON.stringify({ type: 'EMAIL', value: `store-test-${Date.now()}-${Math.random().toString(36).slice(2)}@example.com` });
+      const headers = signV3({ secret: tenant.webhookSecret, domain, method: 'POST', target: '/api/risk/blacklist', body: bodyString });
+      return request(app)
+        .post('/api/risk/blacklist')
+        .set('Content-Type', 'application/json')
+        .set('X-Api-Key', apiKey)
+        .set(headers)
+        .send(bodyString);
+    }
+
+    test('S1: active Store with the requested domain is accepted', async () => {
+      const t = await seedStoreManagedTenant('s1');
+      createdTenantIds.push(t.tenant.id);
+      await addStore(t.tenant.id, 'example-s1-store.com');
+      const res = await callBlacklist({ ...t, domain: 'example-s1-store.com' });
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+    });
+
+    test('S2: active Store for a different domain rejects the requested domain (403 DOMAIN_MISMATCH)', async () => {
+      const t = await seedStoreManagedTenant('s2');
+      createdTenantIds.push(t.tenant.id);
+      await addStore(t.tenant.id, 'example-s2-other.com');
+      const res = await callBlacklist({ ...t, domain: 'example-s2-store.com' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('DOMAIN_MISMATCH');
+    });
+
+    test('S3: inactive Store with the requested domain does not authorize it (403 NO_ALLOWED_DOMAINS)', async () => {
+      const t = await seedStoreManagedTenant('s3');
+      createdTenantIds.push(t.tenant.id);
+      await addStore(t.tenant.id, 'example-s3-store.com', false);
+      const res = await callBlacklist({ ...t, domain: 'example-s3-store.com' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('NO_ALLOWED_DOMAINS');
+    });
+
+    test("S4: another tenant's active Store with the same domain does not authorize it (403 NO_ALLOWED_DOMAINS)", async () => {
+      const t = await seedStoreManagedTenant('s4');
+      const other = await seedStoreManagedTenant('s4other');
+      createdTenantIds.push(t.tenant.id, other.tenant.id);
+      await addStore(other.tenant.id, 'example-s4-store.com');
+      const res = await callBlacklist({ ...t, domain: 'example-s4-store.com' });
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('NO_ALLOWED_DOMAINS');
+    });
+  });
+
   // ── Security: HMAC enforcement ─────────────────────────────────────────
   describe('HMAC signature enforcement (verifyHmacSignature)', () => {
     let liveTenant, liveApiKey, liveDomain;
