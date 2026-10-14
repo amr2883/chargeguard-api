@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 require('dotenv').config();
 const db = require('./lib/db');
 const express = require('express');
@@ -110,7 +111,16 @@ app.use((err, req, res, next) => {
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
 });
+// /metrics: closed unless METRICS_TOKEN is set; Bearer auth, constant-time compare.
 app.get('/metrics', async (req, res) => {
+  const expected = process.env.METRICS_TOKEN;
+  if (!expected) return res.status(404).end();
+  const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
+  const a = Buffer.from(m ? m[1] : '', 'utf8');
+  const b = Buffer.from(expected, 'utf8');
+  if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).end();
+  }
   res.set('Content-Type', prometheus.registry.contentType);
   res.end(await prometheus.registry.metrics());
 });
