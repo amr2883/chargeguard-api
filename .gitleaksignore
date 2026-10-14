@@ -1,0 +1,2 @@
+# false positive: docblock example define() in plugin header comment (reviewed 2026-10-14: uppercase placeholder names, no secret value)
+woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:47
