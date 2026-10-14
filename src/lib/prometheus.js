@@ -132,7 +132,7 @@ const httpMetricsMiddleware = (req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
     const duration = Date.now() - start;
-    const route = req.route ? req.route.path : req.path;
+    const route = req.route ? req.route.path : 'unmatched';
     httpRequestDuration.labels(req.method, route, res.statusCode).observe(duration);
     httpRequestsTotal.labels(req.method, route, res.statusCode).inc();
   });
