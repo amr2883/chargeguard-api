@@ -1,4 +1,4 @@
-name: CI
+﻿name: CI
 on:
   push:
     branches: [master, main]
@@ -22,8 +22,8 @@ jobs:
           --health-retries=10
     env:
       DATABASE_URL: postgresql://postgres:postgres@localhost:5432/chargeguard_test
-      MOCK_IP_INTEL: 'true'
-      MOCK_BIN_INTEL: 'true'
+      MOCK_IP_INTEL: 'false'
+      MOCK_BIN_INTEL: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
