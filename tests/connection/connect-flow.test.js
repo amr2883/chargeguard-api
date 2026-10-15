@@ -68,6 +68,9 @@ describe('Plugin Connection - connect-with-key, domain and HMAC enforcement (T2)
   describe('connect-with-key rate limiting', () => {
     test('4th /connect-with-key attempt within 15 minutes is rate-limited; first 3 succeed', async () => {
       const { tenant, originalKey } = await seedConnectableTenant('ratelimit');
+      // Self-contained: clear prior attempts so this test never depends on the
+      // global beforeEach reset having run (a leftover warm-up row makes the 3rd call 429).
+      await prisma.connectAttempt.deleteMany({});
       createdTenantIds.push(tenant.id);
 
       const results = [];
