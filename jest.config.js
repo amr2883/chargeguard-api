@@ -7,5 +7,7 @@
   // DB-backed suites assume exclusive use of one test database (deleteMany in
   // beforeEach, shared limiters). Parallel workers made results non-deterministic.
   maxWorkers: 1,
+  // head-snapshot/ is an untracked copy of an older tree; never run its tests.
+  testPathIgnorePatterns: ['/node_modules/', '/head-snapshot/'],
   testTimeout: 15000,
 };
