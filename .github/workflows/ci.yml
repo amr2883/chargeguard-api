@@ -1,4 +1,4 @@
-﻿name: CI
+name: CI
 on:
   push:
     branches: [master, main]
@@ -38,4 +38,6 @@ jobs:
           done
       - run: npx prisma generate
       - run: npx prisma migrate deploy
+      - name: Apply pending CONTRACT step (CI database only)
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f docs/migrations-pending/contract_drop_order_unique.sql
       - run: npx jest --ci
