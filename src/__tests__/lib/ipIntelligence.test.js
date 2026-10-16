@@ -1,4 +1,4 @@
-const { getIPIntelligence, calculateIPPenalty, normalizeIP } = require('../../lib/ipIntelligence');
+﻿const { getIPIntelligence, calculateIPPenalty, normalizeIP } = require('../../lib/ipIntelligence');
 
 // Mock logger لتجنب رسائل console في الاختبارات
 jest.mock('../../lib/logger', () => ({
@@ -12,32 +12,52 @@ jest.mock('../../lib/logger', () => ({
 process.env.ENABLE_IP_INTEL = 'true';
 
 describe('getIPIntelligence - API failure handling', () => {
+  let originalFetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
   beforeEach(() => {
     jest.resetModules();
+    originalFetch = global.fetch;
+    global.fetch = jest.fn().mockRejectedValue(new Error('unexpected network call in test'));
     // إزالة أي تأثير للمتغيرات العامة
-    delete process.env.IPQS_API_KEY;
+    delete process.env.IPLOCATE_API_KEY;
     delete process.env.MOCK_IP_INTEL;
     process.env.ENABLE_IP_INTEL = 'true';
   });
 
-  test('returns timeout source when fetch fails (simulate API timeout/error)', async () => {
-    // تعطيل الـ cache باستخدام IP عشوائي
-    const randomIP = `${Math.floor(Math.random()*200)}.${Math.floor(Math.random()*200)}.${Math.floor(Math.random()*200)}.${Math.floor(Math.random()*200)}`;
-    // نعطل IPQS_API_KEY لضمان الفشل (لأن الدالة fetch الحقيقية ستُستدعى لكن بدون API key)
-    process.env.IPQS_API_KEY = '';
-    const result = await getIPIntelligence(randomIP, 'merchant1');
-    // عندما يكون API key فارغًا، الدالة تعيد null من fetchIPData وبالتالي timeout أو skipped
+  test('returns timeout source when API key is missing (degraded mode)', async () => {
+    const fixedIP = '1.1.1.1';
+    const result = await getIPIntelligence(fixedIP, 'merchant1');
     expect(result.source).toBe('timeout');
     expect(result.riskScore).toBe(0);
   }, 10000);
 
-  test('returns skipped source when API key is missing', async () => {
-    process.env.IPQS_API_KEY = '';
+  test('returns timeout source for a public IP when API key is missing', async () => {
     const result = await getIPIntelligence('8.8.8.8', 'merchant1');
-    // عند فقدان API key، الدالة تسجل warning وتعيد null من fetch، مما يؤدي إلى timeout أو skipped
     expect(result.source).toBe('timeout');
     expect(result.riskScore).toBe(0);
   }, 10000);
+
+  test('does not call fetch when API key is missing', async () => {
+    const result = await getIPIntelligence('9.9.9.9', 'merchant1');
+    expect(global.fetch).not.toHaveBeenCalled();
+    expect(result.source).toBe('timeout');
+    expect(result.riskScore).toBe(0);
+  }, 10000);
+
+  test.each(['127.127.127.127', '10.1.2.3', '172.20.1.1', '192.168.5.5'])(
+    'returns skipped without a network call for reserved IP %s',
+    async (ip) => {
+      const result = await getIPIntelligence(ip, 'merchant1');
+      expect(result.source).toBe('skipped');
+      expect(result.riskScore).toBe(0);
+      expect(global.fetch).not.toHaveBeenCalled();
+    },
+    10000
+  );
 
   test('skipped IP never penalizes', () => {
     const skippedIP = { source: 'skipped', riskScore: 0 };
