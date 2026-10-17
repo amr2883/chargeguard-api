@@ -159,6 +159,14 @@ if (!signature || !timestamp) {
       return res.status(401).json({ error: 'Unauthorized' });
     }
     signedStr = `${timestamp}.${storeDomain}.${rawBody.toString('utf8')}`;
+    // Deprecated (#55): the current plugin sends v3. Logged BEFORE the HMAC
+    // check, so this counts v2 attempts (forged ones too), not only valid
+    // ones. It is the data we need to decide when v2 can be removed.
+    res.set('X-ChargeGuard-Signature-Deprecated', 'v2 signatures are deprecated and will be removed; upgrade the ChargeGuard plugin to use v3 signatures.');
+    logger.warn(
+      { tenantId: req.tenant?.id, path: req.path },
+      'HMAC_V2_DEPRECATED_SIGNATURE_USED'
+    );
   } else if (sigVersion === 'v1') {
     // Legacy, pre-domain-binding format — accepted only during the v1/v2
     // migration window for stores still running an older plugin build.

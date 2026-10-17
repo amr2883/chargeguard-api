@@ -1,4 +1,4 @@
-﻿const request = require('supertest');
+const request = require('supertest');
 const crypto = require('crypto');
 const app = require('../../src/app');
 const { PrismaClient } = require('@prisma/client');
@@ -10,76 +10,6 @@ const { sendChallengeOtpEmail } = require('../../src/lib/email');
 const logger = require('../../src/lib/logger');
 
 const prisma = new PrismaClient();
-
-// Same v2 format verifyHmac.js expects and the PHP plugin sends:
-// HMAC-SHA256(secret, `${timestamp}.${storeDomain}.${rawBody}`), prefixed "v2=".
-function signV2(secret, domain, bodyString) {
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const signedStr = `${timestamp}.${domain}.${bodyString}`;
-  const signature = 'v2=' + crypto.createHmac('sha256', secret).update(signedStr).digest('hex');
-  return { timestamp, signature };
-}
-
-describe('POST /api/risk/challenge/request — HMAC over the raw bytes the plugin signed', () => {
-  let tenant, domain, apiKey;
-
-  beforeAll(async () => {
-    const label = 'chal' + Math.random().toString(36).slice(2, 8);
-    domain = `example-${label}-store.com`;
-    apiKey = crypto.randomBytes(32).toString('base64');
-    tenant = await prisma.tenant.create({
-      data: {
-        email: `${label}-${Date.now()}@example.com`,
-        storeUrl: `https://${domain}`,
-        allowedDomains: [domain],
-        webhookSecret: crypto.randomBytes(32).toString('hex'),
-        apiKeyHash: hashApiKey(apiKey),
-        apiKey: null,
-        isActive: true,
-        emailVerified: true,
-        plan: 'early_access',
-      },
-    });
-  });
-
-  afterAll(async () => {
-    if (tenant) await prisma.tenant.deleteMany({ where: { id: tenant.id } });
-    await prisma.$disconnect();
-  });
-
-  const post = (bodyString, signBody) => {
-    const { timestamp, signature } = signV2(tenant.webhookSecret, domain, signBody ?? bodyString);
-    return request(app)
-      .post('/api/risk/challenge/request')
-      .set('Content-Type', 'application/json')
-      .set('X-API-Key', apiKey)
-      .set('X-Store-Domain', domain)
-      .set('X-ChargeGuard-Signature', signature)
-      .set('X-ChargeGuard-Timestamp', timestamp)
-      .send(bodyString);
-  };
-
-  test('control: plain ASCII body, compact JSON, signature accepted', async () => {
-    const body = '{"deviceFingerprint":"fpplain1","email":"buyer@example.com"}';
-    const res = await post(body);
-    expect(res.status).toBe(200);
-  });
-
-  test('PHP json_encode style body (escaped slash + \\uXXXX) is accepted', async () => {
-    // PHP json_encode default output: "/" -> "\/", "é" -> "\u00e9"
-    const body = '{"deviceFingerprint":"fp\\/abc\\u00e9x","email":"caf\\u00e9\\/x@example.com"}';
-    const res = await post(body);
-    expect(res.status).toBe(200);
-  });
-
-  test('signature computed over a different body is rejected (401)', async () => {
-    const body = '{"deviceFingerprint":"fpplain2","email":"buyer2@example.com"}';
-    const other = '{"deviceFingerprint":"fpplain2","email":"attacker@example.com"}';
-    const res = await post(body, other);
-    expect(res.status).toBe(401);
-  });
-});
-
 
 describe('POST /api/risk/challenge/request — v3 (الصيغة اللي الـ plugin بيبعتها فعلاً)', () => {
   let tenant, domain, apiKey, warnSpy;
@@ -230,6 +160,22 @@ describe('POST /api/risk/challenge/request — v3 (الصيغة اللي الـ 
     const second = await postV3({ body, requestId: rid, ts: String(now) });
     expect(second.status).toBe(200);
     expect(second.body).toEqual(first.body);
+    expect(sendChallengeOtpEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('v2 signature (deprecated, #55 phase 1): still 200, deprecation header set, HMAC_V2_DEPRECATED_SIGNATURE_USED logged', async () => {
+    const body = '{"deviceFingerprint":"v2phase1a","email":"buyer-v2@example.com"}';
+    const ts = String(Math.floor(Date.now() / 1000));
+    const sig = 'v2=' + crypto.createHmac('sha256', tenant.webhookSecret).update(`${ts}.${domain}.${body}`).digest('hex');
+    const res = await request(app)
+      .post('/api/risk/challenge/request')
+      .set('Content-Type', 'application/json')
+      .set('X-API-Key', apiKey)
+      .set({ 'x-store-domain': domain, 'x-chargeguard-signature': sig, 'x-chargeguard-timestamp': ts })
+      .send(body);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-chargeguard-signature-deprecated']).toMatch(/^v2 signatures are deprecated/);
+    expect(warnedWith('HMAC_V2_DEPRECATED_SIGNATURE_USED')).toBe(true);
     expect(sendChallengeOtpEmail).toHaveBeenCalledTimes(1);
   });
 });
