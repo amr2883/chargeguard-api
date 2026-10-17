@@ -4,7 +4,7 @@
 //   - no pendingStoreDomain            -> next(), nothing touched
 //   - kill switch off                  -> 403 DOMAIN_MISMATCH
 //   - signature not domain-bound       -> 403 DOMAIN_MISMATCH (v1, unknown, missing)
-//   - domain-bound signature (v2, v3)  -> proceeds to the Agency / Store logic
+//   - domain-bound signature (v3)  -> proceeds to the Agency / Store logic
 //   - non-Agency tenant                -> 403
 //   - every rejection must NOT create a Store and must NOT call next()
 //
@@ -28,7 +28,7 @@ const DOMAIN = 'new-store.example.com';
 function makeReq(overrides = {}) {
   return {
     pendingStoreDomain: DOMAIN,
-    hmacSignatureVersion: 'v2',
+    hmacSignatureVersion: 'v3',
     tenant: { id: 'tenant_1', plan: 'agency' },
     path: '/risk/evaluate',
     headers: { 'x-store-domain': DOMAIN },
@@ -85,7 +85,7 @@ describe('autoRegisterStoreMiddleware', () => {
     expectRejected(res, next, 403, 'DOMAIN_MISMATCH');
   });
 
-  test.each(['v1', 'v4', '', undefined])(
+  test.each(['v1', 'v2', 'v4', '', undefined])(
     'signature version %p is not domain-bound: rejected, no Store created',
     async (version) => {
       const { res, next } = await run(makeReq({ hmacSignatureVersion: version }));
@@ -94,7 +94,7 @@ describe('autoRegisterStoreMiddleware', () => {
     }
   );
 
-  test.each(['v2', 'v3'])(
+  test.each(['v3'])(
     'domain-bound signature %s: registers the Store and continues',
     async (version) => {
       const req = makeReq({ hmacSignatureVersion: version });

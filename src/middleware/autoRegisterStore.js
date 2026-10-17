@@ -8,7 +8,7 @@ const AGENCY_STORE_LIMIT = 5;
 
 // Signature versions whose signed string binds X-Store-Domain (v1 does not).
 // Only these may auto-register a Store from an unresolved domain.
-const DOMAIN_BOUND_VERSIONS = ['v2', 'v3'];
+const DOMAIN_BOUND_VERSIONS = ['v3'];
 
 /**
  * autoRegisterStoreMiddleware — Solution D, "verify" half.
@@ -45,7 +45,7 @@ async function autoRegisterStoreMiddleware(req, res, next) {
     if (!DOMAIN_BOUND_VERSIONS.includes(req.hmacSignatureVersion)) {
       logger.warn(
         { module: 'autoRegisterStore', tenantId: req.tenant?.id, path: req.path, sigVersion: req.hmacSignatureVersion },
-        'Domain unresolved and signature is not domain-bound (v2/v3) — rejecting rather than auto-registering'
+        'Domain unresolved and signature is not domain-bound (v3) — rejecting rather than auto-registering'
       );
       return res.status(403).json({
         error: 'Domain not authorized for this API key. Add this domain as a Store first.',
@@ -118,7 +118,7 @@ async function autoRegisterStoreMiddleware(req, res, next) {
       req.storeDomain = normalizedDomain;
       logger.info(
         { module: 'autoRegisterStore', tenantId, storeId: store.id, normalizedDomain },
-        'Store auto-registered from a verified domain-bound (v2/v3) request'
+        'Store auto-registered from a verified domain-bound (v3) request'
       );
       return next();
     } catch (err) {
