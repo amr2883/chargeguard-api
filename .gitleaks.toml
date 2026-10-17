@@ -1,0 +1,13 @@
+title = "chargeguard gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Confirmed false positives (#history-scan 2026-10-17)"
+paths = [
+  '''duplicate_file_audit\.csv$''',
+  '''vendor/stripe/stripe-php/README\.md$''',
+  '''vendor/stripe-php/README\.md$''',
+  '''nginx/ssl/chargeguard\.key$''',
+]
