@@ -3,3 +3,4 @@
 # so CRLF vs LF changes the hash stored in _prisma_migrations.
 prisma/migrations/**   text eol=lf
 docs/migrations-pending/**   text eol=lf
+.githooks/**   text eol=lf
