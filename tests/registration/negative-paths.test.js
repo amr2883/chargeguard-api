@@ -179,6 +179,31 @@ describe('Negative & edge-case tests (§3.2)', () => {
     }
   });
 
+  // Turnstile siteverify network failure -> fail-closed 503, no DB write.
+  test('registration when Turnstile siteverify is unreachable is rejected (503)', async () => {
+    const spy = jest.spyOn(globalThis, 'fetch').mockRejectedValueOnce(new Error('simulated network failure'));
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const testEmail = `neg-turnstile503-${Date.now()}@example.com`;
+      const res = await request(app)
+        .post('/api/risk/tenants/register')
+        .send({
+          email: testEmail,
+          storeUrl: 'https://example.com',
+          turnstileToken: 'dummy-token-for-always-pass-testing-secret',
+        });
+
+      expect(spy).toHaveBeenCalled();
+      expect(res.status).toBe(503);
+      expect(res.body.error).toMatch(/security check unavailable/i);
+
+      const tenant = await prisma.tenant.findUnique({ where: { email: testEmail } });
+      expect(tenant).toBeNull();
+    } finally {
+      spy.mockRestore();
+      errSpy.mockRestore();
+    }
+  });
   // ── §3.2 #7 — invalid email format ─────────────────────────────────────
   describe('email format validation (documents actual — weak — current behavior)', () => {
     test('missing email is rejected', async () => {
