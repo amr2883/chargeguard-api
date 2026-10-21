@@ -7,6 +7,7 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const prometheus = require('./lib/prometheus');
 const logger = require('./lib/logger');
+const { safeUrl } = require('./lib/safeUrl');
 const { safeErrorPayload } = require('./lib/errorResponse');
 
 const app = express();
@@ -63,6 +64,7 @@ app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
 app.use('/api/auth/self-test', express.raw({ type: 'application/json' }));
 app.use('/api/risk/challenge', express.raw({ type: 'application/json' }));
 app.use(express.json());
+morgan.token('url', (req) => safeUrl(req.originalUrl || req.url));
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,
 }));
@@ -104,7 +106,7 @@ app.use((err, req, res, next) => {
   // { error: 'Internal server error' } in production, and only reveals
   // err.message/err.stack when NODE_ENV === 'development' or
   // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  logger.error({ module: 'app', path: req.originalUrl, error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  logger.error({ module: 'app', path: safeUrl(req.originalUrl), error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
   res.status(500).json(safeErrorPayload(err));
 });
 
