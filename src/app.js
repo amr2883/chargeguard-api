@@ -106,6 +106,13 @@ app.use((err, req, res, next) => {
   // { error: 'Internal server error' } in production, and only reveals
   // err.message/err.stack when NODE_ENV === 'development' or
   // DEBUG_ERRORS=true (see lib/errorResponse.js).
+  // Client errors (4xx from body-parser / router, e.g. malformed JSON or URI): keep the
+  // status and never log message/stack/body, which can echo request content.
+  const clientStatus = Number(err && (err.status || err.statusCode));
+  if (Number.isInteger(clientStatus) && clientStatus >= 400 && clientStatus < 500) {
+    logger.warn({ module: 'app', path: safeUrl(req.originalUrl), status: clientStatus, type: String(err.type || err.code || '') }, 'Client error rejected by global error handler');
+    return res.status(clientStatus).json({ error: clientStatus === 413 ? 'Payload too large' : 'Bad request' });
+  }
   logger.error({ module: 'app', path: safeUrl(req.originalUrl), error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
   res.status(500).json(safeErrorPayload(err));
 });

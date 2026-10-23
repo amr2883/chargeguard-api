@@ -17,17 +17,17 @@ test('F105: access log must not contain query values', async () => {
   expect(out).toContain('/health');
   expect(out).not.toContain(CANARY);
 });
-test('F108: error handler log must not contain query values', async () => {
-  const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+test('F108: error/warn logs must not contain query values', async () => {
+  const spies = ['error', 'warn'].map((m) => jest.spyOn(console, m).mockImplementation(() => {}));
   let out = '';
   let calls = 0;
   try {
     await request(app).get('/api/risk/blacklist/%E0%A4%A?key=' + CANARY);
     await new Promise((r) => setTimeout(r, 150));
-    calls = spy.mock.calls.length;
-    out = spy.mock.calls.map((c) => flat(c)).join('\n');
+    calls = spies.reduce((n, s) => n + s.mock.calls.length, 0);
+    out = spies.flatMap((s) => s.mock.calls.map((c) => flat(c))).join('\n');
   } finally {
-    spy.mockRestore();
+    spies.forEach((s) => s.mockRestore());
   }
   expect(calls).toBeGreaterThan(0);
   expect(out).not.toContain(CANARY);

@@ -67,3 +67,6 @@ chargeguard-woocommerce*.zip
 *.bak*
 *.backup*
 _tmp_*
+
+ce.log
+jest-full.log
