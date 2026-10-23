@@ -4,3 +4,7 @@ woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:47
 7ca8bc8f4f683ccc6c5ae7f635076b1c79668c03:build/woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:61
 7ca8bc8f4f683ccc6c5ae7f635076b1c79668c03:woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:61
 c6a6bbac0db0404a261ff3fc500a1c3508f2f7fa:index.html:generic-api-key:1981
+
+# Confirmed false positive (2026-10-23): REPLACE_WITH_64_HEX_CHARS placeholder in plugin docblock define() — same content as 7ca8bc8f, different vendor dump commit
+10169c84943a05c10c461229c5e81db67defac75:build/woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:61
+10169c84943a05c10c461229c5e81db67defac75:woocommerce-chargeguard/chargeguard-woocommerce.php:generic-api-key:61
