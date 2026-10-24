@@ -298,9 +298,6 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
 
-  // نُعيد 200 فوراً لـ PayPal — المعالجة تحدث بعد ذلك
-  res.status(200).json({ received: true });
-
   // ── 3. نُعالج فقط حدث اكتمال الدفع ──────────────────────────────────
   if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED') {
     logger.info(
@@ -482,6 +479,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
       },
       '✅ Subscription activated successfully'
     );
+    return res.status(200).json({ received: true });
 
     // ── 10. إرسال إيميل تأكيد للتاجر (fire-and-forget) ───────────────────
     // تأخير 2 ثانية بعد الـ transaction — نضمن أن DB commit اكتمل
@@ -529,7 +527,11 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         'PayPal webhook processing failed' + (err.code === 'P2002' ? ' (P2002 but no Payment row for this captureId: possible second payment on the same checkout session)' : '')
       );
     }
-    // لا نُعيد خطأ هنا لأننا أرسلنا 200 مسبقاً
+    if (dupOfKnownCapture) {
+      if (!res.headersSent) res.status(200).json({ received: true });
+    } else {
+      if (!res.headersSent) res.status(500).json({ error: 'Processing failed - will retry' });
+    }
   }
 });
 
