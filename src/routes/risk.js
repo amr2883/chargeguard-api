@@ -3589,7 +3589,10 @@ router.post('/tenants/register', async (req, res) => {
 
 
 
-    if (!email || !email.includes('@')) {
+    // REG-EMAIL-NORM-FIXED: normalize at registration so DB email matches /evaluate fraud signals
+  const emailNormalized = email ? normalizeEmail(String(email).trim().toLowerCase()) : email;
+
+  if (!emailNormalized || !emailNormalized && emailNormalized.includes('@')) {
       return res.status(400).json({ error: 'Valid email is required' });
     }
 
