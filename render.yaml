@@ -7,6 +7,7 @@ services:
     dockerContext: .
     dockerfilePath: ./Dockerfile
     dockerCommand: "node src/server.js"
+    preDeployCommand: "npx prisma migrate deploy"
     envVars:
       - key: DATABASE_URL
         sync: false
