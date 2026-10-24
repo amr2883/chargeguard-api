@@ -88,31 +88,7 @@ app.use('/admin', (req, res, next) => {
 }, adminRoutes);
 
 app.use(express.static(path.join(__dirname, 'public')));
-// ?? Global error handler ? MUST be after all routes ??????????
-app.use((err, req, res, next) => {
-  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
-    // Unchanged: forwarded to Express's built-in final handler. This path
-    // only fires for errors thrown before that route's own try/catch could
-    // run (e.g. a raw-body-parsing failure upstream) â€” Express's default
-    // handler still responds with a 5xx status, which is all the plugin's
-    // circuit breaker (class-api-client.php) actually inspects.
-    return next(err);
-  }
-  // Full detail (message + stack) goes to the structured logger only â€”
-  // never to the client. safeErrorPayload() returns a generic
-  // { error: 'Internal server error' } in production, and only reveals
-  // err.message/err.stack when NODE_ENV === 'development' or
-  // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  // Client errors (4xx from body-parser / router, e.g. malformed JSON or URI): keep the
-  // status and never log message/stack/body, which can echo request content.
-  const clientStatus = Number(err && (err.status || err.statusCode));
-  if (Number.isInteger(clientStatus) && clientStatus >= 400 && clientStatus < 500) {
-    logger.warn({ module: 'app', path: safeUrl(req.originalUrl), status: clientStatus, type: String(err.type || err.code || '') }, 'Client error rejected by global error handler');
-    return res.status(clientStatus).json({ error: clientStatus === 413 ? 'Payload too large' : 'Bad request' });
-  }
-  logger.error({ module: 'app', path: safeUrl(req.originalUrl), error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
-  res.status(500).json(safeErrorPayload(err));
-});
+
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
@@ -158,5 +134,36 @@ app.get('/api/ping', (req, res) => {
 // Calling listen() here too previously caused a duplicate bind attempt on
 // the same port within the same process â€” visible in production logs as
 // the "Server running" line printing twice.
+// JSON-404-HANDLER: must stay after every route
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// ?? Global error handler ? MUST be after all routes ??????????
+app.use((err, req, res, next) => {
+  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    // Unchanged: forwarded to Express's built-in final handler. This path
+    // only fires for errors thrown before that route's own try/catch could
+    // run (e.g. a raw-body-parsing failure upstream) â€” Express's default
+    // handler still responds with a 5xx status, which is all the plugin's
+    // circuit breaker (class-api-client.php) actually inspects.
+    return next(err);
+  }
+  // Full detail (message + stack) goes to the structured logger only â€”
+  // never to the client. safeErrorPayload() returns a generic
+  // { error: 'Internal server error' } in production, and only reveals
+  // err.message/err.stack when NODE_ENV === 'development' or
+  // DEBUG_ERRORS=true (see lib/errorResponse.js).
+  // Client errors (4xx from body-parser / router, e.g. malformed JSON or URI): keep the
+  // status and never log message/stack/body, which can echo request content.
+  const clientStatus = Number(err && (err.status || err.statusCode));
+  if (Number.isInteger(clientStatus) && clientStatus >= 400 && clientStatus < 500) {
+    logger.warn({ module: 'app', path: safeUrl(req.originalUrl), status: clientStatus, type: String(err.type || err.code || '') }, 'Client error rejected by global error handler');
+    return res.status(clientStatus).json({ error: clientStatus === 413 ? 'Payload too large' : 'Bad request' });
+  }
+  logger.error({ module: 'app', path: safeUrl(req.originalUrl), error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  res.status(500).json(safeErrorPayload(err));
+});
+
 module.exports = app;
 
