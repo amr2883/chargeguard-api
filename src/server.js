@@ -9,6 +9,9 @@ const REQUIRED_ENV = [
   'ADMIN_SECRET',
   'PAYPAL_CLIENT_ID',
   'PAYPAL_CLIENT_SECRET',
+  'SECRET_SALT',
+  'CHALLENGE_TICKET_SECRET',
+  'DEVICE_TOKEN_SECRET',
 ];
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length > 0) {
