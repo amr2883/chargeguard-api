@@ -94,7 +94,7 @@ app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
 });
 // /metrics: closed unless METRICS_TOKEN is set; Bearer auth, constant-time compare.
-app.get('/metrics', async (req, res) => {
+app.get('/metrics', async (req, res, next) => {
   const expected = process.env.METRICS_TOKEN;
   if (!expected) return res.status(404).end();
   const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
@@ -104,7 +104,9 @@ app.get('/metrics', async (req, res) => {
     return res.status(401).end();
   }
   res.set('Content-Type', prometheus.registry.contentType);
-  res.end(await prometheus.registry.metrics());
+  try {
+    res.end(await prometheus.registry.metrics());
+  } catch (e) { next(e); }
 });
 
 // ============================================================
