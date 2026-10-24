@@ -3373,7 +3373,8 @@ router.get('/orders/export.csv', authByApiKey, exportRateLimit, async (req, res)
       if (val === null || val === undefined) return '';
       let s = String(val);
       // Formula injection prevention (OWASP CSV injection)
-      if (/^[=+\-@\t\r]/.test(s)) s = '\'' + s;
+      // CSV-NUMERIC-GUARD: skip formula prefix for numeric values (amounts, scores)
+      if (typeof val !== 'number' && /^[=+\-@\t\r]/.test(s)) s = '\'' + s;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
