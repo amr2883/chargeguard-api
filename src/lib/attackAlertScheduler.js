@@ -37,7 +37,8 @@ const { SAVINGS_PER_ATTACK } = require('./constants');
 async function runAttackAlertCheck(prisma) {
   const label = `[AttackAlert ${new Date().toISOString()}]`;
 
-  const lock = await acquireLock('scheduler:attackAlert', 120_000);
+  // SCHED-LOCK-FIXED: TTL 60s < 120s interval — ensures lock expires before next tick
+  const lock = await acquireLock('scheduler:attackAlert', 60_000);
   if (!lock) {
     console.log(`${label} 🔒 lock not acquired, skipping this tick`);
     return;
