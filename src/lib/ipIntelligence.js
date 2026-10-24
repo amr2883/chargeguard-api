@@ -15,6 +15,17 @@ const prometheus = require('./prometheus');
 const logger = require('../lib/logger');
 const { getLearnedMultiplier } = require('./signalWeights');
 
+// [MOCK1] Refuse to boot if the mock IP provider is enabled in production.
+// Mirrors the BIN guard: mock data silently disables real IP fraud signals.
+if (process.env.MOCK_IP_INTEL === 'true' && process.env.NODE_ENV === 'production') {
+  throw new Error(
+    'FATAL: MOCK_IP_INTEL=true is set with NODE_ENV=production. ' +
+    'This would silently replace real IP intelligence with mock data. ' +
+    'Refusing to start. Remove MOCK_IP_INTEL from the production environment config.'
+  );
+}
+
+
 // ─── Feature Flag ─────────────────────────────────────────────────────────
 // لو حصل bug في production → ENABLE_IP_INTEL=false في .env يوقفه فوراً
 const IP_INTEL_ENABLED = process.env.ENABLE_IP_INTEL !== "false";
