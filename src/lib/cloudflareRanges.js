@@ -14,7 +14,7 @@ const logger = require('./logger');
 const CF_IPV4_URL = 'https://www.cloudflare.com/ips-v4';
 const CF_IPV6_URL = 'https://www.cloudflare.com/ips-v6';
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 30_000; // CF-TIMEOUT-FIXED: 10s→30s (Render Free network not ready at startup)
 
 // Hardcoded fallback — used only until the first successful fetch
 // completes (e.g. immediately after a fresh deploy/restart), or if every
