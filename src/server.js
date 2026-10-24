@@ -12,6 +12,9 @@ const REQUIRED_ENV = [
   'SECRET_SALT',
   'CHALLENGE_TICKET_SECRET',
   'DEVICE_TOKEN_SECRET',
+  'GMAIL_OAUTH_CLIENT_ID',
+  'GMAIL_OAUTH_CLIENT_SECRET',
+  'GMAIL_OAUTH_REFRESH_TOKEN',
 ];
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length > 0) {

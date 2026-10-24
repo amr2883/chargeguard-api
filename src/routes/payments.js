@@ -479,7 +479,6 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
       },
       '✅ Subscription activated successfully'
     );
-    return res.status(200).json({ received: true });
 
     // ── 10. إرسال إيميل تأكيد للتاجر (fire-and-forget) ───────────────────
     // تأخير 2 ثانية بعد الـ transaction — نضمن أن DB commit اكتمل
@@ -495,6 +494,8 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         logger.error({ module: 'payments', captureId, err: err.message }, 'Confirmation email failed — non-critical')
       );
     }, 2000);
+
+    return res.status(200).json({ received: true }); // PAY1-EMAIL-FIXED
 
   } catch (err) {
     // [P0-07 fix] A P2002 unique-constraint violation here means two

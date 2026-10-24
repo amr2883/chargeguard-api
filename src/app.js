@@ -60,7 +60,8 @@ app.use('/api/stores', express.raw({ type: 'application/json' }));
 app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
 app.use('/api/auth/self-test', express.raw({ type: 'application/json' }));
 app.use('/api/risk/challenge', express.raw({ type: 'application/json' }));
-app.use(express.json());
+app.use(express.json())
+app.use(express.urlencoded({ extended: false })); // UE1-FIXED;
 morgan.token('url', (req) => safeUrl(req.originalUrl || req.url));
 app.use(morgan('dev', {
   skip: (req) => req.skipMorgan === true,

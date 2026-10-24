@@ -1,4 +1,8 @@
 const express = require('express');
+
+function escapeHtml(s) {
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#39;");
+} // XSS-AUTH-FIXED
 const router = express.Router();
 const crypto = require('crypto');
 const db = require('../lib/db');
@@ -363,12 +367,12 @@ router.get('/verify-email', async (req, res) => {
         'This link was valid for 24 hours and has now expired. Request a new confirmation email below.',
         `
         <form action="/api/auth/resend-verification" method="POST" style="margin-top:8px">
-          <input type="hidden" name="email" value="${tenant.email}"/>
+          <input type="hidden" name="email" value="${escapeHtml(tenant.email)}"/>
           <button type="submit" style="width:100%;padding:13px 24px;border-radius:8px;font-size:14px;font-weight:700;background:linear-gradient(135deg,#f97316,#ea580c);color:#fff;border:none;cursor:pointer">
             Resend Confirmation Email →
           </button>
         </form>
-        <p class="note">We'll send a fresh link to ${tenant.email}</p>
+        <p class="note">We'll send a fresh link to ${escapeHtml(tenant.email)}</p>
         `
       ));
     }
