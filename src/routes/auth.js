@@ -47,7 +47,7 @@ const hashIp = (ip) => {
 // because this route is a credential-bearing "connect" action. IP-only (not
 // email-keyed) to avoid creating an enumeration oracle.
 const connectRateLimit = async (req, res, next) => {
-  const ip = req.ip || req.connection.remoteAddress;
+  const ip = req.ip || req.socket?.remoteAddress;
   const ipHash = hashIp(ip);
   const windowMs = 15 * 60 * 1000;
   const windowStart = new Date(Date.now() - windowMs);

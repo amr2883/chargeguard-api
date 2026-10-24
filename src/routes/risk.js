@@ -3493,7 +3493,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
 
 router.post('/tenants/register', async (req, res) => {
       // ?? Rate Limiting (Persistent DB) ????????????????????????????????????????
-  const ip = req.ip || req.connection.remoteAddress;
+  const ip = req.ip || req.socket?.remoteAddress;
   const ipHash = hashIp(ip);
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
   const MAX_ATTEMPTS = 5;
@@ -3550,7 +3550,7 @@ router.post('/tenants/register', async (req, res) => {
             body: new URLSearchParams({
               secret:   process.env.TURNSTILE_SECRET_KEY,
               response: turnstileToken,
-              remoteip: req.ip || req.connection.remoteAddress
+              remoteip: req.ip || req.socket?.remoteAddress
             })
           }
         );
