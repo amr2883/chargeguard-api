@@ -17,6 +17,20 @@ if (missingEnv.length > 0) {
 }
 
 
+
+// [PAYPAL-VALIDATE] P1 — no startup crash, but a loud warning so Render Logs
+// make it immediately obvious if PAYPAL_MODE is missing or wrong in production.
+// The ternary in payments.js treats any value !== 'sandbox' as live PayPal,
+// so an unset or misspelled variable silently charges real cards.
+if (process.env.NODE_ENV === 'production' && process.env.PAYPAL_MODE !== 'sandbox') {
+  console.warn(
+    '[WARN][PAYPAL-VALIDATE] PAYPAL_MODE is not "sandbox" ' +
+    '(current value: ' + (process.env.PAYPAL_MODE || '(unset)') + '). ' +
+    'Live PayPal endpoints will be used for every payment. ' +
+    'Set PAYPAL_MODE=sandbox in Render Environment if this is unintentional.'
+  );
+}
+
 const app = require('./app');
 const { PrismaClient } = require('@prisma/client');
 
