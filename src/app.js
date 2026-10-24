@@ -11,10 +11,7 @@ const { safeUrl } = require('./lib/safeUrl');
 const { safeErrorPayload } = require('./lib/errorResponse');
 
 const app = express();
-app.set('trust proxy', true);
-
-// TEMPORARY â€” remove after test
-
+app.set('trust proxy', 1);
 
 // Middlewares
 app.use((req, res, next) => {

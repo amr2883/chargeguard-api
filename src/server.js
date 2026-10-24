@@ -1,5 +1,21 @@
 require('dotenv').config();
 
+// [CFG1b] Fail-fast: crash at boot if critical env vars are missing
+const REQUIRED_ENV = [
+  'DATABASE_URL',
+  'CARD_HASH_SECRET',
+  'WOOCOMMERCE_WEBHOOK_SECRET',
+  'ADMIN_SECRET',
+  'PAYPAL_CLIENT_ID',
+  'PAYPAL_CLIENT_SECRET',
+];
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length > 0) {
+  console.error('[FATAL] Missing required env vars:', missingEnv.join(', '));
+  process.exit(1);
+}
+
+
 const app = require('./app');
 const { PrismaClient } = require('@prisma/client');
 
