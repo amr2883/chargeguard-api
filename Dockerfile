@@ -1,5 +1,5 @@
 ﻿# ------ مرحلة البناء (Builder) ------
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 RUN apk add --no-cache openssl
 
 WORKDIR /app
@@ -13,7 +13,7 @@ COPY . .
 RUN npx prisma generate
 
 # ------ مرحلة الإنتاج (Production) ------
-FROM node:20-alpine
+FROM node:22-alpine
 
 # إنشاء مستخدم غير جذر لأمان أعلى
 RUN apk add --no-cache openssl
