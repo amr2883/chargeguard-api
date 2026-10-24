@@ -107,6 +107,13 @@ function getCloudflareRangesMeta() {
 // hardcoded FALLBACK_RANGES stay in effect). Same pattern as emailIntelligence.js.
 if (process.env.NODE_ENV !== 'test') {
   refreshCloudflareRanges();
+  // CF-RETRY-FIXED: single retry 20s after boot for Render Free network latency
+  setTimeout(function cfStartupRetry() {
+    if (!lastFetchedAt) {
+      console.warn('[CF-RETRY] startup retry — network not ready at boot');
+      refreshCloudflareRanges();
+    }
+  }, 20000);
   const intervalHandle = setInterval(refreshCloudflareRanges, REFRESH_INTERVAL_MS);
   if (typeof intervalHandle.unref === 'function') intervalHandle.unref();
 }
