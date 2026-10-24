@@ -3646,7 +3646,7 @@ router.post('/tenants/register', async (req, res) => {
 
    const tenant = await db.tenant.create({
       data: {
-        email,
+        email: emailNormalized, // REG-EMAIL-CREATE-FIXED
         storeUrl: storeUrl || null,
         allowedDomains, // Domain-binding allowlist (CWE-636 fix) — enforced by domainAuthMiddleware
         webhookSecret, // HMAC request-signing secret — provisioned at tenant creation, not deferred

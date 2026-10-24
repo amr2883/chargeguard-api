@@ -3369,9 +3369,11 @@ router.get('/orders/export.csv', authByApiKey, exportRateLimit, async (req, res)
       },
     });
 
-    const escapeCsv = (val) => {
+    const escapeCsv = (val) => { // CSV-INJECT-FIXED
       if (val === null || val === undefined) return '';
-      const s = String(val);
+      let s = String(val);
+      // Formula injection prevention (OWASP CSV injection)
+      if (/^[=+\-@\t\r]/.test(s)) s = '\'' + s;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
 
