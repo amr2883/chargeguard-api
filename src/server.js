@@ -12,10 +12,16 @@ const REQUIRED_ENV = [
   'SECRET_SALT',
   'CHALLENGE_TICKET_SECRET',
   'DEVICE_TOKEN_SECRET',
-  'GMAIL_OAUTH_CLIENT_ID',
-  'GMAIL_OAUTH_CLIENT_SECRET',
-  'GMAIL_OAUTH_REFRESH_TOKEN',
 ];
+
+// GMAIL-WARN-NONEXIT: Gmail OAuth vars are optional at startup — email is fire-and-forget.
+// Missing vars produce a warning but never exit(1).
+const WARN_ENV = ['GMAIL_OAUTH_CLIENT_ID', 'GMAIL_OAUTH_CLIENT_SECRET', 'GMAIL_OAUTH_REFRESH_TOKEN'];
+const missingWarn = WARN_ENV.filter(k => !process.env[k]);
+if (missingWarn.length > 0) {
+  console.warn('[WARN] Gmail OAuth vars not set — email delivery will fail silently:', missingWarn.join(', '));
+}
+
 const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
 if (missingEnv.length > 0) {
   console.error('[FATAL] Missing required env vars:', missingEnv.join(', '));
