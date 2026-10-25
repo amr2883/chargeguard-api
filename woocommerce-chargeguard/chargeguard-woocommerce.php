@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /**
  * Plugin Name: ChargeGuard for WooCommerce
  * Description: Advanced Card Testing prevention powered by ChargeGuard intelligence.

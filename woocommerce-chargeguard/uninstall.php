@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 /**
  * ChargeGuard for WooCommerce — Uninstall
  *
@@ -82,6 +82,7 @@ $chargeguard_fixed_transients = [
     'chargeguard_circuit_failures',
     'chargeguard_circuit_open',
     'chargeguard_pending_connect',
+    'cg_update_sha256_pending',    // SHA256 checksum window (TTL 1h; cleared after verified_download)
 ];
 
 foreach ( $chargeguard_fixed_transients as $transient_name ) {

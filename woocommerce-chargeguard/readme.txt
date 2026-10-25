@@ -1,9 +1,9 @@
-=== ChargeGuard - WooCommerce Card Testing Prevention ===
+﻿=== ChargeGuard - WooCommerce Card Testing Prevention ===
 Contributors: Amr453
 Tags: card testing, fraud prevention, woocommerce security, chargeback protection, bot detection
 Requires at least: 6.0
 Tested up to: 6.5
-Stable tag: 1.0.31
+Stable tag: 1.0.32
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -68,6 +68,10 @@ The risk analysis is performed by the ChargeGuard cloud API. Only non-sensitive 
 3. The real-time dashboard showing detailed attack analytics.
 
 == Changelog ==
+
+= 1.0.32 =
+* Security: API key rotation now stores the rotated key encrypted (AES-256-GCM), consistent with initial connection (CWE-312).
+* Security: Plugin updates are now verified against a SHA256 checksum before installation, preventing supply-chain tampering.
 
 = 1.0.31 =
 * Security: Restore fail-closed behavior when rate limiter DB is unavailable (regression in 1.0.30 batch-2, now fixed)
