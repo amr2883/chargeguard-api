@@ -1,4 +1,4 @@
-<?php
+﻿<?php
 
 defined('ABSPATH') || exit;
 
@@ -728,7 +728,7 @@ class ChargeGuard_Admin_Settings {
         if ($code !== 200) {
             wp_send_json_error(['message' => $body['error'] ?? 'Rotation failed.']);
         }
-        update_option('chargeguard_api_key', sanitize_text_field($body['newApiKey']));
+        chargeguard_update_secret_option('chargeguard_api_key', sanitize_text_field($body['newApiKey']));
         wp_send_json_success([
             'newApiKey' => $body['newApiKey'],
             'message'   => $body['message'] ?? 'API key rotated successfully.',
