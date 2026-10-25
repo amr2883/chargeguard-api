@@ -863,6 +863,12 @@ class ChargeGuard_API_Client {
         if ($code >= 200 && $code < 300) {
             return $body_decoded; // { success, emailSent, expiresInSeconds }
         }
+
+        // 429 = the backend's device/email gate answered on purpose ("slow down"). It is NOT a delivery
+        // failure, so it gets its own error code and callers must never fail open on it.
+        if ($code === 429) {
+            return new WP_Error('chargeguard_challenge_rate_limited', (is_array($body_decoded) && isset($body_decoded['error'])) ? (string) $body_decoded['error'] : 'Too many verification requests. Please wait a few minutes.');
+        }
         return new WP_Error('api_error', $body_decoded['error'] ?? 'Failed to request verification code.');
     }
 

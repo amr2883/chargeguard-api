@@ -82,9 +82,9 @@ Initial release.
 This plugin connects to the ChargeGuard API, an external service provided by the ChargeGuard team, to perform real-time fraud risk assessment. During checkout, the following non-personal order data is transmitted for analysis:
 
 * Customer IP address
-* Customer email address (hashed)
+* Customer email address (sent to the ChargeGuard API over HTTPS for reputation checks and, when needed, to deliver a verification code)
 * Order total
-* A unique, randomly generated device fingerprint
+* A device fingerprint derived from browser and hardware characteristics (user agent, screen, time zone, canvas/WebGL renderer)
 
 This data is used exclusively for fraud prevention and is not shared with any third party. The data is subject to the ChargeGuard Terms of Service and Privacy Policy.
 

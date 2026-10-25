@@ -1148,6 +1148,11 @@ class ChargeGuard_Dynamic_Firewall {
 
         $this->maybe_log_malformed_fingerprint($fingerprint);
 
+        // Bound the shape before the value is used as an array key or sent to the API (it is client-controlled).
+        if (!preg_match('/^fp[12]_[0-9a-f]{1,64}$/', $fingerprint)) {
+            wp_send_json_success(['blocked' => false]);
+        }
+
         $blocked = false;
 
         // فحص محلي — مطابقة للمفتاح (بصمة الجهاز) مع التحقق من صلاحية الحظر،
@@ -1579,6 +1584,18 @@ class ChargeGuard_Dynamic_Firewall {
                     ? $challenge_request->get_error_message()
                     : 'emailSent_empty';
 
+                // A 429 from the backend's challenge gates is a deliberate 'slow down' answer, not a delivery failure - never fail open on it.
+                if (is_wp_error($challenge_request) && $challenge_request->get_error_code() === 'chargeguard_challenge_rate_limited') {
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_challenge_rate_limited',
+                            __('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'),
+                            429
+                        );
+                    }
+                    throw new \Exception(__('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'));
+                }
+
                 if ($this->is_device_blacklisted_fp($device_fp)) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_blacklisted');
                     if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
@@ -1810,6 +1827,12 @@ class ChargeGuard_Dynamic_Firewall {
                 $failure_reason = is_wp_error($challenge_request)
                     ? $challenge_request->get_error_message()
                     : 'emailSent_empty';
+
+                // A 429 from the backend's challenge gates is a deliberate 'slow down' answer, not a delivery failure - never fail open on it.
+                if (is_wp_error($challenge_request) && $challenge_request->get_error_code() === 'chargeguard_challenge_rate_limited') {
+                    wc_add_notice(__('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'), 'error');
+                    return;
+                }
 
                 if ($this->is_device_blacklisted_fp($device_fp)) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_blacklisted');
