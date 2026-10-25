@@ -1148,6 +1148,11 @@ class ChargeGuard_Dynamic_Firewall {
 
         $this->maybe_log_malformed_fingerprint($fingerprint);
 
+        // Bound the shape before the value is used as an array key or sent to the API (it is client-controlled).
+        if (!preg_match('/^fp[12]_[0-9a-f]{1,64}$/', $fingerprint)) {
+            wp_send_json_success(['blocked' => false]);
+        }
+
         $blocked = false;
 
         // فحص محلي — مطابقة للمفتاح (بصمة الجهاز) مع التحقق من صلاحية الحظر،
@@ -1579,6 +1584,18 @@ class ChargeGuard_Dynamic_Firewall {
                     ? $challenge_request->get_error_message()
                     : 'emailSent_empty';
 
+                // A 429 from the backend's challenge gates is a deliberate 'slow down' answer, not a delivery failure - never fail open on it.
+                if (is_wp_error($challenge_request) && $challenge_request->get_error_code() === 'chargeguard_challenge_rate_limited') {
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_challenge_rate_limited',
+                            __('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'),
+                            429
+                        );
+                    }
+                    throw new \Exception(__('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'));
+                }
+
                 if ($this->is_device_blacklisted_fp($device_fp)) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_blacklisted');
                     if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
@@ -1591,15 +1608,26 @@ class ChargeGuard_Dynamic_Firewall {
                     throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
                 }
 
-                $rl_key        = 'challenge_delivery_failed:' . $device_fp;
+                // Hash the client-supplied fp so the wp_options key has a bounded safe length,
+                // and use a prefix that cleanup_stale_buckets() sweeps (cg_cdf_).
+                $rl_key        = 'cg_cdf_' . md5( $device_fp );
                 $attempt_count = ChargeGuard_Atomic_Rate_Limiter::increment(
                     $rl_key,
                     self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW
                 );
 
-                if ($attempt_count === 0) {
+                // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
+                if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limiter_unavailable');
-                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — proceeding with blacklist-only protection');
+                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — failing closed (order blocked), per ChargeGuard_Atomic_Rate_Limiter contract');
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_order_blocked',
+                            __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'),
+                            400
+                        );
+                    }
+                    throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limit_exceeded');
                     if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
@@ -1811,6 +1839,12 @@ class ChargeGuard_Dynamic_Firewall {
                     ? $challenge_request->get_error_message()
                     : 'emailSent_empty';
 
+                // A 429 from the backend's challenge gates is a deliberate 'slow down' answer, not a delivery failure - never fail open on it.
+                if (is_wp_error($challenge_request) && $challenge_request->get_error_code() === 'chargeguard_challenge_rate_limited') {
+                    wc_add_notice(__('Too many verification requests. Please wait a few minutes and try again.', 'chargeguard-woocommerce'), 'error');
+                    return;
+                }
+
                 if ($this->is_device_blacklisted_fp($device_fp)) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_blacklisted');
                     $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');
@@ -1818,15 +1852,21 @@ class ChargeGuard_Dynamic_Firewall {
                     return;
                 }
 
-                $rl_key        = 'challenge_delivery_failed:' . $device_fp;
+                // Hash the client-supplied fp so the wp_options key has a bounded safe length,
+                // and use a prefix that cleanup_stale_buckets() sweeps (cg_cdf_).
+                $rl_key        = 'cg_cdf_' . md5( $device_fp );
                 $attempt_count = ChargeGuard_Atomic_Rate_Limiter::increment(
                     $rl_key,
                     self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW
                 );
 
-                if ($attempt_count === 0) {
+                // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
+                if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_rate_limiter_unavailable');
-                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path (classic) for pre_order_id ' . $this->pre_order_id . ' - proceeding with blacklist-only protection');
+                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path (classic) for pre_order_id ' . $this->pre_order_id . ' - failing closed (order blocked), per ChargeGuard_Atomic_Rate_Limiter contract');
+                    $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');
+                    wc_add_notice($message, 'error');
+                    return;
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_rate_limit_exceeded');
                     $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');

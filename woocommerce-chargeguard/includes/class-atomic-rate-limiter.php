@@ -220,15 +220,26 @@ class ChargeGuard_Atomic_Rate_Limiter {
     public static function cleanup_stale_buckets() {
         global $wpdb;
 
-        $prefix = $wpdb->esc_like(ChargeGuard_Dynamic_Firewall::API_DOWN_RATE_LIMIT_TRANSIENT_PREFIX) . '%';
+                // All option-name prefixes this method sweeps.
+                // Add a new entry whenever a new caller of increment() introduces a new prefix.
+                $prefixes = [
+                    ChargeGuard_Dynamic_Firewall::API_DOWN_RATE_LIMIT_TRANSIENT_PREFIX,
+                    'cg_cdf_', // challenge-delivery-failed counters (added 1.0.31)
+                ];
 
-        $option_names = $wpdb->get_col(
-            $wpdb->prepare(
-                "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT %d",
-                $prefix,
-                self::CLEANUP_BATCH_SIZE
-            )
-        );
+                $option_names = [];
+                foreach ( $prefixes as $_arl_prefix ) {
+                    $rows = $wpdb->get_col(
+                        $wpdb->prepare(
+                            "SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s LIMIT %d",
+                            $wpdb->esc_like( $_arl_prefix ) . '%',
+                            self::CLEANUP_BATCH_SIZE
+                        )
+                    );
+                    if ( ! empty( $rows ) ) {
+                        $option_names = array_merge( $option_names, $rows );
+                    }
+                }
 
         if (empty($option_names)) {
             return;
