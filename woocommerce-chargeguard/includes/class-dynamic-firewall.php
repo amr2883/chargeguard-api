@@ -1619,7 +1619,15 @@ class ChargeGuard_Dynamic_Firewall {
                 // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
                 if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limiter_unavailable');
-                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — proceeding with blacklist-only protection');
+                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — failing closed (order blocked), per ChargeGuard_Atomic_Rate_Limiter contract');
+                    if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
+                        throw new \Automattic\WooCommerce\StoreApi\Exceptions\RouteException(
+                            'chargeguard_order_blocked',
+                            __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'),
+                            400
+                        );
+                    }
+                    throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limit_exceeded');
                     if (class_exists('\Automattic\WooCommerce\StoreApi\Exceptions\RouteException')) {
@@ -1855,7 +1863,10 @@ class ChargeGuard_Dynamic_Firewall {
                 // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
                 if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_rate_limiter_unavailable');
-                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path (classic) for pre_order_id ' . $this->pre_order_id . ' - proceeding with blacklist-only protection');
+                    error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path (classic) for pre_order_id ' . $this->pre_order_id . ' - failing closed (order blocked), per ChargeGuard_Atomic_Rate_Limiter contract');
+                    $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');
+                    wc_add_notice($message, 'error');
+                    return;
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_rate_limit_exceeded');
                     $message = __('Sorry, your order cannot be processed.', 'chargeguard-woocommerce');

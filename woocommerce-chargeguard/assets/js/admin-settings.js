@@ -8,7 +8,7 @@
     function escHtml(str) {
         return String(str)
             .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
     }
 
     // ── Helper: Render Table ─────────────────────────────────
@@ -707,6 +707,7 @@
     let cgPendingChange   = null;
 
     function cgGetEffectivePenalty(basePenalty, override) {
+        basePenalty = Number(basePenalty) || 0;
         if (override === 'allow')    return 0;
         if (override === 'escalate') return Math.min(basePenalty * 2, 20);
         return basePenalty;
