@@ -1608,13 +1608,16 @@ class ChargeGuard_Dynamic_Firewall {
                     throw new \Exception(__('Sorry, your order cannot be processed.', 'chargeguard-woocommerce'));
                 }
 
-                $rl_key        = 'challenge_delivery_failed:' . $device_fp;
+                // Hash the client-supplied fp so the wp_options key has a bounded safe length,
+                // and use a prefix that cleanup_stale_buckets() sweeps (cg_cdf_).
+                $rl_key        = 'cg_cdf_' . md5( $device_fp );
                 $attempt_count = ChargeGuard_Atomic_Rate_Limiter::increment(
                     $rl_key,
                     self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW
                 );
 
-                if ($attempt_count === 0) {
+                // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
+                if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $order->get_id(), $failure_reason . '_rate_limiter_unavailable');
                     error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path for order #' . $order->get_id() . ' — proceeding with blacklist-only protection');
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {
@@ -1841,13 +1844,16 @@ class ChargeGuard_Dynamic_Firewall {
                     return;
                 }
 
-                $rl_key        = 'challenge_delivery_failed:' . $device_fp;
+                // Hash the client-supplied fp so the wp_options key has a bounded safe length,
+                // and use a prefix that cleanup_stale_buckets() sweeps (cg_cdf_).
+                $rl_key        = 'cg_cdf_' . md5( $device_fp );
                 $attempt_count = ChargeGuard_Atomic_Rate_Limiter::increment(
                     $rl_key,
                     self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_WINDOW
                 );
 
-                if ($attempt_count === 0) {
+                // increment() returns PHP_INT_MAX on DB failure, >= 1 on success; 0 is never returned.
+                if ($attempt_count === PHP_INT_MAX) {
                     $this->notify_admin_challenge_delivery_failed($device_fp, $this->pre_order_id, $failure_reason . '_rate_limiter_unavailable');
                     error_log('chargeguard: rate limiter unavailable during challenge-delivery-failed path (classic) for pre_order_id ' . $this->pre_order_id . ' - proceeding with blacklist-only protection');
                 } elseif ($attempt_count > self::CHALLENGE_DELIVERY_FAILED_RATE_LIMIT_MAX) {

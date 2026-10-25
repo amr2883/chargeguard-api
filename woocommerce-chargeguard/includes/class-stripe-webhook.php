@@ -548,13 +548,13 @@ class ChargeGuard_Stripe_Webhook {
             ? $dispute->charge
             : ($dispute->charge->id ?? null);
 
-        if ($charge_id) {
-            $orders = wc_get_orders([
-                'limit'      => 1,
-                'meta_key'   => '_transaction_id',
-                'meta_value' => $charge_id,
-                'return'     => 'ids',
-            ]);
+                if ($charge_id) {
+                    // 'transaction_id' works on both legacy postmeta and HPOS.
+                    $orders = wc_get_orders([
+                        'limit'          => 1,
+                        'transaction_id' => $charge_id,
+                        'return'         => 'ids',
+                    ]);
             if (!empty($orders)) {
                 return $orders[0];
             }
