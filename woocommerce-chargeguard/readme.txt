@@ -1,9 +1,9 @@
-ï»¿=== ChargeGuard - WooCommerce Card Testing Prevention ===
+=== ChargeGuard - WooCommerce Card Testing Prevention ===
 Contributors: Amr453
 Tags: card testing, fraud prevention, woocommerce security, chargeback protection, bot detection
 Requires at least: 6.0
 Tested up to: 6.5
-Stable tag: 1.0.32
+Stable tag: 1.0.33
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -13,7 +13,7 @@ Stop automated card testing bots from draining your wallet and trashing your sto
 
 ChargeGuard protects your WooCommerce store from the devastating impact of automated card testing attacks.
 
-Every day, thousands of bots scan online stores to test stolen credit card numbers. These bots don't just try once â€“ they hammer your checkout with hundreds of fake orders in minutes. The result? Your payment gateway charges you fees for every attempt, your database fills with failed orders, and your store's reputation with payment providers like Stripe and PayPal is put at risk.
+Every day, thousands of bots scan online stores to test stolen credit card numbers. These bots don't just try once – they hammer your checkout with hundreds of fake orders in minutes. The result? Your payment gateway charges you fees for every attempt, your database fills with failed orders, and your store's reputation with payment providers like Stripe and PayPal is put at risk.
 
 ChargeGuard is a smart, multi-layered defense system built specifically for WooCommerce. Unlike traditional captcha solutions that slow down real customers or security plugins that miss API attacks, ChargeGuard intercepts and evaluates every checkout attempt before an order is created.
 
@@ -75,7 +75,7 @@ The risk analysis is performed by the ChargeGuard cloud API. Only non-sensitive 
 
 = 1.0.31 =
 * Security: Restore fail-closed behavior when rate limiter DB is unavailable (regression in 1.0.30 batch-2, now fixed)
-* Security: Admin JS â€” escHtml now escapes single quotes; cgGetEffectivePenalty coerces basePenalty to Number
+* Security: Admin JS — escHtml now escapes single quotes; cgGetEffectivePenalty coerces basePenalty to Number
 * Fix: Self-healing cron scheduler (chargeguard_ensure_scheduled_events) recovers lost events on init
 * Fix: HPOS order status guard; ARL cleanup LIMIT+ORDER; admin-only updates endpoint
 * Fix: PayPal direct link parsing; email normalization on registration
