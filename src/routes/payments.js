@@ -223,7 +223,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
   // PayPal's OAuth endpoint can return 503 under load. Without retry, the
   // webhook returns 401 immediately and PayPal retries hours later — the
   // merchant's subscription activation is delayed even though payment is done.
-  // 3 attempts with 1s / 2s backoff adds ≤3s latency in the worst case,
+  // 3 attempts with 1s / 2s backoff adds up to ~15s latency in the worst case (4s timeout x3 + 1s + 2s backoff),
   // well within PayPal's 30-second webhook timeout.
   const PAYPAL_TOKEN_URL = process.env.PAYPAL_MODE === 'sandbox'
     ? 'https://api.sandbox.paypal.com/v1/oauth2/token'
@@ -243,7 +243,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
           'Content-Type':  'application/x-www-form-urlencoded',
         },
         body:   'grant_type=client_credentials',
-        signal: AbortSignal.timeout(8000),   // fail fast per attempt
+        signal: AbortSignal.timeout(4000),   // fail fast per attempt
       });
 
       if (tokenRes.ok) {
