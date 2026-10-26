@@ -82,6 +82,7 @@ app.use('/api/settings',  settingsRoutes);
 app.use('/api/payments',  paymentsRoutes);
 app.use('/api/stores',    require('./routes/stores'));
 app.use('/api/updates',   updatesRoutes);
+app.use('/api/privacy',   require('./routes/privacy'));
 // Morgan ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ /admin ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ secret ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;

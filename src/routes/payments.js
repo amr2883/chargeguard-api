@@ -218,29 +218,75 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
   // PayPal يوفر endpoint رسمي للـ verification — أدق وأأمن من HMAC يدوي
   // لأن PayPal يستخدم RSA مع certificate متغير، مش HMAC ثابت.
   let signatureVerified = false;
-  try {
-    // الحصول على Access Token
-    const authString = Buffer.from(
-      process.env.PAYPAL_CLIENT_ID + ':' + process.env.PAYPAL_CLIENT_SECRET
-    ).toString('base64');
 
-    const tokenRes  = await fetch(
-      process.env.PAYPAL_MODE === 'sandbox'
-        ? 'https://api.sandbox.paypal.com/v1/oauth2/token'
-        : 'https://api.paypal.com/v1/oauth2/token',
-      {
+  // ── PP-RL-DROPS-LEGIT fix: retry on PayPal OAuth 429/5xx ─────────────────
+  // PayPal's OAuth endpoint can return 503 under load. Without retry, the
+  // webhook returns 401 immediately and PayPal retries hours later — the
+  // merchant's subscription activation is delayed even though payment is done.
+  // 3 attempts with 1s / 2s backoff adds ≤3s latency in the worst case,
+  // well within PayPal's 30-second webhook timeout.
+  const PAYPAL_TOKEN_URL = process.env.PAYPAL_MODE === 'sandbox'
+    ? 'https://api.sandbox.paypal.com/v1/oauth2/token'
+    : 'https://api.paypal.com/v1/oauth2/token';
+
+  const authString = Buffer.from(
+    process.env.PAYPAL_CLIENT_ID + ':' + process.env.PAYPAL_CLIENT_SECRET
+  ).toString('base64');
+
+  let accessToken = null;
+  for (let _attempt = 1; _attempt <= 3; _attempt++) {
+    try {
+      const tokenRes = await fetch(PAYPAL_TOKEN_URL, {
         method:  'POST',
         headers: {
           'Authorization': 'Basic ' + authString,
           'Content-Type':  'application/x-www-form-urlencoded',
         },
-        body: 'grant_type=client_credentials',
+        body:   'grant_type=client_credentials',
+        signal: AbortSignal.timeout(8000),   // fail fast per attempt
+      });
+
+      if (tokenRes.ok) {
+        const tokenData = await tokenRes.json();
+        accessToken = tokenData.access_token || null;
+        if (accessToken) break;               // success — exit retry loop
       }
-    );
 
-    const tokenData   = await tokenRes.json();
-    const accessToken = tokenData.access_token;
+      // Retryable: 429 or any 5xx from PayPal OAuth
+      if (_attempt < 3 && (tokenRes.status === 429 || tokenRes.status >= 500)) {
+        logger.warn(
+          { module: 'payments', attempt: _attempt, status: tokenRes.status },
+          'PayPal OAuth transient error — retrying'
+        );
+        await new Promise(r => setTimeout(r, 1000 * _attempt));
+        continue;
+      }
 
+      // Non-retryable 4xx (e.g. 401 = bad credentials) — break immediately
+      logger.error(
+        { module: 'payments', status: tokenRes.status },
+        'PayPal OAuth non-retryable error'
+      );
+      break;
+
+    } catch (fetchErr) {
+      // Network error / timeout — retry if attempts remain
+      if (_attempt < 3) {
+        logger.warn(
+          { module: 'payments', attempt: _attempt, error: fetchErr.message },
+          'PayPal OAuth fetch error — retrying'
+        );
+        await new Promise(r => setTimeout(r, 1000 * _attempt));
+        continue;
+      }
+      logger.error(
+        { module: 'payments', error: fetchErr.message },
+        'PayPal OAuth fetch failed after retries'
+      );
+    }
+  }
+
+  try {
     if (!accessToken) {
       logger.error({ module: 'payments' }, 'PayPal token fetch failed during webhook verification');
       return res.status(401).json({ error: 'Could not obtain PayPal access token' });

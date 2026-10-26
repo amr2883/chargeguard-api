@@ -201,24 +201,10 @@ class ChargeGuard_Privacy {
             );
         }
 
-        // Local data is fully handled above, but the ChargeGuard cloud
-        // fraud-prevention service retains its own copy of this
-        // customer's email, IP, device fingerprint, and card BIN/brand/
-        // country (if available) — this plugin has no backend deletion
-        // endpoint wired up yet, so completing the erasure requires a
-        // separate, manual request to ChargeGuard support. Always shown,
-        // even if no local meta was found, since backend data can exist
-        // independently of local order meta.
-        //
-        // Automated cloud erasure via send_backend_erasure_request() is
-        // implemented but PARKED (not called from here) until the
-        // backend's DELETE /api/privacy/erase endpoint exists and is
-        // confirmed working — see that method's docblock for activation
-        // steps.
-        $messages[] = __(
-            'ChargeGuard also stores this customer\'s data (email, IP, device fingerprint, and card details where applicable) on its cloud fraud-prevention service. This local erasure does NOT remove that data — please contact ChargeGuard support to request deletion there as well.',
-            'chargeguard-woocommerce'
-        );
+        // Automated cloud erasure — backend endpoint is live.
+        // Local erasure above always runs regardless of the outcome here.
+        $backend_result = $this->send_backend_erasure_request( $email_address );
+        $messages[]     = $backend_result['message'];
 
         return [
             'items_removed'  => $items_removed,
@@ -245,26 +231,7 @@ class ChargeGuard_Privacy {
      * @return array{success: bool, message: string}
      */
     private function send_backend_erasure_request($email_address) {
-        // PARKED — not yet wired into erase_data() or any hook. Do not
-        // activate until the backend's `DELETE /api/privacy/erase`
-        // endpoint exists and has been tested end-to-end; calling this
-        // today would fire a network request against an endpoint that
-        // does not exist yet, on every erasure request, for no benefit.
-        // To activate: confirm the backend endpoint is live, remove the
-        // early return below, call this method from erase_data(), and
-        // update erase_data()'s merchant-facing message to reflect
-        // automated (rather than manual) cloud erasure.
-        return [
-            'success' => false,
-            'message' => __(
-                'Automated cloud erasure is not yet available; this method is parked pending a backend endpoint.',
-                'chargeguard-woocommerce'
-            ),
-        ];
-        // Unreachable below until the return above is removed — left
-        // intact intentionally so the implementation is ready to go the
-        // day the backend endpoint ships.
-        $merchant_id = get_option('chargeguard_merchant_id');
+$merchant_id = get_option('chargeguard_merchant_id');
         $api_key     = function_exists('chargeguard_get_secret_option')
             ? chargeguard_get_secret_option('chargeguard_api_key')
             : get_option('chargeguard_api_key');
@@ -346,7 +313,7 @@ class ChargeGuard_Privacy {
             'Once this store is connected to ChargeGuard, an automated order notification is also sent to ChargeGuard for every new order, in addition to the risk-assessment data described above. This notification includes the order details you provide at checkout: billing and shipping name and address, phone number, the products and quantities ordered, any coupon codes used, and the payment method. This is used to help detect fraud patterns across orders, such as repeated use of stolen payment details or coordinated fraudulent purchases.',
             'chargeguard-woocommerce'
         )) . '</p><p class="wp-policy-help">' . wp_kses_post(__(
-            'Using the "Erase Personal Data" tool removes ChargeGuard data stored locally in WordPress automatically. However, the ChargeGuard fraud-prevention service also retains a copy of the data described above (email, IP, device fingerprint, order and billing/shipping details, and card BIN/brand/country where applicable) on its own servers. Completing an erasure request in full requires contacting ChargeGuard support separately to request deletion of this data.',
+            'Using the "Erase Personal Data" tool removes ChargeGuard data stored locally in WordPress automatically. However, the ChargeGuard fraud-prevention service also retains a copy of the data described above (email, IP, device fingerprint, order and billing/shipping details, and card BIN/brand/country where applicable) on its own servers. Using the “Erase Personal Data” tool also automatically sends a deletion request to the ChargeGuard cloud service. If the automated request cannot be completed, the merchant will be notified and should contact ChargeGuard support.',
             'chargeguard-woocommerce'
         )) . '</p>';
 
