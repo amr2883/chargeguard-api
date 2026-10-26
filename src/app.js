@@ -63,7 +63,12 @@ app.use('/api/stores/:id', express.raw({ type: 'application/json' }));
 app.use('/api/auth/self-test', express.raw({ type: 'application/json' }));
 app.use('/api/risk/challenge', express.raw({ type: 'application/json' }));
 app.use(express.json());
-app.use(morgan('dev', {
+morgan.token('safe-url', (req) => {
+  const u = req.originalUrl || req.url || '';
+  const i = u.indexOf('?');
+  return i === -1 ? u : u.slice(0, i) + '?[query-redacted]';
+});
+app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]', {
   skip: (req) => req.skipMorgan === true,
 }));
 
@@ -105,7 +110,7 @@ app.use((err, req, res, next) => {
   // { error: 'Internal server error' } in production, and only reveals
   // err.message/err.stack when NODE_ENV === 'development' or
   // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  logger.error({ module: 'app', path: req.originalUrl, error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  logger.error({ module: 'app', path: String(req.originalUrl || '').split('?')[0], error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
   res.status(500).json(safeErrorPayload(err));
 });
 
