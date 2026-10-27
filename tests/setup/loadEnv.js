@@ -1,4 +1,4 @@
-require('dotenv').config({ path: '.env.test' });
+require('dotenv').config({ path: '.env.test', override: true });
 require('./assertSafeTestDb').assertSafeTestDb();
 // Deterministic Turnstile secret for tests: Cloudflare's published always-pass
 // TEST secret (public, not a credential). Set unconditionally so results never
