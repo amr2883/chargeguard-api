@@ -10,7 +10,7 @@ const logger = require('./lib/logger');
 const { safeErrorPayload } = require('./lib/errorResponse');
 
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', 2);
 
 // TEMPORARY â€” remove after test
 
@@ -68,7 +68,7 @@ morgan.token('safe-url', (req) => {
   const i = u.indexOf('?');
   return i === -1 ? u : u.slice(0, i) + '?[query-redacted]';
 });
-app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length]', {
+app.use(morgan(':method :safe-url :status :response-time ms - :res[content-length] ip=:remote-addr', {
   skip: (req) => req.skipMorgan === true,
 }));
 
