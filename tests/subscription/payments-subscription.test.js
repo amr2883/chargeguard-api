@@ -443,7 +443,7 @@ describe('POST /paypal-webhook', () => {
 
   function mockSuccessfulVerification() {
     global.fetch = jest.fn()
-      .mockResolvedValueOnce({ json: async () => ({ access_token: 'tok_abc' }) }) // OAuth token
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ access_token: 'tok_abc' }) }) // OAuth token
       .mockResolvedValueOnce({ json: async () => ({ verification_status: 'SUCCESS' }) }); // Verify
   }
 
@@ -485,7 +485,7 @@ describe('POST /paypal-webhook', () => {
   });
 
   test('OAuth token fetch returns no access_token → 401', async () => {
-    global.fetch = jest.fn().mockResolvedValueOnce({ json: async () => ({}) });
+    global.fetch = jest.fn().mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({}) });
     const req = makeWebhookReq(makeCaptureEvent());
     const res = makeRes();
 
@@ -498,7 +498,7 @@ describe('POST /paypal-webhook', () => {
 
   test('signature verification fails → 401', async () => {
     global.fetch = jest.fn()
-      .mockResolvedValueOnce({ json: async () => ({ access_token: 'tok_abc' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ access_token: 'tok_abc' }) })
       .mockResolvedValueOnce({ json: async () => ({ verification_status: 'FAILURE' }) });
     const req = makeWebhookReq(makeCaptureEvent());
     const res = makeRes();
@@ -511,7 +511,9 @@ describe('POST /paypal-webhook', () => {
   });
 
   test('verification request throws → 500', async () => {
-    global.fetch = jest.fn().mockRejectedValueOnce(new Error('network error'));
+    global.fetch = jest.fn()
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ access_token: 'tok_abc' }) }) // OAuth token OK
+      .mockRejectedValueOnce(new Error('network error')); // verify call throws
     const req = makeWebhookReq(makeCaptureEvent());
     const res = makeRes();
 
@@ -727,7 +729,7 @@ describe('POST /paypal-webhook', () => {
       jest.useRealTimers();
     });
 
-    test('transaction throws → caught, logged, no crash', async () => {
+    test('transaction throws → caught, logged, 500 so PayPal retries', async () => {
       db.payment.findUnique.mockResolvedValue(null);
       db.checkoutSession.findUnique.mockResolvedValue(
         makeSession({ status: 'pending', tenant: { email: 'a@b.com' } })
@@ -739,7 +741,7 @@ describe('POST /paypal-webhook', () => {
 
       await expect(handler()(req, res)).resolves.not.toThrow();
 
-      expect(res.status).toHaveBeenCalledWith(200);
+      expect(res.status).toHaveBeenCalledWith(500);
       expect(logger.error).toHaveBeenCalled();
     });
   });
@@ -825,6 +827,7 @@ describe('POST /paypal-webhook', () => {
       expect(db.payment.findUnique).toHaveBeenLastCalledWith({ where: { captureId: 'capture_1' } });
       expect(logger.error).not.toHaveBeenCalled();
       expect(logger.info).toHaveBeenCalledWith(expect.objectContaining({ captureId: 'capture_1' }), expect.any(String));
+      expect(res.status).toHaveBeenCalledWith(200);
     });
 
     test('capture on a COMPLETED session (different captureId) = possible double charge: error, no writes', async () => {
@@ -872,6 +875,7 @@ describe('POST /paypal-webhook', () => {
         expect.objectContaining({ module: 'payments' }),
         expect.stringContaining('possible second payment')
       );
+      expect(res.status).toHaveBeenCalledWith(500);
     });
   });
 });

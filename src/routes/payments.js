@@ -344,8 +344,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
     return res.status(400).json({ error: 'Invalid JSON payload' });
   }
 
-  // نُعيد 200 فوراً لـ PayPal — المعالجة تحدث بعد ذلك
-  res.status(200).json({ received: true });
+  // No early ACK: every exit path below replies explicitly (200 = done, 500 = PayPal must retry).
 
   // ── 3. نُعالج فقط حدث اكتمال الدفع ──────────────────────────────────
   if (event.event_type !== 'PAYMENT.CAPTURE.COMPLETED') {
@@ -353,7 +352,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
       { module: 'payments', eventType: event.event_type },
       'Ignoring non-capture PayPal event'
     );
-    return;
+    return res.status(200).json({ received: true, ignored: true });
   }
 
   // ── 4. استخراج بيانات الدفعة ──────────────────────────────────────────
@@ -370,7 +369,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
       { module: 'payments', captureId, customId },
       'PayPal webhook missing captureId or custom_id'
     );
-    return;
+    return res.status(200).json({ received: true });
   }
 
   try {
@@ -384,7 +383,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         { module: 'payments', captureId },
         'Duplicate PayPal webhook — already processed'
       );
-      return;
+      return res.status(200).json({ received: true, duplicate: true });
     }
 
     // ── 6. جلب جلسة الدفع للتحقق من المبلغ ──────────────────────────────
@@ -398,7 +397,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         { module: 'payments', customId },
         'PayPal webhook: CheckoutSession not found'
       );
-      return;
+      return res.status(200).json({ received: true });
     }
 
     if (session.status !== 'pending') {
@@ -426,7 +425,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         },
         'PayPal webhook: capture on a non-pending checkout session. Verify manually in PayPal'
       );
-      return;
+      return res.status(200).json({ received: true });
     }
 
     // ── 7. التحقق من المبلغ (الحماية من التلاعب) ─────────────────────────
@@ -466,7 +465,7 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         where: { id: customId },
         data:  { status: 'failed' },
       });
-      return;
+      return res.status(200).json({ received: true });
     }
 
     // ── 8. حساب تاريخ انتهاء الاشتراك ────────────────────────────────────
@@ -516,6 +515,9 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         data:  { status: 'completed' },
       });
     });
+
+    // Transaction committed: ACK now. No return, so the confirmation email below is still scheduled.
+    res.status(200).json({ received: true });
 
     logger.info(
       {
@@ -575,7 +577,14 @@ router.post('/paypal-webhook', express.raw({ type: 'application/json' }), async 
         'PayPal webhook processing failed' + (err.code === 'P2002' ? ' (P2002 but no Payment row for this captureId: possible second payment on the same checkout session)' : '')
       );
     }
-    // لا نُعيد خطأ هنا لأننا أرسلنا 200 مسبقاً
+    // Reply only if nothing was sent yet. A known duplicate is done (200);
+    // any real failure returns 500 so PayPal retries the delivery.
+    if (!res.headersSent) {
+      if (dupOfKnownCapture) {
+        return res.status(200).json({ received: true, duplicate: true });
+      }
+      return res.status(500).json({ error: 'Webhook processing failed' });
+    }
   }
 });
 
