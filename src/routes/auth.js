@@ -452,25 +452,32 @@ router.get('/verify-email', async (req, res) => {
  * المستخدم يطلب رابط تأكيد جديد
  * Body: { email }
  */
-router.post('/resend-verification', async (req, res) => {
+// UE1: the only caller is the HTML form on the verify-email error page, which posts
+// application/x-www-form-urlencoded. app.js registers express.json() only, so req.body
+// was undefined (Express 5) and the destructure below threw -> 500 JSON. The parser is
+// scoped to this route (extended:false, small limit); HMAC raw-body routes are untouched.
+router.post('/resend-verification', express.urlencoded({ extended: false, limit: '4kb' }), async (req, res) => {
   try {
-    const { email } = req.body;
+    const { email } = req.body || {};
 
     if (!email || typeof email !== 'string') {
       return res.status(400).json({ error: 'Email is required' });
     }
 
-    const normalizedEmail = email.trim().toLowerCase();
+    const lookupEmail = email.trim();
 
-    const tenant = await db.tenant.findUnique({
-      where: { email: normalizedEmail },
-      select: {
-        id: true,
-        email: true,
-        emailVerified: true,
-        emailVerifyExpiresAt: true,
-      }
-    });
+    // RESEND-MIXEDCASE: Tenant.email is stored as typed at registration and its @unique
+    // is case-sensitive, so findUnique on a lowercased value never matched a tenant
+    // registered with upper-case letters (silent 200, no mail). Match on lower(email)
+    // with bound parameters; not ILIKE, so '_' and '%' in the address are not wildcards.
+    // If two rows differ only by case, prefer the unverified one, then the newest.
+    const rows = await db.$queryRaw`
+      SELECT "id", "email", "emailVerified", "emailVerifyExpiresAt"
+      FROM "Tenant"
+      WHERE lower("email") = lower(${lookupEmail}::text)
+      ORDER BY "emailVerified" ASC, "createdAt" DESC
+      LIMIT 1`;
+    const tenant = rows[0] || null;
 
     // Always return 200 — never reveal if email exists or not (security)
     if (!tenant) {
