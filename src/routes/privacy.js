@@ -48,10 +48,15 @@ const apiKeyAuth = requireAuth(
   { allowPreviousKey: false }
 );
 
-// ── Email normalisation (kept in sync with risk.js / auth.js) ─────────────
-// Imported from lib/utils: the SAME function risk.js uses when it writes
-// Order.normalizedEmail, so the lookup key always matches the stored key
-// (NFKC, homoglyphs, domain aliases, +tag, gmail dots).
+// Email helpers. normalizeEmail (imported above) is the SAME function risk.js
+// uses when it writes Order.normalizedEmail, so the lookup key always matches
+// the stored key (NFKC, homoglyphs, domain aliases, +tag, gmail dots).
+const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+$/;
+
+// Prisma sends `equals` + mode:'insensitive' to PostgreSQL as ILIKE with the
+// value unescaped, so _ and % in a customer's address would act as wildcards
+// and could erase other customers' rows. Escape them (and the escape char).
+const escapeLike = (s) => s.replace(/[\\%_]/g, '\\$&');
 
 // ── DELETE /api/privacy/erase ─────────────────────────────────────────────
 router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
@@ -60,7 +65,7 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
     ? req.body.email.trim()
     : '';
 
-  if (!rawEmail || !rawEmail.includes('@')) {
+  if (!rawEmail || !EMAIL_SHAPE.test(rawEmail)) {
     return res.status(400).json({ error: 'email is required' });
   }
 
@@ -73,9 +78,12 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
   } catch (_) {
     normEmail = '';
   }
-  if (typeof normEmail !== 'string' || normEmail === '') {
+  if (typeof normEmail !== 'string' || !EMAIL_SHAPE.test(normEmail)) {
     return res.status(400).json({ error: 'a valid email is required' });
   }
+
+  // _ and % are escaped so they match literally (see escapeLike).
+  const likeEmail = escapeLike(rawEmail);
 
   try {
     // 1. Null PII on every Order row for this tenant + customer.
@@ -87,7 +95,7 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
         merchantId: tenantId,
         OR: [
           { normalizedEmail: normEmail },
-          { email: { equals: rawEmail, mode: 'insensitive' } },
+          { email: { equals: likeEmail, mode: 'insensitive' } },
         ],
       },
       data: {
@@ -98,6 +106,7 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
         deviceFingerprint:  null,
         fingerprintVersion: null,
         fingerprintStatus:  null,
+        signalsSnapshot:    null,
       },
     });
 
@@ -107,7 +116,7 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
     const challengeDelete = await db.challengeVerification.deleteMany({
       where: {
         merchantId: tenantId,
-        email: { equals: rawEmail, mode: 'insensitive' },
+        email: { equals: likeEmail, mode: 'insensitive' },
       },
     });
 

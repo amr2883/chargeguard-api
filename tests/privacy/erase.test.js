@@ -153,6 +153,7 @@ describe('DELETE /erase', () => {
         deviceFingerprint: null,
         fingerprintVersion: null,
         fingerprintStatus: null,
+        signalsSnapshot: null,
       });
     });
 
@@ -218,4 +219,37 @@ describe('DELETE /erase', () => {
       expect(statuses).toEqual([200, 200, 200, 200, 200, 429]);
     });
   });
+});
+
+// ---------------------------------------------------------------------------
+// Batch P1b: LIKE-wildcard escaping, signalsSnapshot erasure, stricter shape
+// ---------------------------------------------------------------------------
+describe('DELETE /erase - P1b hardening', () => {
+  test('clears signalsSnapshot (its JSON copy of email, IP and fingerprint)', async () => {
+    await erase();
+    const { data } = db.order.updateMany.mock.calls[0][0];
+    expect(data).toHaveProperty('signalsSnapshot', null);
+  });
+
+  test.each([
+    ['a_b@x.com', 'a\\_b@x.com'],
+    ['50%@x.com', '50\\%@x.com'],
+    ['a\\b@x.com', 'a\\\\b@x.com'],
+  ])('escapes LIKE wildcards in %s before it reaches Prisma', async (raw, escaped) => {
+    await erase({ body: { email: raw } });
+    const arg = db.order.updateMany.mock.calls[0][0];
+    expect(arg.where.OR[1]).toEqual({ email: { equals: escaped, mode: 'insensitive' } });
+    expect(db.challengeVerification.deleteMany.mock.calls[0][0].where.email)
+      .toEqual({ equals: escaped, mode: 'insensitive' });
+  });
+
+  test.each([['+tag@x.com'], ['a@b@c.com'], ['@x.com'], ['a@'], ['a b@x.com']])(
+    'rejects malformed address %j with 400 and touches nothing',
+    async (value) => {
+      const { res } = await erase({ body: { email: value } });
+      expect(statusOf(res)).toBe(400);
+      expect(db.order.updateMany).not.toHaveBeenCalled();
+      expect(db.challengeVerification.deleteMany).not.toHaveBeenCalled();
+    }
+  );
 });
