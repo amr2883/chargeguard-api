@@ -31,6 +31,7 @@ const RETENTION = {
   CARD_HASH_DAYS:           Number(process.env.RETENTION_CARD_HASH_DAYS)            || 365,
   PENDING_ENRICHMENT_HOURS: Number(process.env.RETENTION_PENDING_ENRICHMENT_HOURS)  || 24,
   UNVERIFIED_TENANT_DAYS:   Number(process.env.RETENTION_UNVERIFIED_TENANT_DAYS)    || 30,
+  CHALLENGE_GRACE_DAYS:     Number(process.env.RETENTION_CHALLENGE_GRACE_DAYS)      || 1,
 
   // إعدادات الأداء — الحذف التدريجي لتجنب قفل الجداول
   BATCH_SIZE:     Number(process.env.CLEANUP_BATCH_SIZE)     || 500,
@@ -263,6 +264,15 @@ async function runDailyRetention() {
       }
     ));
 
+    // -- 10. ChallengeVerification: rows expired more than CHALLENGE_GRACE_DAYS ago --
+    // Each row holds the customer email in clear text. Nothing reads a row after it
+    // expires (verify only looks up verified:false and checks expiresAt, and the
+    // ticket is stateless), so verified and unverified rows are both safe to delete.
+    await safeClean('challengeVerification', () => batchDelete(
+      prisma, 'challengeVerification',
+      { expiresAt: { lt: daysAgo(RETENTION.CHALLENGE_GRACE_DAYS) } }
+    ));
+
     // ── طباعة الملخص النهائي (سطر واحد لكل جدول) ─────────────────────────
     const durationMs = Date.now() - startedAt.getTime();
     const endTag     = `[${new Date().toISOString()}]`;
@@ -280,7 +290,8 @@ async function runDailyRetention() {
       `  • Order:                ${fmt(results.order)}\n` +
       `  • CardHash:             ${fmt(results.cardHash)}\n` +
       `  • WhitelistEntry:       ${fmt(results.whitelistEntry)}\n` +
-      `  • UnverifiedTenant:     ${fmt(results.unverifiedTenant)}`
+      `  • UnverifiedTenant:     ${fmt(results.unverifiedTenant)}\n` +
+      `  • ChallengeVerification: ${fmt(results.challengeVerification)}`
     );
 
   } catch (err) {

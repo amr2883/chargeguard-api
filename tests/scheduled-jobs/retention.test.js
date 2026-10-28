@@ -68,6 +68,7 @@ function makePrisma() {
     blockedAttempt:        { findMany: jest.fn(), deleteMany: jest.fn() },
     cardHash:              { findMany: jest.fn(), deleteMany: jest.fn() },
     tenant:                { findMany: jest.fn(), deleteMany: jest.fn() },
+    challengeVerification: { findMany: jest.fn(), deleteMany: jest.fn() },
     $disconnect:           jest.fn().mockResolvedValue(undefined),
   };
 }
@@ -89,6 +90,7 @@ function applyPersistentDefaults(prisma) {
   prisma.order.findMany.mockResolvedValue([]);
   prisma.cardHash.findMany.mockResolvedValue([]);
   prisma.tenant.findMany.mockResolvedValue([]);
+  prisma.challengeVerification.findMany.mockResolvedValue([]);
 
   // Daily retention — direct deleteMany-backed models (non-paginated).
   prisma.computedIdentityRisk.deleteMany.mockResolvedValue({ count: 0 });
@@ -409,6 +411,42 @@ describe('runDailyRetention', () => {
       select: { id: true },
       take:   RETENTION.BATCH_SIZE,
     });
+  });
+
+  // 13b. challengeVerification retention (P3a)
+  test('challengeVerification: batchDelete on expiresAt older than CHALLENGE_GRACE_DAYS (verified or not)', async () => {
+    await runDailyRetention();
+
+    expect(RETENTION.CHALLENGE_GRACE_DAYS).toBeGreaterThan(0);
+    expect(prisma.challengeVerification.findMany).toHaveBeenCalledWith({
+      where:  { expiresAt: { lt: daysAgo(RETENTION.CHALLENGE_GRACE_DAYS) } },
+      select: { id: true },
+      take:   RETENTION.BATCH_SIZE,
+    });
+  });
+
+  test('challengeVerification: deletes the matched ids and appears in the summary', async () => {
+    prisma.challengeVerification.findMany
+      .mockResolvedValueOnce([{ id: 'c1' }, { id: 'c2' }, { id: 'c3' }])
+      .mockResolvedValue([]);
+    prisma.challengeVerification.deleteMany.mockResolvedValueOnce({ count: 3 });
+
+    await runDailyRetention();
+
+    expect(prisma.challengeVerification.deleteMany).toHaveBeenCalledWith({
+      where: { id: { in: ['c1', 'c2', 'c3'] } },
+    });
+    expect(logLoggedContaining('3 rows deleted total')).toBe(true);
+    expect(logLoggedContaining('ChallengeVerification:')).toBe(true);
+  });
+
+  test('challengeVerification failing does not stop the run or the summary', async () => {
+    prisma.challengeVerification.findMany.mockRejectedValue(new Error('boom'));
+
+    await runDailyRetention();
+
+    expect(errorLoggedContaining('Failed to clean challengeVerification')).toBe(true);
+    expect(logLoggedContaining('Daily retention completed')).toBe(true);
   });
 
   // 14. safeClean isolation
