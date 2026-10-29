@@ -95,40 +95,26 @@ app.use('/admin', (req, res, next) => {
 }, adminRoutes);
 
 app.use(express.static(path.join(__dirname, 'public')));
-// Global error handler — MUST be registered after all routes and middleware
-app.use((err, req, res, next) => {
-  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
-    // Unchanged: forwarded to Express's built-in final handler. This path
-    // only fires for errors thrown before that route's own try/catch could
-    // run (e.g. a raw-body-parsing failure upstream) — Express's default
-    // handler still responds with a 5xx status, which is all the plugin's
-    // circuit breaker (class-api-client.php) actually inspects.
-    return next(err);
-  }
-  // Full detail (message + stack) goes to the structured logger only —
-  // never to the client. safeErrorPayload() returns a generic
-  // { error: 'Internal server error' } in production, and only reveals
-  // err.message/err.stack when NODE_ENV === 'development' or
-  // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  logger.error({ module: 'app', path: String(req.originalUrl || '').split('?')[0], error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
-  res.status(500).json(safeErrorPayload(err));
-});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
 });
 // /metrics: closed unless METRICS_TOKEN is set; Bearer auth, constant-time compare.
-app.get('/metrics', async (req, res) => {
-  const expected = process.env.METRICS_TOKEN;
-  if (!expected) return res.status(404).end();
-  const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
-  const a = Buffer.from(m ? m[1] : '', 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).end();
+app.get('/metrics', async (req, res, next) => {
+  try {
+    const expected = process.env.METRICS_TOKEN;
+    if (!expected) return res.status(404).end();
+    const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
+    const a = Buffer.from(m ? m[1] : '', 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).end();
+    }
+    res.set('Content-Type', prometheus.registry.contentType);
+    res.end(await prometheus.registry.metrics());
+  } catch (err) {
+    next(err);
   }
-  res.set('Content-Type', prometheus.registry.contentType);
-  res.end(await prometheus.registry.metrics());
 });
 
 // ============================================================
@@ -149,6 +135,30 @@ app.get('/api/retention-config', (req, res) => {
 // إلى /api/ping بعد نشر هذا التعديل.
 app.get('/api/ping', (req, res) => {
   res.json({ success: true, status: 'alive', timestamp: new Date().toISOString() });
+});
+
+// 404 — catch-all for unmatched routes (must come after all routes)
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Global error handler — MUST be registered after all routes and middleware
+app.use((err, req, res, next) => {
+  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    // Unchanged: forwarded to Express's built-in final handler. This path
+    // only fires for errors thrown before that route's own try/catch could
+    // run (e.g. a raw-body-parsing failure upstream) — Express's default
+    // handler still responds with a 5xx status, which is all the plugin's
+    // circuit breaker (class-api-client.php) actually inspects.
+    return next(err);
+  }
+  // Full detail (message + stack) goes to the structured logger only —
+  // never to the client. safeErrorPayload() returns a generic
+  // { error: 'Internal server error' } in production, and only reveals
+  // err.message/err.stack when NODE_ENV === 'development' or
+  // DEBUG_ERRORS=true (see lib/errorResponse.js).
+  logger.error({ module: 'app', path: String(req.originalUrl || '').split('?')[0], error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  res.status(err.status || 500).json(safeErrorPayload(err));
 });
 
 // app.js intentionally does NOT call app.listen(). This file only builds
