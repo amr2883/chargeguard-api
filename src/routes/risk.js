@@ -1,4 +1,4 @@
-﻿const crypto = require('crypto');
+const crypto = require('crypto');
 
 // ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
 const RISK_SECRET_SALT = process.env.SECRET_SALT;
@@ -1341,8 +1341,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       ]);
     }
 
-    // ����� ��� ����� ��� computedSignals (���� ������� ��� riskScoring ������)
-    // ����� ��������� ������ �� signalsSnapshot
+    // Build the computedSignals object passed to riskScoring
+    // (also persisted verbatim as signalsSnapshot)
 
     // ��� �������� ������� (��� 90 ���)
     // [Undefined-OR fix] Prisma بتتجاهل أي مفتاح قيمته undefined، فـ
@@ -3422,10 +3422,10 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     // ── End Quota Status ──────────────────────────────────────────────────
 
 
-    // 1. ����� �� ����� �������
+    // 1. Check if this order already exists
     const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
 
-    // 2. ��� �� ���� ����ȡ ���� pending enrichment
+    // 2. If not found, create a pending enrichment record
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
