@@ -157,8 +157,18 @@ app.use((err, req, res, next) => {
   // { error: 'Internal server error' } in production, and only reveals
   // err.message/err.stack when NODE_ENV === 'development' or
   // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  logger.error({ module: 'app', path: String(req.originalUrl || '').split('?')[0], error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
-  res.status(err.status || 500).json(safeErrorPayload(err));
+  // C2b: honour a client-error status (body-parser 400/413/415) but only inside 400-599;
+  // anything else (undefined, non-integer, 2xx/3xx) is treated as an unexpected 500.
+  const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status <= 599) ? err.status : 500;
+  const logPath = String(req.originalUrl || '').split('?')[0];
+  if (status < 500) {
+    // Client fault: warn-level log, generic body (never err.message or err.stack).
+    logger.warn({ module: 'app', path: logPath, status, error: err.message }, 'Request rejected with a client error');
+    const CLIENT_MESSAGES = { 400: 'Bad request', 413: 'Payload too large', 415: 'Unsupported media type' };
+    return res.status(status).json({ error: CLIENT_MESSAGES[status] || 'Request error' });
+  }
+  logger.error({ module: 'app', path: logPath, error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  res.status(status).json(safeErrorPayload(err));
 });
 
 // app.js intentionally does NOT call app.listen(). This file only builds
