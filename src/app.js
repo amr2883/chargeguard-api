@@ -110,8 +110,10 @@ app.get('/metrics', async (req, res, next) => {
     if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
       return res.status(401).end();
     }
+    // C2d: await first, set headers after, so a rejection reaches the error handler with Content-Type unset.
+    const metricsBody = await prometheus.registry.metrics();
     res.set('Content-Type', prometheus.registry.contentType);
-    res.end(await prometheus.registry.metrics());
+    res.end(metricsBody);
   } catch (err) {
     next(err);
   }
