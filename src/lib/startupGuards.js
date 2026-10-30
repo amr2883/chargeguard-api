@@ -39,6 +39,13 @@ const REQUIRED_ENV_VARS = [
   'PATTERN_SHARING_SECRET'   // patternSharing.js:148 (?? IDENTITY_GRAPH_SECRET - silent)
 ];
 
+// PAYPAL_MODE: payments.js:228,297 use === 'sandbox' for the token URL
+// and webhook-verification URL. Any other value (unset, empty, typo like
+// 'test' or 'Sandbox') falls through to the production URL - a fail-open
+// pattern. Enforce an explicit whitelist so a typo cannot silently route
+// to api.paypal.com.
+const PAYPAL_VALID_MODES = ['sandbox', 'live', 'production'];
+
 function enforceProductionGuards() {
   const violations = [];
 
@@ -60,6 +67,21 @@ function enforceProductionGuards() {
         ' - see src/lib/startupGuards.js for the full list and each consumer'
       );
     }
+
+    // PAYPAL-VALIDATE: fail-fast if PAYPAL_MODE is missing or not one of the
+    // whitelisted values. payments.js:228/297 default to the production URL
+    // for any value other than the literal 'sandbox', which makes a typo
+    // silently route to api.paypal.com.
+    const paypalMode = process.env.PAYPAL_MODE;
+    if (!paypalMode) {
+      violations.push(
+        'PAYPAL_MODE is required in production (allowed: ' + PAYPAL_VALID_MODES.join(', ') + ')'
+      );
+    } else if (PAYPAL_VALID_MODES.indexOf(paypalMode) === -1) {
+      violations.push(
+        'PAYPAL_MODE is invalid in production (got: ' + paypalMode + '; allowed: ' + PAYPAL_VALID_MODES.join(', ') + ')'
+      );
+    }
   }
 
   if (violations.length > 0) {
@@ -69,4 +91,4 @@ function enforceProductionGuards() {
   }
 }
 
-module.exports = { enforceProductionGuards, REQUIRED_ENV_VARS };
+module.exports = { enforceProductionGuards, REQUIRED_ENV_VARS, PAYPAL_VALID_MODES };

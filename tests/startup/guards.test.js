@@ -13,13 +13,21 @@
  */
 const { enforceProductionGuards, REQUIRED_ENV_VARS } = require('../../src/lib/startupGuards');
 
-const ALL_KEYS = ['NODE_ENV', 'MOCK_IP_INTEL'].concat(REQUIRED_ENV_VARS);
+const ALL_KEYS = ['NODE_ENV', 'MOCK_IP_INTEL', 'PAYPAL_MODE'].concat(REQUIRED_ENV_VARS);
 
 function setAllRequired(values) {
   for (const k of REQUIRED_ENV_VARS) {
     const v = (values && k in values) ? values[k] : ('x-test-' + k);
     if (v === undefined) delete process.env[k];
     else process.env[k] = v;
+  }
+  // PAYPAL_MODE defaults to 'live' (a valid whitelist value) unless overridden
+  if (values && 'PAYPAL_MODE' in values) {
+    const pm = values.PAYPAL_MODE;
+    if (pm === undefined) delete process.env.PAYPAL_MODE;
+    else process.env.PAYPAL_MODE = pm;
+  } else {
+    process.env.PAYPAL_MODE = 'live';
   }
 }
 
@@ -126,5 +134,42 @@ describe('startupGuards: enforceProductionGuards', () => {
     process.env.NODE_ENV = 'test';
     process.env.MOCK_IP_INTEL = 'true';
     expect(() => enforceProductionGuards()).not.toThrow();
+  });
+
+  // --- PAYPAL-VALIDATE (T12-T16) ---
+
+  it('T12: PAYPAL_MODE=live is valid in production', () => {
+    setAllRequired({ PAYPAL_MODE: 'live' });
+    process.env.NODE_ENV = 'production';
+    process.env.MOCK_IP_INTEL = 'false';
+    expect(() => enforceProductionGuards()).not.toThrow();
+  });
+
+  it('T13: PAYPAL_MODE=production is valid in production', () => {
+    setAllRequired({ PAYPAL_MODE: 'production' });
+    process.env.NODE_ENV = 'production';
+    process.env.MOCK_IP_INTEL = 'false';
+    expect(() => enforceProductionGuards()).not.toThrow();
+  });
+
+  it('T14: PAYPAL_MODE=test throws in production (would fail-open to production URL)', () => {
+    setAllRequired({ PAYPAL_MODE: 'test' });
+    process.env.NODE_ENV = 'production';
+    process.env.MOCK_IP_INTEL = 'false';
+    expect(() => enforceProductionGuards()).toThrow(/PAYPAL_MODE/);
+  });
+
+  it('T15: missing PAYPAL_MODE throws in production', () => {
+    setAllRequired({ PAYPAL_MODE: undefined });
+    process.env.NODE_ENV = 'production';
+    process.env.MOCK_IP_INTEL = 'false';
+    expect(() => enforceProductionGuards()).toThrow(/PAYPAL_MODE/);
+  });
+
+  it('T16: empty PAYPAL_MODE throws in production', () => {
+    setAllRequired({ PAYPAL_MODE: '' });
+    process.env.NODE_ENV = 'production';
+    process.env.MOCK_IP_INTEL = 'false';
+    expect(() => enforceProductionGuards()).toThrow(/PAYPAL_MODE/);
   });
 });
