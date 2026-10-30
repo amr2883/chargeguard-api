@@ -1,5 +1,15 @@
 require('dotenv').config();
 
+// MOCK1: refuse to start in production when MOCK_IP_INTEL=true (see src/lib/startupGuards.js).
+// Guard runs before require('./app') so we fail fast without loading routes/middleware.
+const { enforceProductionGuards } = require('./lib/startupGuards');
+try {
+  enforceProductionGuards();
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
+}
+
 const app = require('./app');
 const { PrismaClient } = require('@prisma/client');
 
