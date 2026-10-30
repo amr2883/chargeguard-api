@@ -3585,17 +3585,29 @@ router.post('/tenants/register', async (req, res) => {
 
 
   try {
-    const { email, storeUrl } = req.body;
+    const { email: rawEmail, storeUrl } = req.body;
 
+    // REG-NONSTRING-EMAIL: guard before .includes (non-string throws TypeError -> 500)
+    if (typeof rawEmail !== 'string') {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
 
-
+    // REG-EMAIL: normalize at storage time (trim + lowercase only -- NOT normalizeEmail,
+    // which strips +tags and gmail dots and would change the delivery address).
+    const email = rawEmail.trim().toLowerCase();
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Valid email is required' });
     }
 
-    // Check if tenant already exists
-    const existing = await db.tenant.findUnique({ where: { email } });
-    if (existing) {
+    // REG-EMAIL: case-insensitive duplicate check. Tenant.email @unique is
+    // case-sensitive (schema.prisma:14), so findUnique({ email }) missed rows
+    // registered with different casing. Match on lower(email) with bound
+    // parameters -- same pattern as resend-verification in auth.js.
+    const existingRows = await db.$queryRaw`
+      SELECT "id" FROM "Tenant"
+      WHERE lower("email") = lower(${email}::text)
+      LIMIT 1`;
+    if (existingRows.length > 0) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 
