@@ -3782,6 +3782,13 @@ router.post('/tenants/register', async (req, res) => {
 // secret. If those manual checks and requireAuth's checks ever diverge,
 // that is the one thing to fix; the missing delay/domain/HMAC layers above
 // are by design and should stay missing.
+//
+// S3 addendum: a per-IP failed-attempt limiter (same Map as requireAuth)
+// now runs BEFORE the key lookup, because every wrong key costs up to 4 DB
+// queries. It adds NO delay, and it does not count missing keys, 403
+// (email not verified) or valid keys.
+const { isAuthFailLimited, recordAuthFail } = require('../middleware/authenticate');
+
 router.get('/verify-key', async (req, res) => {
   try {
     // 1. ������ �� ���� ��� header
@@ -3794,6 +3801,14 @@ router.get('/verify-key', async (req, res) => {
     }
 
     // 2. Find tenant by API key (hash-first with deprecated-plaintext fallback — zero-downtime migration)
+    // S3: shared per-IP failed-attempt limiter, BEFORE any DB lookup (no delay).
+    if (isAuthFailLimited(req)) {
+      return res.status(429).json({
+        valid: false,
+        message: 'Too Many Requests'
+      });
+    }
+
     const { tenant } = await resolveTenantByApiKey(apiKey, {
       id: true,
       isActive: true,
@@ -3802,6 +3817,7 @@ router.get('/verify-key', async (req, res) => {
 
     // 2. Validate tenant
     if (!tenant || !tenant.isActive) {
+      recordAuthFail(req);
       return res.status(401).json({
         valid: false,
         message: 'Invalid or inactive API key'

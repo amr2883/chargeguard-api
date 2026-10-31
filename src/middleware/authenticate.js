@@ -139,6 +139,8 @@ function requireAuth(select, opts = {}) {
 
 module.exports = {
   requireAuth,
+  isAuthFailLimited,
+  recordAuthFail,
   _resetAuthFailLimiterForTests,
   _authFailLimiter: { AUTH_FAIL_WINDOW_MS, AUTH_FAIL_MAX_ATTEMPTS },
 };

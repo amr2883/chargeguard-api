@@ -6,6 +6,7 @@ const router = express.Router();
 const logger = require('../lib/logger');
 const db = require('../lib/db');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
+const { isAuthFailLimited, recordAuthFail } = require('../middleware/authenticate');
 
 const UPDATE_DOWNLOAD_SECRET = process.env.UPDATE_DOWNLOAD_SECRET;
 if (!UPDATE_DOWNLOAD_SECRET) {
@@ -37,11 +38,17 @@ router.get('/info', async (req, res) => {
       return res.status(400).json({ error: 'Missing key parameter' });
     }
 
+    // S3: shared per-IP failed-attempt limiter, BEFORE any DB lookup (no delay).
+    if (isAuthFailLimited(req)) {
+      return res.status(429).json({ error: 'Too Many Requests' });
+    }
+
     const { tenant } = await resolveTenantByApiKey(apiKey, {
       id: true, isActive: true, emailVerified: true, plan: true, subscriptionStatus: true,
     });
 
     if (!tenant || !tenant.isActive) {
+      recordAuthFail(req);
       return res.status(401).json({ error: 'Invalid or inactive API key' });
     }
 
