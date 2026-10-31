@@ -42,6 +42,24 @@ const rateLimit = (req, res, next) => {
   next();
 };
 
+// S5: periodic sweep so entries for keys that never come back (invalid
+// x-api-key headers, one-off IPs) do not accumulate forever. Same pattern
+// as dashboard.js's makeRateLimiter: O(n) per sweep, off the request path,
+// .unref() so the timer never keeps the process alive on its own (matters
+// for graceful shutdown and for Jest, which flags open handles).
+function _privSweep(now) {
+  const t = now || Date.now();
+  for (const [key, rec] of PRIV_RATE) {
+    if (t - rec.firstAt > WINDOW_MS) PRIV_RATE.delete(key);
+  }
+}
+const _privSweepTimer = setInterval(() => _privSweep(), WINDOW_MS);
+if (_privSweepTimer && typeof _privSweepTimer.unref === 'function') _privSweepTimer.unref();
+// Test-only hooks. Not read by production code.
+globalThis.__cgPrivRate = PRIV_RATE;
+globalThis.__cgPrivSweep = _privSweep;
+globalThis.__cgPrivWindowMs = WINDOW_MS;
+
 // ── Auth — grace-period key rejected; erasure must use current key only ───
 const apiKeyAuth = requireAuth(
   { id: true, isActive: true, emailVerified: true },

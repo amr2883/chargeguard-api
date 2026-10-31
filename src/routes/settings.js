@@ -34,6 +34,21 @@ const rateLimit = (req, res, next) => {
   next();
 };
 
+// S5: periodic sweep — see privacy.js for the full rationale. Same pattern:
+// O(n) per sweep, off the request path, .unref() so the timer is harmless.
+function _settingsSweep(now) {
+  const t = now || Date.now();
+  for (const [key, rec] of SETTINGS_RATE) {
+    if (t - rec.firstAt > WINDOW_MS) SETTINGS_RATE.delete(key);
+  }
+}
+const _settingsSweepTimer = setInterval(() => _settingsSweep(), WINDOW_MS);
+if (_settingsSweepTimer && typeof _settingsSweepTimer.unref === 'function') _settingsSweepTimer.unref();
+// Test-only hooks. Not read by production code.
+globalThis.__cgSettingsRate = SETTINGS_RATE;
+globalThis.__cgSettingsSweep = _settingsSweep;
+globalThis.__cgSettingsWindowMs = WINDOW_MS;
+
 // ── Auth Middleware ───────────────────────────────────────────────────────
 const { requireAuth } = require('../middleware/authenticate');
 

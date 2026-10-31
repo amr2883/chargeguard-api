@@ -7,6 +7,8 @@ const prisma = process.env.DATABASE_URL
 
 beforeEach(async () => {
   if (globalThis.__cgAuthFailMap) globalThis.__cgAuthFailMap.clear();
+  if (globalThis.__cgPrivRate) globalThis.__cgPrivRate.clear();
+  if (globalThis.__cgSettingsRate) globalThis.__cgSettingsRate.clear();
   if (!prisma) return;
   assertSafeTestDb();
   try {
