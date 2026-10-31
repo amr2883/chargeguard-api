@@ -6,7 +6,7 @@ const router = express.Router();
 const logger = require('../lib/logger');
 const db = require('../lib/db');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
-const { isAuthFailLimited, recordAuthFail } = require('../middleware/authenticate');
+const { isAuthFailLimited, recordAuthFail, authFailRetryAfterSec } = require('../middleware/authenticate');
 
 const UPDATE_DOWNLOAD_SECRET = process.env.UPDATE_DOWNLOAD_SECRET;
 if (!UPDATE_DOWNLOAD_SECRET) {
@@ -40,6 +40,7 @@ router.get('/info', async (req, res) => {
 
     // S3: shared per-IP failed-attempt limiter, BEFORE any DB lookup (no delay).
     if (isAuthFailLimited(req)) {
+      res.set('Retry-After', String(authFailRetryAfterSec(req)));
       return res.status(429).json({ error: 'Too Many Requests' });
     }
 

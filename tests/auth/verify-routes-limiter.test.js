@@ -73,6 +73,19 @@ describe('S3 failed-attempt limiter on direct-lookup routes', () => {
       const other = await hit(route, '45.1.1.13', 'x');
       expect(other.status).toBe(401);
     });
+
+    it('429 response includes Retry-After header in [1, 60]', async () => {
+      for (let i = 0; i < MAX; i++) {
+        await hit(route, '45.1.2.1', 'bad-' + i);
+      }
+      const res = await hit(route, '45.1.2.1', 'bad-final');
+      expect(res.status).toBe(429);
+      expect(res.headers['retry-after']).toBeDefined();
+      const secs = Number(res.headers['retry-after']);
+      expect(Number.isInteger(secs)).toBe(true);
+      expect(secs).toBeGreaterThanOrEqual(1);
+      expect(secs).toBeLessThanOrEqual(60);
+    });
   });
 
   it('shares one bucket across /verify, /updates/info and /verify-key', async () => {

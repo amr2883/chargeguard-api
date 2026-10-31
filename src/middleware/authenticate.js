@@ -55,6 +55,17 @@ const recordAuthFail = (req) => {
   }
 };
 
+// S6 - Retry-After value in seconds for the S2/S3 429 responses. Per RFC 7231
+// section 7.1.3, the client should wait this many seconds before retrying.
+// Computed from the record's firstAt + WINDOW_MS, clamped to [1, WINDOW_MS/1000]
+// so we never send '0' (retry immediately) or overflow the header value.
+const authFailRetryAfterSec = (req) => {
+  const key = authFailKey(req);
+  const rec = authFailMap.get(key);
+  if (!rec) return Math.ceil(AUTH_FAIL_WINDOW_MS / 1000);
+  const remainingMs = rec.firstAt + AUTH_FAIL_WINDOW_MS - Date.now();
+  return Math.max(1, Math.ceil(remainingMs / 1000));
+};
 const delayedJson = (res, status, body) =>
   setTimeout(() => res.status(status).json(body), AUTH_FAIL_DELAY_MS);
 
@@ -96,6 +107,7 @@ function requireAuth(select, opts = {}) {
     // S2: fail-fast BEFORE any DB lookup. The counter is per-IP and only
     // counts failed attempts; a valid key never increments it.
     if (!opts.skipInternalLimiter && isAuthFailLimited(req)) {
+      res.set('Retry-After', String(authFailRetryAfterSec(req)));
       return res.status(429).json({ error: 'Too Many Requests' });
     }
 
@@ -140,6 +152,7 @@ function requireAuth(select, opts = {}) {
 module.exports = {
   requireAuth,
   isAuthFailLimited,
+  authFailRetryAfterSec,
   recordAuthFail,
   _resetAuthFailLimiterForTests,
   _authFailLimiter: { AUTH_FAIL_WINDOW_MS, AUTH_FAIL_MAX_ATTEMPTS },

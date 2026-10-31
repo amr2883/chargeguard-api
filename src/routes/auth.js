@@ -235,7 +235,7 @@ router.post('/self-test', apiKeyAuth, verifyHmacSignature, async (req, res) => {
 // now runs BEFORE the key lookup, because every wrong key costs up to 4 DB
 // queries. It adds NO delay, and it does not count missing keys, 403
 // (email not verified) or valid keys.
-const { isAuthFailLimited, recordAuthFail } = require('../middleware/authenticate');
+const { isAuthFailLimited, recordAuthFail, authFailRetryAfterSec } = require('../middleware/authenticate');
 
 router.get('/verify', async (req, res) => {
   try {
@@ -247,6 +247,7 @@ router.get('/verify', async (req, res) => {
 
     // S3: shared per-IP failed-attempt limiter, BEFORE any DB lookup (no delay).
     if (isAuthFailLimited(req)) {
+      res.set('Retry-After', String(authFailRetryAfterSec(req)));
       return res.status(429).json({ error: 'Too Many Requests' });
     }
 

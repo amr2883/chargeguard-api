@@ -106,4 +106,21 @@ describe('authenticate fail limiter (S2)', () => {
     expect(res.status).not.toHaveBeenCalledWith(429);
     expect(res.status).toHaveBeenCalledWith(401);
   });
+
+  it('T6: 429 response includes Retry-After header in [1, 60]', async () => {
+    resolveTenantByApiKey.mockResolvedValue({ tenant: null, usedPreviousKey: false });
+    const max = _authFailLimiter.AUTH_FAIL_MAX_ATTEMPTS;
+    for (let i = 0; i < max; i++) {
+      await mw(makeReq('9.9.9.4', 'bad-' + i), makeRes(), jest.fn());
+    }
+    const res = makeRes();
+    await mw(makeReq('9.9.9.4', 'bad-final'), res, jest.fn());
+    expect(res.status).toHaveBeenCalledWith(429);
+    const retryCall = res.set.mock.calls.find(c => c[0] === 'Retry-After');
+    expect(retryCall).toBeDefined();
+    const secs = Number(retryCall[1]);
+    expect(Number.isInteger(secs)).toBe(true);
+    expect(secs).toBeGreaterThanOrEqual(1);
+    expect(secs).toBeLessThanOrEqual(60);
+  });
 });
