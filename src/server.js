@@ -89,4 +89,8 @@ app.listen(PORT, () => {
   // عدّت مدة الاحتفاظ بيها (15 دقيقة). بيتنادى فورًا مرة واحدة عند
   // الإقلاع، وبعدين كل 10 دقايق. من غيره، الجدول هيكبر من غير حد.
   startReplayGuardCleanup();
+
+  // 10) Replay Pending Enrichments (every 2 min) -- re-processes /enrich
+  //     rows whose Order was not yet linked at live-request time.
+  require('./jobs/replayPendingEnrichments').start();
 });
