@@ -10,8 +10,60 @@ const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
 // CWE-208 Observable Timing Discrepancy as the adjacent risk this closes).
 const AUTH_FAIL_DELAY_MS = 200;
 
+// S2 — failed-attempt limiter (per-IP). Purpose: cap the number of auth
+// failures (which each trigger up to 4 DB lookups in resolveTenantByApiKey)
+// that a single IP can produce inside one window, without turning this into
+// a product-level fairness ceiling. Counted only on 401 (invalid/inactive
+// key, or previous-key-rejected). Successful auth and 403 (email not
+// verified) do NOT count. Keyed on req.ip; the deploy prerequisite
+// TRUST-PROXY-VERIFY must be satisfied before shipping this to production.
+const AUTH_FAIL_WINDOW_MS = 60 * 1000;
+const AUTH_FAIL_MAX_ATTEMPTS = 60;
+
+if (!globalThis.__cgAuthFailMap) globalThis.__cgAuthFailMap = new Map();
+const authFailMap = globalThis.__cgAuthFailMap;
+const authFailSweep = setInterval(() => {
+  const now = Date.now();
+  for (const [key, rec] of authFailMap) {
+    if (now - rec.firstAt > AUTH_FAIL_WINDOW_MS) authFailMap.delete(key);
+  }
+}, AUTH_FAIL_WINDOW_MS);
+authFailSweep.unref();
+
+const authFailKey = (req) => req.ip || 'unknown';
+
+const isAuthFailLimited = (req) => {
+  const key = authFailKey(req);
+  const now = Date.now();
+  const rec = authFailMap.get(key);
+  if (!rec) return false;
+  if (now - rec.firstAt > AUTH_FAIL_WINDOW_MS) {
+    authFailMap.delete(key);
+    return false;
+  }
+  return rec.count >= AUTH_FAIL_MAX_ATTEMPTS;
+};
+
+const recordAuthFail = (req) => {
+  const key = authFailKey(req);
+  const now = Date.now();
+  const rec = authFailMap.get(key);
+  if (!rec || now - rec.firstAt > AUTH_FAIL_WINDOW_MS) {
+    authFailMap.set(key, { count: 1, firstAt: now });
+  } else {
+    rec.count++;
+  }
+};
+
 const delayedJson = (res, status, body) =>
   setTimeout(() => res.status(status).json(body), AUTH_FAIL_DELAY_MS);
+
+const delayedAuthFailure = (req, res, status, body) => {
+  recordAuthFail(req);
+  return delayedJson(res, status, body);
+};
+
+const _resetAuthFailLimiterForTests = () => authFailMap.clear();
 
 /**
  * requireAuth(select) — single source of truth for X-Api-Key authentication.
@@ -41,11 +93,17 @@ function requireAuth(select, opts = {}) {
       return res.status(401).json({ error: 'API key is required' });
     }
 
+    // S2: fail-fast BEFORE any DB lookup. The counter is per-IP and only
+    // counts failed attempts; a valid key never increments it.
+    if (!opts.skipInternalLimiter && isAuthFailLimited(req)) {
+      return res.status(429).json({ error: 'Too Many Requests' });
+    }
+
     try {
       const { tenant, usedPreviousKey } = await resolveTenantByApiKey(apiKey, select);
 
       if (!tenant || !tenant.isActive) {
-        return delayedJson(res, 401, { error: 'Invalid or inactive API key' });
+        return delayedAuthFailure(req, res, 401, { error: 'Invalid or inactive API key' });
       }
 
       if (!tenant.emailVerified && process.env.EMAIL_VERIFICATION_DISABLED !== 'true') {
@@ -59,7 +117,7 @@ function requireAuth(select, opts = {}) {
         // N51: this route does not accept the grace-period (previous) key. The response is
         // identical to an invalid key, so it does not reveal that the key was once valid.
         logger.warn({ module: 'authenticate', tenantId: tenant.id }, 'Previous (grace-period) API key rejected on a route that does not accept it');
-        return delayedJson(res, 401, { error: 'Invalid or inactive API key' });
+        return delayedAuthFailure(req, res, 401, { error: 'Invalid or inactive API key' });
       }
 
       if (usedPreviousKey) {
@@ -79,4 +137,8 @@ function requireAuth(select, opts = {}) {
   };
 }
 
-module.exports = { requireAuth };
+module.exports = {
+  requireAuth,
+  _resetAuthFailLimiterForTests,
+  _authFailLimiter: { AUTH_FAIL_WINDOW_MS, AUTH_FAIL_MAX_ATTEMPTS },
+};
