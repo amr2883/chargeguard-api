@@ -1,5 +1,10 @@
 require('dotenv').config();
 
+// S4: crash handlers registered BEFORE require('./app') so module-load-time throws are covered.
+const logger = require('./lib/logger');
+const { installCrashHandlers, installShutdownHandler } = require('./lib/lifecycle');
+installCrashHandlers({ logger });
+
 // MOCK1: refuse to start in production when MOCK_IP_INTEL=true (see src/lib/startupGuards.js).
 // Guard runs before require('./app') so we fail fast without loading routes/middleware.
 const { enforceProductionGuards } = require('./lib/startupGuards');
@@ -12,6 +17,7 @@ try {
 
 const app = require('./app');
 const { PrismaClient } = require('@prisma/client');
+const db = require('./lib/db');
 
 const { runFastCleanup, runDailyRetention } = require('./lib/retention');
 const { startAttackAlertScheduler } = require('./lib/attackAlertScheduler');
@@ -26,7 +32,7 @@ const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const DAILY_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 const prismaForCleanup = new PrismaClient();
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`?? Server running on http://localhost:${PORT}`);
 
   // ?? 1) Fast cleanup (every 10 min) ? blocked orders, expired blacklist, stale pending
@@ -94,3 +100,10 @@ app.listen(PORT, () => {
   //     rows whose Order was not yet linked at live-request time.
   require('./jobs/replayPendingEnrichments').start();
 });
+
+// S4: graceful shutdown on Render SIGTERM (30s budget) / Ctrl+C.
+// server.close waits for in-flight HTTP requests; the 25s force-exit timer
+// guards against a hung close (keep-alive connections).
+const shutdown = installShutdownHandler({ server, clients: [prismaForCleanup, db], logger, timeoutMs: 25000 });
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
