@@ -301,8 +301,11 @@ const cleanupExpiredSessions = async (db) => {
   const now = new Date();
 
   // نحذف الجلسات التي:
-  // 1. انتهت صلاحيتها (expiresAt < now) وحالتها pending
-  // 2. أو مضى عليها أكثر من 24 ساعة بأي حالة (completed/failed/expired)
+  // 1. pending وانتهت صلاحيتها من أكثر من 24 ساعة. المهلة دي بتسيب نافذة للدفع
+  //    المتأخر: الـ webhook بيفعّل أي جلسة pending لسه موجودة حتى لو expiresAt عدّى.
+  // 2. أو مضى عليها أكثر من 24 ساعة بحالة completed/failed/expired وملهاش Payment.
+  //    الجلسة اللي عليها Payment ما بتتحذفش: FK الـ Payment على الجلسة Restrict،
+  //    فمحاولة حذفها كانت بتفشّل الـ statement كله وتعطّل حذف باقي الجلسات.
   const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
 
   try {
@@ -311,11 +314,12 @@ const cleanupExpiredSessions = async (db) => {
         OR: [
           {
             status:    'pending',
-            expiresAt: { lte: now },
+            expiresAt: { lte: oneDayAgo },
           },
           {
             status:    { in: ['completed', 'failed', 'expired'] },
             createdAt: { lte: oneDayAgo },
+            payment:   null,
           },
         ],
       },

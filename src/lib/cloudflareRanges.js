@@ -14,7 +14,9 @@ const logger = require('./logger');
 const CF_IPV4_URL = 'https://www.cloudflare.com/ips-v4';
 const CF_IPV6_URL = 'https://www.cloudflare.com/ips-v6';
 const REFRESH_INTERVAL_MS = 24 * 60 * 60 * 1000; // daily
-const FETCH_TIMEOUT_MS = 10_000;
+const FETCH_TIMEOUT_MS = 30_000; // Render Free: outbound network can be slow right after boot
+const STARTUP_RETRY_DELAY_MS = 20_000;
+const STARTUP_MAX_ATTEMPTS = 3;
 
 // Hardcoded fallback — used only until the first successful fetch
 // completes (e.g. immediately after a fresh deploy/restart), or if every
@@ -105,14 +107,41 @@ function getCloudflareRangesMeta() {
 // — nothing in the request path awaits this), then daily thereafter.
 // Skipped under jest: tests must not hit cloudflare.com at import time (the
 // hardcoded FALLBACK_RANGES stay in effect). Same pattern as emailIntelligence.js.
-if (process.env.NODE_ENV !== 'test') {
-  refreshCloudflareRanges();
+/**
+ * First fetch at startup. On Render Free the outbound network is sometimes not
+ * ready right after boot, so a failed attempt is retried (retryDelayMs apart,
+ * up to maxAttempts) and the loop stops at the first success. Attempts never
+ * overlap because each one is awaited. Never throws.
+ */
+async function bootRefresh({ retryDelayMs = STARTUP_RETRY_DELAY_MS, maxAttempts = STARTUP_MAX_ATTEMPTS } = {}) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    await refreshCloudflareRanges();
+    if (lastFetchSucceeded) return true;
+    if (attempt < maxAttempts) {
+      logger.warn({ module: 'cloudflareRanges', attempt, maxAttempts }, 'Cloudflare IP range fetch not successful yet - retrying');
+      await new Promise((resolve) => {
+        const handle = setTimeout(resolve, retryDelayMs);
+        if (typeof handle.unref === 'function') handle.unref();
+      });
+    }
+  }
+  return false;
+}
+
+function startCloudflareRangesRefresh() {
+  bootRefresh();
   const intervalHandle = setInterval(refreshCloudflareRanges, REFRESH_INTERVAL_MS);
   if (typeof intervalHandle.unref === 'function') intervalHandle.unref();
+}
+
+if (process.env.NODE_ENV !== 'test') {
+  startCloudflareRangesRefresh();
 }
 
 module.exports = {
   getCloudflareRanges,
   getCloudflareRangesMeta,
   refreshCloudflareRanges,
+  bootRefresh,
+  startCloudflareRangesRefresh,
 };

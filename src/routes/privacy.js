@@ -15,6 +15,7 @@ const router  = express.Router();
 const db      = require('../lib/db');
 const logger  = require('../lib/logger');
 const { requireAuth } = require('../middleware/authenticate');
+const { normalizeEmail } = require('../lib/utils');
 
 // ── Rate limiter: 5 req / hour per API key ────────────────────────────────
 // GDPR erasure requests are rare; a low cap prevents automated bulk abuse
@@ -47,11 +48,15 @@ const apiKeyAuth = requireAuth(
   { allowPreviousKey: false }
 );
 
-// ── Email normalisation (kept in sync with risk.js / auth.js) ─────────────
-// We query Order.normalizedEmail so the input must go through the same
-// normalisation pipeline used at write time: lowercase, trim, strip plus-tag.
-const normalizeEmail = (email) =>
-  email.toLowerCase().trim().replace(/\+[^@]*(?=@)/, '');
+// Email helpers. normalizeEmail (imported above) is the SAME function risk.js
+// uses when it writes Order.normalizedEmail, so the lookup key always matches
+// the stored key (NFKC, homoglyphs, domain aliases, +tag, gmail dots).
+const EMAIL_SHAPE = /^[^@\s]+@[^@\s]+$/;
+
+// Prisma sends `equals` + mode:'insensitive' to PostgreSQL as ILIKE with the
+// value unescaped, so _ and % in a customer's address would act as wildcards
+// and could erase other customers' rows. Escape them (and the escape char).
+const escapeLike = (s) => s.replace(/[\\%_]/g, '\\$&');
 
 // ── DELETE /api/privacy/erase ─────────────────────────────────────────────
 router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
@@ -60,11 +65,25 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
     ? req.body.email.trim()
     : '';
 
-  if (!rawEmail || !rawEmail.includes('@')) {
+  if (!rawEmail || !EMAIL_SHAPE.test(rawEmail)) {
     return res.status(400).json({ error: 'email is required' });
   }
 
-  const normEmail = normalizeEmail(rawEmail);
+  // The shared normaliser is stricter than the old local one. Never let a
+  // throw or an empty result reach the query: an empty key could match
+  // unrelated rows, so reject instead.
+  let normEmail = '';
+  try {
+    normEmail = normalizeEmail(rawEmail);
+  } catch (_) {
+    normEmail = '';
+  }
+  if (typeof normEmail !== 'string' || !EMAIL_SHAPE.test(normEmail)) {
+    return res.status(400).json({ error: 'a valid email is required' });
+  }
+
+  // _ and % are escaped so they match literally (see escapeLike).
+  const likeEmail = escapeLike(rawEmail);
 
   try {
     // 1. Null PII on every Order row for this tenant + customer.
@@ -72,22 +91,33 @@ router.delete('/erase', rateLimit, apiKeyAuth, async (req, res) => {
     //    business record under GDPR Article 17(3)(b). Only the personal
     //    identifiers are cleared.
     const orderUpdate = await db.order.updateMany({
-      where: { merchantId: tenantId, normalizedEmail: normEmail },
+      where: {
+        merchantId: tenantId,
+        OR: [
+          { normalizedEmail: normEmail },
+          { email: { equals: likeEmail, mode: 'insensitive' } },
+        ],
+      },
       data: {
         email:              null,
         normalizedEmail:    null,
         ipAddress:          null,
+        customerLoginId:    null,
         deviceFingerprint:  null,
         fingerprintVersion: null,
         fingerprintStatus:  null,
+        signalsSnapshot:    null,
       },
     });
 
     // 2. Delete ChallengeVerification rows.
-    //    Email is stored in plaintext as the challenge lookup key — no
-    //    normalisation needed, exact-match delete is correct and complete.
+    //    Stored exactly as the shopper typed it at checkout (no trim or
+    //    lowercase), so match case-insensitively. Scoped to this tenant only.
     const challengeDelete = await db.challengeVerification.deleteMany({
-      where: { merchantId: tenantId, email: rawEmail },
+      where: {
+        merchantId: tenantId,
+        email: { equals: likeEmail, mode: 'insensitive' },
+      },
     });
 
     logger.info(

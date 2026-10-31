@@ -9,5 +9,10 @@ paths = [
   '''duplicate_file_audit\.csv$''',
   '''vendor/stripe/stripe-php/README\.md$''',
   '''vendor/stripe-php/README\.md$''',
+]
+
+[[allowlists]]
+description = "Self-signed dev TLS key for chargeguard.local (CN=chargeguard.local, RSA-2048, matches its self-signed cert, not served on any public domain). This IS a real private key, allowlisted because it is dev-only. Do not reuse it anywhere."
+paths = [
   '''nginx/ssl/chargeguard\.key$''',
 ]

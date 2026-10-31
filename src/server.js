@@ -1,5 +1,15 @@
 require('dotenv').config();
 
+// MOCK1: refuse to start in production when MOCK_IP_INTEL=true (see src/lib/startupGuards.js).
+// Guard runs before require('./app') so we fail fast without loading routes/middleware.
+const { enforceProductionGuards } = require('./lib/startupGuards');
+try {
+  enforceProductionGuards();
+} catch (err) {
+  console.error('FATAL:', err.message);
+  process.exit(1);
+}
+
 const app = require('./app');
 const { PrismaClient } = require('@prisma/client');
 
@@ -32,7 +42,7 @@ app.listen(PORT, () => {
     console.log(`[${new Date().toISOString()}] ?? Retention config (days):`, RETENTION);
     runDailyRetention();
     setInterval(runDailyRetention, DAILY_RETENTION_MS);
-  }, 5 * 60 * 1000); // ??? 5 ????? ?? ??? ?????? (???? ?????? ??? ???????????)
+  }, 5 * 60 * 1000); // 5 min after startup — lets all schedulers register before retention runs
 
   // ?? 3) Keep-alive self-ping (every 14 min) ????????????????????
   const KEEP_ALIVE_MS = 14 * 60 * 1000;
@@ -79,4 +89,8 @@ app.listen(PORT, () => {
   // عدّت مدة الاحتفاظ بيها (15 دقيقة). بيتنادى فورًا مرة واحدة عند
   // الإقلاع، وبعدين كل 10 دقايق. من غيره، الجدول هيكبر من غير حد.
   startReplayGuardCleanup();
+
+  // 10) Replay Pending Enrichments (every 2 min) -- re-processes /enrich
+  //     rows whose Order was not yet linked at live-request time.
+  require('./jobs/replayPendingEnrichments').start();
 });

@@ -412,7 +412,7 @@ describe('Scheduler — Phase 4 (cleanup)', () => {
       where: {
         OR: [
           { status: 'pending', expiresAt: { lte: expect.any(Date) } },
-          { status: { in: ['completed', 'failed', 'expired'] }, createdAt: { lte: expect.any(Date) } },
+          { status: { in: ['completed', 'failed', 'expired'] }, createdAt: { lte: expect.any(Date) }, payment: null },
         ],
       },
     });

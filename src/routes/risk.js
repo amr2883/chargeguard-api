@@ -1,4 +1,4 @@
-﻿const crypto = require('crypto');
+const crypto = require('crypto');
 
 // ?? IP Hashing (GDPR-safe) ????????????????????????????????????????????????
 const RISK_SECRET_SALT = process.env.SECRET_SALT;
@@ -1341,8 +1341,8 @@ router.post('/evaluate', apiKeyAuth, domainAuthMiddlewareWithAutoRegister, verif
       ]);
     }
 
-    // ����� ��� ����� ��� computedSignals (���� ������� ��� riskScoring ������)
-    // ����� ��������� ������ �� signalsSnapshot
+    // Build the computedSignals object passed to riskScoring
+    // (also persisted verbatim as signalsSnapshot)
 
     // ��� �������� ������� (��� 90 ���)
     // [Undefined-OR fix] Prisma بتتجاهل أي مفتاح قيمته undefined، فـ
@@ -3422,10 +3422,10 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
     // ── End Quota Status ──────────────────────────────────────────────────
 
 
-    // 1. ����� �� ����� �������
+    // 1. Check if this order already exists
     const existingOrder = await findOrderByBusinessKey(db, { merchantId, storeId: req.storeId ?? null, orderId });
 
-    // 2. ��� �� ���� ����ȡ ���� pending enrichment
+    // 2. If not found, create a pending enrichment record
     if (!existingOrder) {
       await db.pendingEnrichment.create({
         data: {
@@ -3493,7 +3493,7 @@ router.post('/enrich', apiKeyAuth, domainAuthMiddleware, verifyHmacSignature, as
 
 router.post('/tenants/register', async (req, res) => {
       // ?? Rate Limiting (Persistent DB) ????????????????????????????????????????
-  const ip = req.ip || req.connection.remoteAddress;
+  const ip = req.ip || req.socket?.remoteAddress;
   const ipHash = hashIp(ip);
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
   const MAX_ATTEMPTS = 5;
@@ -3550,7 +3550,7 @@ router.post('/tenants/register', async (req, res) => {
             body: new URLSearchParams({
               secret:   process.env.TURNSTILE_SECRET_KEY,
               response: turnstileToken,
-              remoteip: req.ip || req.connection.remoteAddress
+              remoteip: req.ip || req.socket?.remoteAddress
             })
           }
         );
@@ -3585,17 +3585,29 @@ router.post('/tenants/register', async (req, res) => {
 
 
   try {
-    const { email, storeUrl } = req.body;
+    const { email: rawEmail, storeUrl } = req.body;
 
+    // REG-NONSTRING-EMAIL: guard before .includes (non-string throws TypeError -> 500)
+    if (typeof rawEmail !== 'string') {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
 
-
+    // REG-EMAIL: normalize at storage time (trim + lowercase only -- NOT normalizeEmail,
+    // which strips +tags and gmail dots and would change the delivery address).
+    const email = rawEmail.trim().toLowerCase();
     if (!email || !email.includes('@')) {
       return res.status(400).json({ error: 'Valid email is required' });
     }
 
-    // Check if tenant already exists
-    const existing = await db.tenant.findUnique({ where: { email } });
-    if (existing) {
+    // REG-EMAIL: case-insensitive duplicate check. Tenant.email @unique is
+    // case-sensitive (schema.prisma:14), so findUnique({ email }) missed rows
+    // registered with different casing. Match on lower(email) with bound
+    // parameters -- same pattern as resend-verification in auth.js.
+    const existingRows = await db.$queryRaw`
+      SELECT "id" FROM "Tenant"
+      WHERE lower("email") = lower(${email}::text)
+      LIMIT 1`;
+    if (existingRows.length > 0) {
       return res.status(400).json({ error: 'Email already registered' });
     }
 

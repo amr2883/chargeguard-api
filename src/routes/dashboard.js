@@ -2,7 +2,8 @@
 
 const express = require('express');
 const router  = express.Router();
-const { PrismaClient } = require('@prisma/client');
+// DASH-PRISMA-FIXED: use shared singleton from lib/db (avoids dual connection pool)
+const db = require('../lib/db');
 const { getBINStats, THRESHOLDS } = require('../lib/binSequenceDetector');
 const { getProtectionStatus, getProtectionLayers } = require('../lib/protectionStatus');
 const { resolveTenantByApiKey } = require('../lib/apiKeyAuth');
@@ -10,7 +11,7 @@ const { hashApiKey } = require('../lib/apiKeyHash');
 const { isProOrAbove, isAgency } = require('../lib/planAccess');
 const logger = require('../lib/logger');
 
-const prisma = new PrismaClient();
+const prisma = db; // DASH-PRISMA-FIXED: was new PrismaClient() — now uses shared pool
 
 // ── Store filter resolution ────────────────────────────────────────────
 // Single source of truth for validating a client-supplied ?storeId=.
@@ -3368,9 +3369,12 @@ router.get('/orders/export.csv', authByApiKey, exportRateLimit, async (req, res)
       },
     });
 
-    const escapeCsv = (val) => {
+    const escapeCsv = (val) => { // CSV-INJECT-FIXED
       if (val === null || val === undefined) return '';
-      const s = String(val);
+      let s = String(val);
+      // Formula injection prevention (OWASP CSV injection)
+      // CSV-NUMERIC-GUARD: skip formula prefix for numeric values (amounts, scores)
+      if (typeof val !== 'number' && /^[=+\-@\t\r]/.test(s)) s = '\'' + s;
       return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
     };
 

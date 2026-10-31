@@ -12,13 +12,13 @@ const { safeErrorPayload } = require('./lib/errorResponse');
 const app = express();
 app.set('trust proxy', 2);
 
-// TEMPORARY â€” remove after test
+// TEMPORARY — remove after test
 
 
 // Middlewares
 app.use((req, res, next) => {
   if (req.path.startsWith('/admin')) {
-    // CSP disabled here only â€” the admin panel's inline <script> predates
+    // CSP disabled here only — the admin panel's inline <script> predates
     // helmet's default policy, and this route is already protected by the
     // x-admin-key header auth + per-IP rate limiting in routes/admin.js.
     // Every other route keeps the full default helmet() policy unchanged.
@@ -88,51 +88,39 @@ app.use('/api/payments',  paymentsRoutes);
 app.use('/api/stores',    require('./routes/stores'));
 app.use('/api/updates',   updatesRoutes);
 app.use('/api/privacy',   require('./routes/privacy'));
-// Morgan ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ /admin ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½ ï؟½ï؟½ï؟½ secret ï؟½ï؟½ ï؟½ï؟½ï؟½ï؟½ï؟½
+// Morgan logging is skipped for /admin routes — admin-key auth is enforced in routes/admin.js
 app.use('/admin', (req, res, next) => {
   req.skipMorgan = true;
   next();
 }, adminRoutes);
 
 app.use(express.static(path.join(__dirname, 'public')));
-// ?? Global error handler ? MUST be after all routes ??????????
-app.use((err, req, res, next) => {
-  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
-    // Unchanged: forwarded to Express's built-in final handler. This path
-    // only fires for errors thrown before that route's own try/catch could
-    // run (e.g. a raw-body-parsing failure upstream) â€” Express's default
-    // handler still responds with a 5xx status, which is all the plugin's
-    // circuit breaker (class-api-client.php) actually inspects.
-    return next(err);
-  }
-  // Full detail (message + stack) goes to the structured logger only â€”
-  // never to the client. safeErrorPayload() returns a generic
-  // { error: 'Internal server error' } in production, and only reveals
-  // err.message/err.stack when NODE_ENV === 'development' or
-  // DEBUG_ERRORS=true (see lib/errorResponse.js).
-  logger.error({ module: 'app', path: String(req.originalUrl || '').split('?')[0], error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
-  res.status(500).json(safeErrorPayload(err));
-});
 
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', service: 'ChargeGuard WooCommerce Backend' });
 });
 // /metrics: closed unless METRICS_TOKEN is set; Bearer auth, constant-time compare.
-app.get('/metrics', async (req, res) => {
-  const expected = process.env.METRICS_TOKEN;
-  if (!expected) return res.status(404).end();
-  const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
-  const a = Buffer.from(m ? m[1] : '', 'utf8');
-  const b = Buffer.from(expected, 'utf8');
-  if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).end();
+app.get('/metrics', async (req, res, next) => {
+  try {
+    const expected = process.env.METRICS_TOKEN;
+    if (!expected) return res.status(404).end();
+    const m = /^Bearer (.+)$/.exec(req.headers.authorization || '');
+    const a = Buffer.from(m ? m[1] : '', 'utf8');
+    const b = Buffer.from(expected, 'utf8');
+    if (!m || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      return res.status(401).end();
+    }
+    // C2d: await first, set headers after, so a rejection reaches the error handler with Content-Type unset.
+    const metricsBody = await prometheus.registry.metrics();
+    res.set('Content-Type', prometheus.registry.contentType);
+    res.end(metricsBody);
+  } catch (err) {
+    next(err);
   }
-  res.set('Content-Type', prometheus.registry.contentType);
-  res.end(await prometheus.registry.metrics());
 });
 
 // ============================================================
-//  ???? GET ?????? ??????? ???????? ?????? ?????? ????????
+//  GET /api/retention-config — returns current retention policy, public read-only
 // ============================================================
 app.get('/api/retention-config', (req, res) => {
   const { RETENTION } = require('./lib/retention');
@@ -151,12 +139,46 @@ app.get('/api/ping', (req, res) => {
   res.json({ success: true, status: 'alive', timestamp: new Date().toISOString() });
 });
 
+// 404 — catch-all for unmatched routes (must come after all routes)
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// Global error handler — MUST be registered after all routes and middleware
+app.use((err, req, res, next) => {
+  if (req.originalUrl === '/api/risk/woocommerce-webhook') {
+    // Unchanged: forwarded to Express's built-in final handler. This path
+    // only fires for errors thrown before that route's own try/catch could
+    // run (e.g. a raw-body-parsing failure upstream) — Express's default
+    // handler still responds with a 5xx status, which is all the plugin's
+    // circuit breaker (class-api-client.php) actually inspects.
+    return next(err);
+  }
+  // Full detail (message + stack) goes to the structured logger only —
+  // never to the client. safeErrorPayload() returns a generic
+  // { error: 'Internal server error' } in production, and only reveals
+  // err.message/err.stack when NODE_ENV === 'development' or
+  // DEBUG_ERRORS=true (see lib/errorResponse.js).
+  // C2b: honour a client-error status (body-parser 400/413/415) but only inside 400-599;
+  // anything else (undefined, non-integer, 2xx/3xx) is treated as an unexpected 500.
+  const status = (err && Number.isInteger(err.status) && err.status >= 400 && err.status <= 599) ? err.status : 500;
+  const logPath = String(req.originalUrl || '').split('?')[0];
+  if (status < 500) {
+    // Client fault: warn-level log, generic body (never err.message or err.stack).
+    logger.warn({ module: 'app', path: logPath, status, error: err.message }, 'Request rejected with a client error');
+    const CLIENT_MESSAGES = { 400: 'Bad request', 413: 'Payload too large', 415: 'Unsupported media type' };
+    return res.status(status).json({ error: CLIENT_MESSAGES[status] || 'Request error' });
+  }
+  logger.error({ module: 'app', path: logPath, error: err.message, stack: err.stack }, 'Global error handler caught an unhandled error');
+  res.status(status).json(safeErrorPayload(err));
+});
+
 // app.js intentionally does NOT call app.listen(). This file only builds
 // and exports the configured Express app. The single, authoritative entry
 // point that starts the HTTP server AND registers every scheduler
 // (monthlyReportScheduler, subscriptionScheduler, etc.) is src/server.js.
 // Calling listen() here too previously caused a duplicate bind attempt on
-// the same port within the same process â€” visible in production logs as
+// the same port within the same process — visible in production logs as
 // the "Server running" line printing twice.
 module.exports = app;
 
